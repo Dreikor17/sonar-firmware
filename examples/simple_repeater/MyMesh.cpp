@@ -666,6 +666,16 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
 
 int MyMesh::searchPeersByHash(const uint8_t *hash) {
   int n = 0;
+#if defined(WITH_MQTT_NEIGHBORS)
+  if (neighbor_discover_active) {
+    for (int i = 0; i < neighbor_discover_count && n < MAX_CLIENTS; i++) {
+      auto& nb = neighbours[neighbor_discover[i].neighbour_idx];
+      if (nb.heard_timestamp > 0 && nb.id.isHashMatch(hash)) {
+        matching_peer_indexes[n++] = NEIGHBOR_DISCOVER_PEER_BASE + i;
+      }
+    }
+  }
+#endif
   for (int i = 0; i < acl.getNumClients(); i++) {
     if (acl.getClientByIdx(i)->id.isHashMatch(hash)) {
       matching_peer_indexes[n++] = i; // store the INDEXES of matching contacts (for subsequent 'peer' methods)
@@ -676,6 +686,15 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
 
 void MyMesh::getPeerSharedSecret(uint8_t *dest_secret, int peer_idx) {
   int i = matching_peer_indexes[peer_idx];
+#if defined(WITH_MQTT_NEIGHBORS)
+  if (neighbor_discover_active && i >= NEIGHBOR_DISCOVER_PEER_BASE) {
+    int oi = i - NEIGHBOR_DISCOVER_PEER_BASE;
+    if (oi >= 0 && oi < neighbor_discover_count) {
+      self_id.calcSharedSecret(dest_secret, neighbours[neighbor_discover[oi].neighbour_idx].id);
+      return;
+    }
+  }
+#endif
   if (i >= 0 && i < acl.getNumClients()) {
     // lookup pre-calculated shared_secret
     memcpy(dest_secret, acl.getClientByIdx(i)->shared_secret, PUB_KEY_SIZE);
@@ -707,6 +726,15 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
 void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, const uint8_t *secret,
                             uint8_t *data, size_t len) {
   int i = matching_peer_indexes[sender_idx];
+#if defined(WITH_MQTT_NEIGHBORS)
+  if (neighbor_discover_active && i >= NEIGHBOR_DISCOVER_PEER_BASE) {
+    int oi = i - NEIGHBOR_DISCOVER_PEER_BASE;
+    if (type == PAYLOAD_TYPE_RESPONSE && oi >= 0 && oi < neighbor_discover_count) {
+      handleNeighborDiscoverResponse(oi, data, len);
+    }
+    return;
+  }
+#endif
   if (i < 0 || i >= acl.getNumClients()) { // get from our known_clients table (sender SHOULD already be known in this context)
     MESH_DEBUG_PRINTLN("onPeerDataRecv: invalid peer idx: %d", i);
     return;
@@ -985,6 +1013,14 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   pending_discover_tag = 0;
   pending_discover_until = 0;
+
+#if defined(WITH_MQTT_NEIGHBORS)
+  neighbor_discover_count = 0;
+  neighbor_discover_active = false;
+  neighbor_discover_until = 0;
+  next_neighbors_publish = 0;
+  self_scopes_buf[0] = 0;
+#endif
 
   memset(default_scope.key, 0, sizeof(default_scope.key));
 }
@@ -1390,6 +1426,19 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+#if defined(WITH_MQTT_NEIGHBORS)
+  } else if (memcmp(command, "discover.scopes", 15) == 0) {
+    const char* sub = command + 15;
+    while (*sub == ' ') sub++;
+    if (*sub != 0) {
+      strcpy(reply, "Err - discover.scopes has no options");
+    } else if (!startNeighborDiscover(reply)) {
+      // reply already set
+    }
+#elif defined(WITH_MQTT_BRIDGE)
+  } else if (memcmp(command, "discover.scopes", 15) == 0) {
+    strcpy(reply, "Err - not supported (requires PSRAM)");
+#endif
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
   }
@@ -1462,6 +1511,20 @@ void MyMesh::loop() {
   _alerter.onLoop(now);
 #endif
 
+#if defined(WITH_MQTT_NEIGHBORS)
+  if (neighbor_discover_active) {
+    loopNeighborDiscover();
+  } else if (_cli.getObserverPrefs()->mqtt_neighbors_enabled && bridge && bridge->isRunning()) {
+    if (next_neighbors_publish == 0 ||
+        (next_neighbors_publish != 0 && millisHasNowPassed(next_neighbors_publish))) {
+      char tmp_reply[80];
+      if (startNeighborDiscover(tmp_reply)) {
+        MESH_DEBUG_PRINTLN("%s", tmp_reply);
+      }
+    }
+  }
+#endif
+
 #ifdef WITH_SNMP
   // Push radio stats to SNMP agent every 2 seconds
   if (_snmp_agent.isRunning()) {
@@ -1481,6 +1544,193 @@ void MyMesh::loop() {
   }
 #endif
 }
+
+#if defined(WITH_MQTT_NEIGHBORS)
+
+#include "helpers/MQTTMessageBuilder.h"
+#if defined(ESP_PLATFORM)
+#include <esp_heap_caps.h>
+#endif
+
+void MyMesh::getLocalScopes(char* buf, size_t len) {
+  if (!buf || len == 0) return;
+  buf[0] = 0;
+  region_map.exportNamesTo(buf, (int)len, REGION_DENY_FLOOD);
+}
+
+bool MyMesh::sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag) {
+  uint8_t secret[PUB_KEY_SIZE];
+  self_id.calcSharedSecret(secret, target);
+
+  tag = getRTCClock()->getCurrentTimeUnique();
+  uint8_t inner[6];
+  memcpy(inner, &tag, 4);
+  inner[4] = 0x01; // ANON_REQ_TYPE_REGIONS
+  inner[5] = 0x00; // zero-hop reply path
+
+  mesh::Packet* pkt = createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, self_id, target, secret, inner, sizeof(inner));
+  if (!pkt) return false;
+  sendDirect(pkt, NULL, 0, 0);
+  return true;
+}
+
+void MyMesh::handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len) {
+  if (overlay_idx < 0 || overlay_idx >= neighbor_discover_count) return;
+  NeighborDiscoverEntry& entry = neighbor_discover[overlay_idx];
+  if (entry.status != ND_PENDING || len < 8) return;
+
+  uint32_t tag;
+  memcpy(&tag, data, 4);
+  if (tag != entry.tag) return;
+
+  size_t scope_len = len - 8;
+  if (scope_len >= sizeof(entry.scopes)) {
+    scope_len = sizeof(entry.scopes) - 1;
+  }
+  memcpy(entry.scopes, &data[8], scope_len);
+  entry.scopes[scope_len] = 0;
+  entry.status = ND_RESPONDED;
+}
+
+void MyMesh::finishNeighborDiscover() {
+  getLocalScopes(self_scopes_buf, sizeof(self_scopes_buf));
+
+  char self_pubkey_hex[65];
+  mesh::Utils::toHex(self_pubkey_hex, self_id.pub_key, PUB_KEY_SIZE);
+
+  char origin[32];
+  MQTTBridge::getEffectiveMqttOrigin(&_prefs, _cli.getObserverPrefs(), origin, sizeof(origin));
+
+  char timestamp[40];
+  MQTTMessageBuilder::formatIsoTimestampForMqtt(getRTCClock()->getCurrentTime(), 0, nullptr, timestamp, sizeof(timestamp));
+
+  char pubkey_hex[MAX_NEIGHBOURS][65];
+  MQTTMessageBuilder::NeighborsMessageEntry entries[MAX_NEIGHBOURS];
+  uint32_t now_secs = getRTCClock()->getCurrentTime();
+
+  for (int i = 0; i < neighbor_discover_count; i++) {
+    auto& nb = neighbours[neighbor_discover[i].neighbour_idx];
+    mesh::Utils::toHex(pubkey_hex[i], nb.id.pub_key, PUB_KEY_SIZE);
+    entries[i].pubkey_hex = pubkey_hex[i];
+    entries[i].snr = nb.snr / 4.0f;
+    entries[i].heard_secs_ago = (nb.heard_timestamp > 0 && now_secs >= nb.heard_timestamp)
+      ? (now_secs - nb.heard_timestamp) : 0;
+    entries[i].scopes = neighbor_discover[i].scopes;
+    switch (neighbor_discover[i].status) {
+      case ND_RESPONDED: entries[i].status = "responded"; break;
+      case ND_SEND_FAILED: entries[i].status = "send_failed"; break;
+      default: entries[i].status = "timeout"; break;
+    }
+  }
+
+#if defined(ESP_PLATFORM)
+  char* json_buf = (char*)heap_caps_malloc(MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE, MALLOC_CAP_SPIRAM);
+#else
+  char* json_buf = (char*)malloc(MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE);
+#endif
+  if (!json_buf) {
+    neighbor_discover_active = false;
+    neighbor_discover_count = 0;
+    if (_cli.getObserverPrefs()->mqtt_neighbors_enabled) {
+      next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
+    }
+    return;
+  }
+
+  DynamicJsonDocument doc(MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE);
+  int json_len = MQTTMessageBuilder::buildNeighborsMessage(
+    doc, origin, self_pubkey_hex, timestamp, self_scopes_buf,
+    entries, neighbor_discover_count,
+    json_buf, MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE);
+
+  if (json_len > 0 && bridge) {
+    bridge->requestPublishNeighbors(json_buf, (size_t)json_len);
+  }
+
+#if defined(ESP_PLATFORM)
+  heap_caps_free(json_buf);
+#else
+  free(json_buf);
+#endif
+
+  neighbor_discover_active = false;
+  neighbor_discover_count = 0;
+  if (_cli.getObserverPrefs()->mqtt_neighbors_enabled) {
+    next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
+  }
+}
+
+void MyMesh::loopNeighborDiscover() {
+  if (!neighbor_discover_active) return;
+
+  bool all_done = true;
+  for (int i = 0; i < neighbor_discover_count; i++) {
+    if (neighbor_discover[i].status == ND_PENDING) {
+      all_done = false;
+      break;
+    }
+  }
+
+  if (!all_done && !millisHasNowPassed(neighbor_discover_until)) {
+    return;
+  }
+
+  if (!all_done) {
+    for (int i = 0; i < neighbor_discover_count; i++) {
+      if (neighbor_discover[i].status == ND_PENDING) {
+        neighbor_discover[i].status = ND_TIMEOUT;
+      }
+    }
+  }
+  finishNeighborDiscover();
+}
+
+bool MyMesh::startNeighborDiscover(char* reply) {
+  if (neighbor_discover_active) {
+    strcpy(reply, "Err - neighbor discover already active");
+    return false;
+  }
+#if defined(ESP_PLATFORM)
+  if (!psramFound()) {
+    strcpy(reply, "Err - PSRAM not available");
+    return false;
+  }
+#endif
+  if (!bridge || !bridge->isRunning()) {
+    strcpy(reply, "Err - MQTT bridge not running");
+    return false;
+  }
+
+  getLocalScopes(self_scopes_buf, sizeof(self_scopes_buf));
+  neighbor_discover_count = 0;
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (neighbours[i].heard_timestamp > 0) {
+      neighbor_discover[neighbor_discover_count].neighbour_idx = (uint8_t)i;
+      neighbor_discover[neighbor_discover_count].scopes[0] = 0;
+      neighbor_discover[neighbor_discover_count].status = ND_PENDING;
+      uint32_t tag;
+      if (sendAnonRegionsReq(neighbours[i].id, tag)) {
+        neighbor_discover[neighbor_discover_count].tag = tag;
+      } else {
+        neighbor_discover[neighbor_discover_count].status = ND_SEND_FAILED;
+      }
+      neighbor_discover_count++;
+    }
+  }
+
+  neighbor_discover_active = true;
+  neighbor_discover_until = futureMillis(NEIGHBOR_DISCOVER_TIMEOUT_MS);
+
+  if (neighbor_discover_count == 0) {
+    finishNeighborDiscover();
+    strcpy(reply, "OK - neighbor discover started (0 neighbors, self only)");
+  } else {
+    sprintf(reply, "OK - neighbor discover started (%u neighbors)", (unsigned)neighbor_discover_count);
+  }
+  return true;
+}
+
+#endif // WITH_MQTT_NEIGHBORS
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {

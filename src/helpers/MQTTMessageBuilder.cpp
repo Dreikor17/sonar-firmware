@@ -227,6 +227,41 @@ int MQTTMessageBuilder::buildRawMessage(
   return (len > 0 && len < buffer_size) ? len : 0;
 }
 
+int MQTTMessageBuilder::buildNeighborsMessage(
+  JsonDocument& doc,
+  const char* origin,
+  const char* origin_id,
+  const char* timestamp,
+  const char* self_scopes,
+  const NeighborsMessageEntry* neighbors,
+  int neighbor_count,
+  char* buffer,
+  size_t buffer_size
+) {
+  doc.clear();
+  JsonObject root = doc.to<JsonObject>();
+
+  root["timestamp"] = timestamp;
+  root["origin"] = origin;
+  root["origin_id"] = origin_id;
+
+  JsonObject self = root.createNestedObject("self");
+  self["scopes"] = self_scopes ? self_scopes : "";
+
+  JsonArray arr = root.createNestedArray("neighbors");
+  for (int i = 0; i < neighbor_count; i++) {
+    JsonObject nb = arr.createNestedObject();
+    nb["pubkey"] = neighbors[i].pubkey_hex;
+    nb["snr"] = neighbors[i].snr;
+    nb["heard_secs_ago"] = neighbors[i].heard_secs_ago;
+    nb["scopes"] = neighbors[i].scopes ? neighbors[i].scopes : "";
+    nb["status"] = neighbors[i].status;
+  }
+
+  size_t len = serializeJson(root, buffer, buffer_size);
+  return (len > 0 && len < buffer_size) ? len : 0;
+}
+
 int MQTTMessageBuilder::buildPacketJSON(
   JsonDocument& doc,
   mesh::Packet* packet,

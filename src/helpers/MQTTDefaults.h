@@ -68,6 +68,8 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->mqtt_tx_enabled = 2;
   prefs->mqtt_rx_enabled = 1;
   prefs->mqtt_status_interval = 300000;
+  prefs->mqtt_neighbors_enabled = 0;
+  prefs->mqtt_neighbors_interval = 24UL * 3600UL * 1000UL;
   prefs->wifi_power_save = 1;
 
   mqttDefaultSlotPreset(prefs->mqtt_slot_preset[0], sizeof(prefs->mqtt_slot_preset[0]),

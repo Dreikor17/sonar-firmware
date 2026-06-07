@@ -35,6 +35,10 @@ class MeshSNMPAgent;  // Forward declaration
 
 #ifdef WITH_MQTT_BRIDGE
 
+#if defined(BOARD_HAS_PSRAM) && defined(MAX_NEIGHBOURS) && MAX_NEIGHBOURS > 0
+#define WITH_MQTT_NEIGHBORS 1
+#endif
+
 /**
  * @brief Bridge implementation using MQTT protocol for packet transport
  *
@@ -257,6 +261,11 @@ private:
   // class object so these allocations don't interleave with large TLS buffers at startup.
   static const size_t PUBLISH_JSON_BUFFER_SIZE = 2048;
   static const size_t STATUS_JSON_BUFFER_SIZE = 768;
+  #if defined(WITH_MQTT_NEIGHBORS)
+  char* _neighbors_json_buffer;
+  size_t _neighbors_publish_len;
+  bool _neighbors_publish_pending;
+  #endif
   #if defined(BOARD_HAS_PSRAM)
   char* _publish_json_buffer;
   char* _status_json_buffer;
@@ -318,7 +327,7 @@ private:
   mesh::MillisecondClock* _ms;    // For uptime
 
   // Topic building
-  enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW };
+  enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW, MSG_NEIGHBORS };
   bool buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size);
   bool substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size);
 
@@ -349,6 +358,9 @@ private:
 
   void processPacketQueue();
   bool publishStatus();  // Returns true if status was successfully published
+  #if defined(WITH_MQTT_NEIGHBORS)
+  bool publishNeighbors();
+  #endif
   bool handleWiFiConnection(unsigned long now);
 
   // FreeRTOS task function (runs on Core 0)
@@ -477,6 +489,11 @@ public:
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
   static uint8_t getLastWifiDisconnectReason();
   static unsigned long getLastWifiDisconnectTime();
+
+  #if defined(WITH_MQTT_NEIGHBORS)
+  void requestPublishNeighbors(const char* json, size_t len);
+  static const size_t NEIGHBORS_JSON_BUFFER_SIZE = 10240;
+  #endif
   static const char* wifiReasonStr(uint8_t reason);
   static const char* tlsErrorStr(int32_t err);
 
