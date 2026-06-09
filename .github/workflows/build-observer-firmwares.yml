@@ -110,19 +110,28 @@ jobs:
         id: sha
         run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Recreate Rolling Release
+      - name: Publish to Rolling Release (tag pinned; assets replaced in place)
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release delete "$RELEASE_TAG" --yes --cleanup-tag || true
+        run: |
+          # Create the release + tag once, then never move the tag again. Moving a
+          # rolling tag on every build causes "conflicting tag" errors in local
+          # clones (and a brief 404 window from delete/recreate).
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --prerelease \
+              --title "MQTT Observer Firmwares" \
+              --notes "Rolling build of all *_observer_mqtt firmwares. The git short hash is embedded in each asset filename."
+          fi
 
-      - name: Publish Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: MQTT Observer Firmwares (${{ steps.sha.outputs.short }})
-          body: "Rolling build of all *_observer_mqtt firmwares at ${{ steps.sha.outputs.short }}."
-          prerelease: true
-          files: out/*
+          # Upload this build, overwriting same-named assets.
+          gh release upload "$RELEASE_TAG" out/* --clobber
+
+          # Prune assets from older builds (current set already uploaded, so no gap).
+          keep=$(cd out && ls)
+          gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' \
+            | while read -r asset; do
+                grep -qxF "$asset" <<<"$keep" || gh release delete-asset "$RELEASE_TAG" "$asset" --yes || true
+              done
 
       - name: Checkout Flasher Repo
         uses: actions/checkout@v4
