@@ -99,13 +99,14 @@ The MQTT bridge uses a slot-based architecture with up to 6 concurrent connectio
 | `analyzer-us` | mqtt-us-v1.letsmesh.net:443 | JWT (Ed25519) | WSS |
 | `analyzer-eu` | mqtt-eu-v1.letsmesh.net:443 | JWT (Ed25519) | WSS |
 | `nz-analyzer` | meshcore-mqtt-1.baird.io:443 | JWT (Ed25519) | WSS |
-| `meshmapper` | mqtt.meshmapper.cc:443 | JWT (Ed25519) | WSS |
+| `meshmapper` | mqtt.meshmapper.net:443 | JWT (Ed25519) | WSS |
 | `meshrank` | meshrank.net:8883 | None (token in topic) | MQTT over TLS |
 | `waev` | mqtt.waev.app:443 | JWT (Ed25519) | WSS |
 | `meshomatic` | us-east.meshomatic.net:443 | JWT (Ed25519) | WSS |
 | `cascadiamesh` | mqtt-v1.cascadiamesh.org:443 | JWT (Ed25519) | WSS |
 | `tennmesh` | mqtt.tennmesh.com:1883 | Username/password (fixed in firmware) | Plain MQTT |
 | `nashmesh` | mqtt://mqtt.nashme.sh:1883 | Username/password (fixed in firmware) | Plain MQTT |
+| `ctmesh` | mqtt.ctmesh.org:1883 | Username/password (fixed in firmware) | Plain MQTT |
 | `chimesh` | wss://mqtt.chimesh.org:443 | JWT (Ed25519) | WSS |
 | `meshat.se` | meshcore-mqtt.meshat.se:443 | JWT (Ed25519) | WSS |
 | `eastidahomesh` | wss://broker.eastidahomesh.net:443 | None | WSS |
@@ -288,6 +289,7 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.preset cascadiamesh` - Set slot N to CascadiaMesh
 - `set mqttN.preset tennmesh` - Set slot N to TennMesh (plain MQTT; same `meshcore/{iata}/...` topics as Analyzer US)
 - `set mqttN.preset nashmesh` - Set slot N to NashMesh
+- `set mqttN.preset ctmesh` - Set slot N to CTMesh
 - `set mqttN.preset chimesh` - Set slot N to ChicagolandMesh
 - `set mqttN.preset meshat.se` - Set slot N to Meshat.se
 - `set mqttN.preset eastidahomesh` - Set slot N to EastIdahoMesh (WSS/TLS, no auth; packets on `meshcore/{IATA}/{PUBLIC_KEY}/packets`)
@@ -305,7 +307,7 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.audience <audience>` - Set JWT audience for custom slot (enables Ed25519 JWT auth)
 - `set mqttN.audience` - Clear JWT audience (reverts to username/password auth)
 
-**Note:** Custom server/port settings only apply when the slot's preset is `custom`. Username/password also apply to built-in presets that use per-slot credentials (e.g. `inwmesh`); other userpass presets (`tennmesh`, `nashmesh`) ship fixed credentials in firmware.
+**Note:** Custom server/port settings only apply when the slot's preset is `custom`. Username/password also apply to built-in presets that use per-slot credentials (e.g. `inwmesh`); other userpass presets (`tennmesh`, `nashmesh`, `ctmesh`) ship fixed credentials in firmware.
 
 #### Example: Configure MeshRank on Slot 3
 ```bash

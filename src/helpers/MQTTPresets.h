@@ -105,7 +105,7 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 20;
+static const int MQTT_PRESET_COUNT = 21;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
@@ -120,6 +120,7 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "cascadiamesh",  "wss://mqtt-v1.cascadiamesh.org:443/mqtt", "mqtt-v1.cascadiamesh.org",        ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "tennmesh",      "mqtt://mqtt.tennmesh.com:1883",           nullptr,                           nullptr,       MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   55,      "mqttfeed",   "tc2live"   },
     { "nashmesh",      "mqtt://mqtt.nashme.sh:1883",              nullptr,                           nullptr,       MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   55,      "meshdev",    "large4cats"},
+    { "ctmesh",        "mqtt://mqtt.ctmesh.org:1883",             nullptr,                           nullptr,       MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   60,      "meshdev",    "large4cats"},
     { "chimesh",       "wss://mqtt.chimesh.org:443",              "mqtt.chimesh.org",                ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "meshat.se",     "wss://meshcore-mqtt.meshat.se:443",       "meshcore-mqtt.meshat.se",         ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "eastidahomesh", "wss://broker.eastidahomesh.net:443",      nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_NONE,     MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
