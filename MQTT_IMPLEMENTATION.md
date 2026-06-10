@@ -112,6 +112,7 @@ The MQTT bridge uses a slot-based architecture with up to 6 concurrent connectio
 | `coloradomesh` | wss://mqtt.meshcore.coloradomesh.org:1883 | JWT (Ed25519) | WSS |
 | `meshcore-ca-1` | mqtt1.meshcore.ca:443 | JWT (Ed25519) | WSS |
 | `meshcore-ca-2` | mqtt2.meshcore.ca:443 | JWT (Ed25519) | WSS |
+| `bostonmesh` | mqttmc01.bostonme.sh:443 | JWT (Ed25519) | WSS |
 | `inwmesh` | scope.inwmesh.org:8883 | Username/password (per slot via `mqttN.username` / `mqttN.password`) | MQTT over TLS |
 | `custom` | User-configured | Username/Password | MQTT or WSS |
 | `none` | (disabled) | — | — |
@@ -291,6 +292,7 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.preset meshat.se` - Set slot N to Meshat.se
 - `set mqttN.preset eastidahomesh` - Set slot N to EastIdahoMesh (WSS/TLS, no auth; packets on `meshcore/{IATA}/{PUBLIC_KEY}/packets`)
 - `set mqttN.preset coloradomesh` - Set slot N to ColoradoMesh
+- `set mqttN.preset bostonmesh` - Set slot N to BostonMesh (`wss://mqttmc01.bostonme.sh:443/mqtt`; JWT audience `mqttmc01.bostonme.sh`)
 - `set mqttN.preset inwmesh` - Set slot N to INW Mesh Scope (`mqtts://scope.inwmesh.org:8883`; set `mqttN.username` and `mqttN.password`)
 - `set mqttN.preset custom` - Set slot N to custom broker (configure server/port/username/password)
 - `set mqttN.preset none` - Disable slot N
