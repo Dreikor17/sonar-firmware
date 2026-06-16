@@ -114,7 +114,9 @@ int MQTTMessageBuilder::buildPacketMessage(
   float snr,
   int rssi,
   const char* hash,
-  const char* path,
+  const uint8_t* path_bytes,
+  int path_hop_count,
+  int path_hash_size,
   char* buffer,
   size_t buffer_size
 ) {
@@ -155,10 +157,25 @@ int MQTTMessageBuilder::buildPacketMessage(
     root["RSSI"] = rssi_str;
   }
   
-  if (path && strlen(path) > 0) {
-    root["path"] = path;
+  // Routing path as an array of lowercase hex hop tokens, one element per hop
+  // (e.g. ["aa","bb","cc"], or ["aaaa","bbbb"] for multi-byte hashes). This matches
+  // meshcore-packet-capture's _split_path_hops() representation.
+  if (path_bytes && path_hop_count > 0 && path_hash_size > 0) {
+    JsonArray path_arr = root.createNestedArray("path");
+    char hop_hex[2 * 4 + 1]; // hop hash is 1-4 bytes -> up to 8 hex chars + null
+    for (int i = 0; i < path_hop_count; i++) {
+      size_t pos = 0;
+      for (int b = 0; b < path_hash_size && b < 4; b++) {
+        size_t idx = (size_t)i * path_hash_size + b;
+        if (idx >= MAX_PATH_SIZE) break;
+        snprintf(hop_hex + pos, 3, "%02x", path_bytes[idx]);
+        pos += 2;
+      }
+      hop_hex[pos] = '\0';
+      path_arr.add(hop_hex); // char[] (non-const) -> ArduinoJson copies the string
+    }
   }
-  
+
   size_t json_len = serializeJson(root, buffer, buffer_size);
   return (json_len > 0 && json_len < buffer_size) ? json_len : 0;
 }
@@ -230,12 +247,9 @@ int MQTTMessageBuilder::buildPacketJSON(
   packet->calculatePacketHash(packet_hash);
   bytesToHex(packet_hash, MAX_HASH_SIZE, hash_str, sizeof(hash_str));
   
-  // Build path string for direct packets (multibyte-path: show hash count, hash size, byte length)
-  char path_str[128] = "";
-  if (packet->isRouteDirect() && packet->path_len > 0) {
-    snprintf(path_str, sizeof(path_str), "path_%dx%d_%db",
-             (int)packet->getPathHashCount(), (int)packet->getPathHashSize(), (int)packet->getPathByteLen());
-  }
+  // Routing path (direct packets only): pass raw hop bytes to buildPacketMessage,
+  // which emits them as an array of lowercase hex hop tokens.
+  bool has_path = packet->isRouteDirect() && packet->getPathHashCount() > 0;
   
   return buildPacketMessage(
     doc,
@@ -249,7 +263,9 @@ int MQTTMessageBuilder::buildPacketJSON(
     12.5f, // SNR - using reasonable default
     -65,   // RSSI - using reasonable default
     hash_str,
-    packet->isRouteDirect() ? path_str : nullptr,
+    has_path ? packet->path : nullptr,
+    has_path ? packet->getPathHashCount() : 0,
+    has_path ? packet->getPathHashSize() : 0,
     buffer, buffer_size
   );
 }
@@ -302,12 +318,9 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
   packet->calculatePacketHash(packet_hash);
   bytesToHex(packet_hash, MAX_HASH_SIZE, hash_str, sizeof(hash_str));
   
-  // Build path string for direct packets (multibyte-path: show hash count, hash size, byte length)
-  char path_str[128] = "";
-  if (packet->isRouteDirect() && packet->path_len > 0) {
-    snprintf(path_str, sizeof(path_str), "path_%dx%d_%db",
-             (int)packet->getPathHashCount(), (int)packet->getPathHashSize(), (int)packet->getPathByteLen());
-  }
+  // Routing path (direct packets only): pass raw hop bytes to buildPacketMessage,
+  // which emits them as an array of lowercase hex hop tokens.
+  bool has_path = packet->isRouteDirect() && packet->getPathHashCount() > 0;
   
   return buildPacketMessage(
     doc,
@@ -321,7 +334,9 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
     snr,  // Use actual SNR from radio
     rssi, // Use actual RSSI from radio
     hash_str,
-    packet->isRouteDirect() ? path_str : nullptr,
+    has_path ? packet->path : nullptr,
+    has_path ? packet->getPathHashCount() : 0,
+    has_path ? packet->getPathHashSize() : 0,
     buffer, buffer_size
   );
 }

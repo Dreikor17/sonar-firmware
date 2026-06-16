@@ -98,7 +98,9 @@ public:
    * @param snr Signal-to-noise ratio
    * @param rssi Received signal strength
    * @param hash Packet hash
-   * @param path Routing path (for direct packets)
+   * @param path_bytes Raw routing-path bytes (direct packets only; nullptr to omit)
+   * @param path_hop_count Number of path hops (0 to omit the path field)
+   * @param path_hash_size Bytes per hop hash (1-4)
    * @param buffer Output buffer for JSON string
    * @param buffer_size Size of output buffer
    * @return Length of JSON string, or 0 on error
@@ -119,7 +121,9 @@ public:
     float snr,
     int rssi,
     const char* hash,
-    const char* path,
+    const uint8_t* path_bytes,
+    int path_hop_count,
+    int path_hash_size,
     char* buffer,
     size_t buffer_size
   );

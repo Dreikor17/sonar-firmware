@@ -77,7 +77,7 @@ get mqtt.status
 
 The MQTT bridge implementation provides:
 - Up to 6 MQTT connection slots with built-in presets
-- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, EastIdahoMesh, ColoradoMesh, and TennMesh
+- Built-in presets for many community brokers (see the [preset table](#slot-based-preset-system) for the full list)
 - Custom broker support with username/password authentication
 - JWT (Ed25519 device signing) authentication for most preset brokers; TennMesh uses a fixed username/password (plain MQTT)
 - WSS (WebSocket Secure), direct MQTT/TLS, and plain MQTT (TennMesh) transport
@@ -111,6 +111,8 @@ The MQTT bridge uses a slot-based architecture with up to 6 concurrent connectio
 | `meshat.se` | meshcore-mqtt.meshat.se:443 | JWT (Ed25519) | WSS |
 | `eastidahomesh` | wss://broker.eastidahomesh.net:443 | None | WSS |
 | `coloradomesh` | wss://mqtt.meshcore.coloradomesh.org:1883 | JWT (Ed25519) | WSS |
+| `dutchmeshcore-1` | collector1.dutchmeshcore.nl:443 | JWT (Ed25519) | WSS |
+| `dutchmeshcore-2` | collector2.dutchmeshcore.nl:443 | JWT (Ed25519) | WSS |
 | `meshcore-ca-1` | mqtt1.meshcore.ca:443 | JWT (Ed25519) | WSS |
 | `meshcore-ca-2` | mqtt2.meshcore.ca:443 | JWT (Ed25519) | WSS |
 | `bostonmesh` | mqttmc01.bostonme.sh:443 | JWT (Ed25519) | WSS |
@@ -279,23 +281,9 @@ Each slot (1-6) supports the following commands:
 - `get mqttN.audience` - Get JWT audience for slot N (custom slots only)
 
 #### Set Commands
-- `set mqttN.preset analyzer-us` - Set slot N to LetsMesh Analyzer US
-- `set mqttN.preset analyzer-eu` - Set slot N to LetsMesh Analyzer EU
-- `set mqttN.preset nz-analyzer` - Set slot N to NZ Analyzer (Baird)
-- `set mqttN.preset meshmapper` - Set slot N to MeshMapper
-- `set mqttN.preset meshrank` - Set slot N to MeshRank (requires token)
-- `set mqttN.preset waev` - Set slot N to Waev
-- `set mqttN.preset meshomatic` - Set slot N to Meshomatic
-- `set mqttN.preset cascadiamesh` - Set slot N to CascadiaMesh
-- `set mqttN.preset tennmesh` - Set slot N to TennMesh (plain MQTT; same `meshcore/{iata}/...` topics as Analyzer US)
-- `set mqttN.preset nashmesh` - Set slot N to NashMesh
-- `set mqttN.preset ctmesh` - Set slot N to CTMesh
-- `set mqttN.preset chimesh` - Set slot N to ChicagolandMesh
-- `set mqttN.preset meshat.se` - Set slot N to Meshat.se
-- `set mqttN.preset eastidahomesh` - Set slot N to EastIdahoMesh (WSS/TLS, no auth; packets on `meshcore/{IATA}/{PUBLIC_KEY}/packets`)
-- `set mqttN.preset coloradomesh` - Set slot N to ColoradoMesh
-- `set mqttN.preset bostonmesh` - Set slot N to BostonMesh (`wss://mqttmc01.bostonme.sh:443/mqtt`; JWT audience `mqttmc01.bostonme.sh`)
-- `set mqttN.preset inwmesh` - Set slot N to INW Mesh Scope (`mqtts://scope.inwmesh.org:8883`; set `mqttN.username` and `mqttN.password`)
+- `set mqttN.preset <name>` - Set slot N to a built-in preset. Use any `name` from the [preset table](#slot-based-preset-system) (run `get mqtt.presets` on-device for the full list). Most presets need no further configuration; the exceptions are:
+  - `meshrank` - requires a per-slot token (`set mqttN.token <token>`)
+  - `inwmesh` - requires per-slot credentials (`set mqttN.username` / `set mqttN.password`)
 - `set mqttN.preset custom` - Set slot N to custom broker (configure server/port/username/password)
 - `set mqttN.preset none` - Disable slot N
 - `set mqttN.server <hostname>` - Set custom server hostname for slot N
@@ -516,23 +504,38 @@ Minimal raw packet data for map integration.
 ```json
 {
   "status": "online|offline",
-  "timestamp": "2024-01-01T12:00:00.000000",
+  "timestamp": "2024-01-01T12:00:00.000000+00:00",
   "origin": "Device Name",
   "origin_id": "DEVICE_PUBLIC_KEY",
   "model": "device_model",
   "firmware_version": "firmware_version",
   "radio": "radio_info",
-  "client_version": "meshcore-custom-repeater/{build_date}",
-  "repeat": "on|off"
+  "client_version": "meshcore/{firmware_version}",
+  "repeat": "on|off",
+  "stats": {
+    "battery_mv": 4100,
+    "uptime_secs": 3600,
+    "errors": 0,
+    "queue_len": 0,
+    "noise_floor": -110,
+    "tx_air_secs": 12,
+    "rx_air_secs": 340,
+    "recv_errors": 2,
+    "internal_heap": 102400
+  }
 }
 ```
+
+**Notes:**
+- Timestamps are always emitted in UTC with an explicit `+00:00` offset.
+- The `stats` object is only included when at least one stat value is available; individual fields are omitted when their value is unavailable.
 
 ### Packet Message
 ```json
 {
   "origin": "MeshCore-HOWL",
   "origin_id": "A1B2C3D4E5F67890...",
-  "timestamp": "2024-01-01T12:00:00.000000",
+  "timestamp": "2024-01-01T12:00:00.000000+00:00",
   "type": "PACKET",
   "direction": "rx|tx",
   "time": "12:00:00",
@@ -545,20 +548,22 @@ Minimal raw packet data for map integration.
   "SNR": "12.5",
   "RSSI": "-65",
   "hash": "A1B2C3D4E5F67890",
-  "path": "node1,node2,node3"
+  "path": ["aa", "bb", "cc"]
 }
 ```
 
 **Notes:**
+- All numeric fields (`len`, `packet_type`, `payload_len`, `SNR`, `RSSI`) are formatted as JSON strings.
+- `time` and `date` are always UTC (`HH:MM:SS` and `DD/MM/YYYY`); `timestamp` is UTC with an explicit `+00:00` offset.
 - `SNR` and `RSSI` are only present for RX packets (received from radio). TX packets omit these fields since the packet originates from this node.
-- `path` is only present for direct-route packets with path data.
+- `path` is only present for direct-route packets that carry path data. It is a JSON array of lowercase hex hop tokens, one element per hop — e.g. `["aa","bb","cc"]` for single-byte hashes, or `["aaaa","bbbb"]` for multi-byte hashes. This matches the `path` representation emitted by [meshcore-packet-capture](https://github.com/agessaman/meshcore-packet-capture).
 
 ### Raw Message
 ```json
 {
   "origin": "MeshCore-HOWL",
   "origin_id": "A1B2C3D4E5F67890...",
-  "timestamp": "2024-01-01T12:00:00.000000",
+  "timestamp": "2024-01-01T12:00:00.000000+00:00",
   "type": "RAW",
   "data": "F5930103807E5F1E..."
 }
@@ -568,7 +573,7 @@ Minimal raw packet data for map integration.
 
 ### Slot-Based Preset System
 - Up to 6 concurrent MQTT connections (with PSRAM), 2 without PSRAM
-- Built-in presets for LetsMesh Analyzer (US/EU), MeshMapper, MeshRank, Waev, Meshomatic, CascadiaMesh, EastIdahoMesh, ColoradoMesh, and TennMesh
+- Built-in presets for many community brokers (see the [preset table](#slot-based-preset-system))
 - Custom broker support with username/password auth and custom topic templates
 - JWT (Ed25519) for most preset brokers; MeshRank uses token-in-topic; TennMesh uses fixed username/password over plain MQTT
 - WSS (WebSocket Secure), direct MQTT over TLS, and plain MQTT (TennMesh)
@@ -601,8 +606,10 @@ Minimal raw packet data for map integration.
 - Proper UTC system time handling
 
 ### Authentication
-- **JWT Authentication**: Ed25519-signed tokens for brokers that expect JWT (most built-in presets; not MeshRank or TennMesh). For `custom` slots, JWT is used when `audience` is set.
-- **Username/Password**: Custom brokers; TennMesh also uses fixed credentials embedded in the `tennmesh` preset (plain MQTT, no TLS)
+The auth mode is fixed per preset (see the [preset table](#slot-based-preset-system)). Three modes are used:
+- **JWT Authentication**: Ed25519-signed tokens for brokers that expect JWT (most WSS presets). For `custom` slots, JWT is used when `audience` is set.
+- **Username/Password**: Some presets ship fixed credentials embedded in firmware (`tennmesh`, `nashmesh`, `ctmesh` — plain MQTT, no TLS); others (`inwmesh`, `custom`) take per-slot credentials via `mqttN.username` / `mqttN.password`.
+- **None**: `meshrank` (account token carried in the topic) and `eastidahomesh` connect without broker auth.
 - **Username Format** (JWT): `v1_{UPPERCASE_PUBLIC_KEY}`
 - **Automatic Token Renewal**: Tokens are renewed before expiration
 
