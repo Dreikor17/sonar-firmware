@@ -78,6 +78,8 @@ public:
     int rx_air_secs = -1,
     int recv_errors = -1,
     int internal_heap = -1,
+    int packets_sent = -1,
+    int packets_received = -1,
     const char* repeat = nullptr
   );
 
@@ -120,6 +122,7 @@ public:
     const char* raw,
     float snr,
     int rssi,
+    float score,
     const char* hash,
     const uint8_t* path_bytes,
     int path_hop_count,
@@ -180,6 +183,7 @@ public:
     const char* origin_id,
     float snr,
     float rssi,
+    float score,
     Timezone* timezone,
     char* buffer,
     size_t buffer_size

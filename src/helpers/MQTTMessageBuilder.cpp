@@ -1,6 +1,7 @@
 #include "MQTTMessageBuilder.h"
 #include <ArduinoJson.h>
 #include <cstring>
+#include <math.h>
 #include <time.h>
 #include <Timezone.h>
 #include "MeshCore.h"
@@ -40,6 +41,8 @@ int MQTTMessageBuilder::buildStatusMessage(
   int rx_air_secs,
   int recv_errors,
   int internal_heap,
+  int packets_sent,
+  int packets_received,
   const char* repeat
 ) {
   // doc is provided by the caller (heap-allocated DynamicJsonDocument in MQTTBridge),
@@ -62,7 +65,7 @@ int MQTTMessageBuilder::buildStatusMessage(
   // Add stats object if any stats are provided
   if (battery_mv >= 0 || uptime_secs >= 0 || errors >= 0 || queue_len >= 0 ||
       noise_floor > -999 || tx_air_secs >= 0 || rx_air_secs >= 0 || recv_errors >= 0 ||
-      internal_heap >= 0) {
+      internal_heap >= 0 || packets_sent >= 0 || packets_received >= 0) {
     JsonObject stats = root.createNestedObject("stats");
     
     if (battery_mv >= 0) {
@@ -70,6 +73,12 @@ int MQTTMessageBuilder::buildStatusMessage(
     }
     if (uptime_secs >= 0) {
       stats["uptime_secs"] = uptime_secs;
+    }
+    if (packets_sent >= 0) {
+      stats["packets_sent"] = packets_sent;
+    }
+    if (packets_received >= 0) {
+      stats["packets_received"] = packets_received;
     }
     if (errors >= 0) {
       stats["errors"] = errors;
@@ -113,6 +122,7 @@ int MQTTMessageBuilder::buildPacketMessage(
   const char* raw,
   float snr,
   int rssi,
+  float score,
   const char* hash,
   const uint8_t* path_bytes,
   int path_hop_count,
@@ -131,7 +141,8 @@ int MQTTMessageBuilder::buildPacketMessage(
   char payload_len_str[16];
   char snr_str[16];
   char rssi_str[16];
-  
+  char score_str[16];
+
   snprintf(len_str, sizeof(len_str), "%d", len);
   snprintf(packet_type_str, sizeof(packet_type_str), "%d", packet_type);
   snprintf(payload_len_str, sizeof(payload_len_str), "%d", payload_len);
@@ -155,6 +166,12 @@ int MQTTMessageBuilder::buildPacketMessage(
   if (strcmp(direction, "rx") == 0) {
     root["SNR"] = snr_str;
     root["RSSI"] = rssi_str;
+    // Firmware's rebroadcast "score" for this RX packet, scaled x1000 to match the
+    // integer form printed in the serial RX log (see Dispatcher::checkRecv()).
+    if (!isnan(score)) {
+      snprintf(score_str, sizeof(score_str), "%d", (int)(score * 1000));
+      root["score"] = score_str;
+    }
   }
   
   // Routing path as an array of lowercase hex hop tokens, one element per hop
@@ -262,6 +279,7 @@ int MQTTMessageBuilder::buildPacketJSON(
     raw_hex,
     12.5f, // SNR - using reasonable default
     -65,   // RSSI - using reasonable default
+    NAN,   // score - unknown on this reconstruction-less fallback path
     hash_str,
     has_path ? packet->path : nullptr,
     has_path ? packet->getPathHashCount() : 0,
@@ -280,6 +298,7 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
   const char* origin_id,
   float snr,
   float rssi,
+  float score,
   Timezone* timezone,
   char* buffer,
   size_t buffer_size
@@ -333,6 +352,7 @@ int MQTTMessageBuilder::buildPacketJSONFromRaw(
     raw_hex,
     snr,  // Use actual SNR from radio
     rssi, // Use actual RSSI from radio
+    score, // Firmware rebroadcast score (NaN for tx / when unavailable)
     hash_str,
     has_path ? packet->path : nullptr,
     has_path ? packet->getPathHashCount() : 0,
