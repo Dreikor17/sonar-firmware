@@ -5,6 +5,7 @@
 #include <WiFiUdp.h>
 #include <Timezone.h>
 #include <time.h>
+#include <sys/time.h>
 #include <math.h>
 
 #ifdef WITH_SNMP
@@ -1712,7 +1713,9 @@ void MQTTBridge::publishStatusToSlot(int index) {
 
   // Status timestamp: UTC with explicit +00:00 offset, same as packet/raw JSON
   // `timestamp` (system clock is UTC — SNTP offset 0; prefs Timezone is separate).
-  MQTTMessageBuilder::formatIsoTimestampForMqtt(time(nullptr), _timezone, timestamp, sizeof(timestamp));
+  struct timeval now_tv;
+  gettimeofday(&now_tv, nullptr);
+  MQTTMessageBuilder::formatIsoTimestampForMqtt(now_tv.tv_sec, now_tv.tv_usec, _timezone, timestamp, sizeof(timestamp));
 
   snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d",
            _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);
@@ -2423,7 +2426,9 @@ bool MQTTBridge::publishStatus() {
 
   // Status timestamp: UTC with explicit +00:00 offset, same as packet/raw JSON
   // `timestamp` (system clock is UTC — SNTP offset 0; prefs Timezone is separate).
-  MQTTMessageBuilder::formatIsoTimestampForMqtt(time(nullptr), _timezone, timestamp, sizeof(timestamp));
+  struct timeval now_tv;
+  gettimeofday(&now_tv, nullptr);
+  MQTTMessageBuilder::formatIsoTimestampForMqtt(now_tv.tv_sec, now_tv.tv_usec, _timezone, timestamp, sizeof(timestamp));
 
   snprintf(radio_info, sizeof(radio_info), "%.6f,%.1f,%d,%d",
            _prefs->freq, _prefs->bw, _prefs->sf, _prefs->cr);

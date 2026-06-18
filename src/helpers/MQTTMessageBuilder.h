@@ -26,11 +26,16 @@ public:
   /**
    * Format the MQTT JSON `timestamp` field (same rule for status, packet, raw).
    * Always UTC with an explicit "+00:00" offset, ISO-8601
-   * "%Y-%m-%dT%H:%M:%S.000000+00:00" (matches Python
+   * "%Y-%m-%dT%H:%M:%S.uuuuuu+00:00" (matches Python
    * datetime.now(timezone.utc).isoformat()). The `timezone` parameter is retained
    * for API compatibility but ignored — the system clock is UTC.
+   *
+   * `usec` is the sub-second component in microseconds (0..999999), normally taken
+   * from the same gettimeofday() read as `now` so the two don't tear at a second
+   * boundary. It is a real sub-second (SNTP-maintained wall clock), not a literal;
+   * pass 0 if no sub-second source is available.
    */
-  static void formatIsoTimestampForMqtt(time_t now, Timezone* timezone, char* buffer, size_t buffer_size);
+  static void formatIsoTimestampForMqtt(time_t now, long usec, Timezone* timezone, char* buffer, size_t buffer_size);
 
   /**
    * Build status message JSON
