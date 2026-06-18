@@ -1,0 +1,76 @@
+name: Sync Flasher Docs & Changelog
+
+# Pushes the observer docs and the regenerated changelog to the flasher site
+# WITHOUT rebuilding firmware. Companion to build-observer-firmwares.yml:
+#   - code changes        -> build-observer-firmwares.yml (builds + syncs everything)
+#   - doc / markdown edits -> this workflow (fast sync only, no firmware rebuild)
+# Keep the synced file list and trigger paths in step with the build workflow's
+# "Sync Docs into Flasher" step and with LOCAL_DOCS in flasher/docs.html.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - mqtt-bridge-implementation-flex
+    paths:
+      - '**.md'
+      - 'docs/**'
+      - 'scripts/gen_changelog.py'
+
+# Shared with build-observer-firmwares.yml so the two never push to the flasher
+# repo concurrently (a mixed code+docs commit can trigger both).
+concurrency:
+  group: flasher-publish
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v4
+        with:
+          # full history so scripts/gen_changelog.py can read the branch commit log
+          fetch-depth: 0
+
+      - name: Checkout Flasher Repo
+        uses: actions/checkout@v4
+        with:
+          repository: agessaman/flasher.meshcore.io
+          token: ${{ secrets.FLASHER_DISPATCH_TOKEN }}
+          path: flasher
+
+      - name: Sync Docs into Flasher
+        run: |
+          # docs.html on the flasher site serves these raw .md files and renders
+          # them client-side; keep this list in sync with LOCAL_DOCS in
+          # flasher/docs.html and the build workflow's sync step.
+          for f in MQTT_IMPLEMENTATION.md MQTT_SNMP.md ALERTS.md; do
+            if [ -f "$f" ]; then
+              cp -f "$f" "flasher/$f"
+              echo "synced $f"
+            else
+              echo "WARNING: source doc $f not found" >&2
+            fi
+          done
+
+      - name: Generate Changelog
+        run: |
+          # Append-only and idempotent; preserves the hand-curated history and
+          # hash manifest already in flasher/CHANGELOG.md. changelog.html renders it.
+          python3 scripts/gen_changelog.py flasher/CHANGELOG.md
+
+      - name: Commit & Push Flasher Content
+        working-directory: flasher
+        run: |
+          if git diff --quiet; then
+            echo "No flasher changes to commit."
+            exit 0
+          fi
+          git config user.name "meshcore-bot"
+          git config user.email "noreply@gessaman.com"
+          git commit -am "Sync docs & changelog from MeshCore ${GITHUB_SHA::7}"
+          git push

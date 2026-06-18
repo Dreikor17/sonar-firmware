@@ -8,6 +8,21 @@ on:
   push:
     branches:
       - mqtt-bridge-implementation-flex
+    # Only rebuild firmware when something that affects the binaries changes.
+    # Docs, the changelog, the changelog generator, and CI files do not change
+    # firmware output — those are handled by sync-flasher-content.yml instead,
+    # so editing them no longer produces new firmware hashes.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'scripts/gen_changelog.py'
+      - '.github/**'
+
+# Serialize with sync-flasher-content.yml so the two workflows never push to the
+# flasher repo at the same time (shared group name across both workflows).
+concurrency:
+  group: flasher-publish
+  cancel-in-progress: false
 
 env:
   # Version embedded in firmware filenames; must match the version key in the
@@ -94,6 +109,9 @@ jobs:
     steps:
       - name: Clone Repo
         uses: actions/checkout@v4
+        with:
+          # full history so scripts/gen_changelog.py can read the branch commit log
+          fetch-depth: 0
 
       - name: Download All Shard Artifacts
         uses: actions/download-artifact@v4
@@ -145,6 +163,16 @@ jobs:
           python3 flasher/scripts/update-firmware.py \
             "${{ steps.sha.outputs.short }}" \
             "$GITHUB_WORKSPACE/firmware-notes.html"
+
+      - name: Generate Changelog
+        run: |
+          # Append any new branch commits to the flasher's CHANGELOG.md. This is
+          # append-only and idempotent: the hand-curated history and the hash
+          # manifest already in flasher/CHANGELOG.md are preserved, and only
+          # commits not yet listed are added. The flasher repo is the persistent
+          # store of changelog state across builds; this checkout's git history
+          # (fetch-depth: 0) is the source. changelog.html renders this file.
+          python3 scripts/gen_changelog.py flasher/CHANGELOG.md
 
       - name: Sync Docs into Flasher
         run: |

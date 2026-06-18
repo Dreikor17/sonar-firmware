@@ -20,3 +20,6 @@ venv/
 src/certs/x509_crt_bundle.bin
 ssl_certs/cacert.pem
 platformio.local.ini
+.cursor/*
+.claude/*
+.cursorrules
