@@ -16,6 +16,7 @@
 #include <helpers/SimpleMeshTables.h>
 #include <helpers/IdentityStore.h>
 #include <helpers/AdvertDataHelpers.h>
+#include <helpers/AlertReporter.h>
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/CommonCLI.h>
 #include <helpers/StatsFormatHelper.h>
@@ -125,6 +126,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #ifdef WITH_MQTT_BRIDGE
   MQTTBridge* bridge;
 #endif
+  AlertReporter _alerter;
 
   void addPost(ClientInfo* client, const char* postData);
   void pushPostToClient(ClientInfo* client, PostInfo& post);
@@ -198,6 +200,9 @@ public:
 
   // CommonCLICallbacks
   void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) override;
+
+  void onAlertConfigChanged() override { _alerter.onConfigChanged(); }
+  bool sendAlertText(const char* text) override { return _alerter.sendText(text); }
   bool resolveAlertScope(TransportKey& dest) override;
   bool formatFileSystem() override;
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
@@ -254,10 +259,16 @@ public:
       bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
 #endif
       bridge->begin();
+#ifdef WITH_MQTT_BRIDGE
+      _alerter.setBridge(bridge);
+#endif
     }
     else
     {
       bridge->end();
+#ifdef WITH_MQTT_BRIDGE
+      _alerter.setBridge(nullptr);
+#endif
     }
   }
 
