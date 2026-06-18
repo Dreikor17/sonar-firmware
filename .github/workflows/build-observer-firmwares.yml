@@ -9,14 +9,22 @@ on:
     branches:
       - mqtt-bridge-implementation-flex
     # Only rebuild firmware when something that affects the binaries changes.
-    # Docs, the changelog, the changelog generator, and CI files do not change
-    # firmware output — those are handled by sync-flasher-content.yml instead,
-    # so editing them no longer produces new firmware hashes.
+    # Docs, the changelog, the changelog generator, CI files, and repo-meta
+    # files do not change firmware output — docs/changelog are handled by
+    # sync-flasher-content.yml instead. NOTE: a push is skipped only if EVERY
+    # changed file matches a pattern below; one stray unlisted file (e.g. an
+    # earlier .gitignore edit) triggers a full build, so keep meta files listed.
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - 'scripts/gen_changelog.py'
       - '.github/**'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.editorconfig'
+      - 'LICENSE'
+      - '.vscode/**'
+      - '.claude/**'
 
 # Serialize with sync-flasher-content.yml so the two workflows never push to the
 # flasher repo at the same time (shared group name across both workflows).
@@ -109,9 +117,13 @@ jobs:
     steps:
       - name: Clone Repo
         uses: actions/checkout@v4
-        with:
-          # full history so scripts/gen_changelog.py can read the branch commit log
-          fetch-depth: 0
+        # Intentionally shallow (default depth 1). "Compute Short SHA" below must
+        # run on the same shallow clone the build job used, because
+        # `git rev-parse --short` auto-extends its abbreviation as the object
+        # count grows (7 chars shallow, 8 chars with full history). build.sh names
+        # the firmware assets from a shallow clone, so a full-history release job
+        # would write an 8-char hash into config.json that no asset matches.
+        # History is deepened later, only for the changelog step.
 
       - name: Download All Shard Artifacts
         uses: actions/download-artifact@v4
@@ -163,6 +175,16 @@ jobs:
           python3 flasher/scripts/update-firmware.py \
             "${{ steps.sha.outputs.short }}" \
             "$GITHUB_WORKSPACE/firmware-notes.html"
+
+      - name: Unshallow for Changelog
+        run: |
+          # gen_changelog.py needs the full branch history; deepen only now, AFTER
+          # Compute Short SHA ran on the shallow clone (so its 7-char abbreviation
+          # matches build.sh's firmware filenames). Guarded so a non-shallow clone
+          # (e.g. a manual full checkout) doesn't error.
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch --unshallow --quiet
+          fi
 
       - name: Generate Changelog
         run: |
