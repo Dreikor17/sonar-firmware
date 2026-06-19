@@ -156,11 +156,31 @@ jobs:
           # Upload this build, overwriting same-named assets.
           gh release upload "$RELEASE_TAG" out/* --clobber
 
-          # Prune assets from older builds (current set already uploaded, so no gap).
-          keep=$(cd out && ls)
+          # Prune old assets, but RETAIN the most recent KEEP_BUILDS build hashes
+          # (not just the current one). The flasher SPA reads config.json once at
+          # page load and the embedded git short-hash is what links it to assets;
+          # if we pruned down to only the current build, a tab opened during the
+          # previous build cycle would request an already-deleted binary and 404.
+          # Keeping the previous build covers that window.
+          # Pick the KEEP_BUILDS most-recent distinct build hashes: list assets as
+          # "<createdAt> <name>", sort newest-first (ISO timestamps sort lexically),
+          # pull the git short-hash out of each filename, de-dup preserving order.
+          KEEP_BUILDS=2
+          keep_hashes=$(gh release view "$RELEASE_TAG" --json assets \
+              -q '.assets[] | "\(.createdAt) \(.name)"' \
+            | sort -r \
+            | while read -r _ts name; do
+                printf '%s' "$name" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}'
+              done \
+            | awk '!seen[$0]++' | head -n "$KEEP_BUILDS")
+          echo "Retaining build hashes:"; echo "$keep_hashes"
           gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' \
             | while read -r asset; do
-                grep -qxF "$asset" <<<"$keep" || gh release delete-asset "$RELEASE_TAG" "$asset" --yes || true
+                ah=$(printf '%s' "$asset" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}')
+                if [ -n "$ah" ] && grep -qxF "$ah" <<<"$keep_hashes"; then
+                  continue
+                fi
+                gh release delete-asset "$RELEASE_TAG" "$asset" --yes || true
               done
 
       - name: Checkout Flasher Repo
