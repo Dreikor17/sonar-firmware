@@ -151,8 +151,10 @@ build_firmware() {
   esac
   EMBEDDED_VERSION_STRING="${FIRMWARE_VERSION}${VARIANT_TAG}-${COMMIT_HASH}"
 
-  # add firmware version info to end of existing platformio build flags in environment vars
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${EMBEDDED_VERSION_STRING}\"'"
+  # add firmware version info to end of existing platformio build flags in environment vars.
+  # OTA_VARIANT is the env name ($1) — it is exactly the asset-filename prefix used above, so the
+  # observer pull-OTA can match its own build in the web-flasher manifest (config.json).
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${EMBEDDED_VERSION_STRING}\"' -DOTA_VARIANT='\"$1\"'"
 
   # disable debug flags if requested
   disable_debug_flags

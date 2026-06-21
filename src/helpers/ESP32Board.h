@@ -151,6 +151,7 @@ public:
   }
 
   bool startOTAUpdate(const char* id, char reply[]) override;
+  bool otaFromManifest(const char* current_ver, bool dry_run, char reply[]) override;
 
   void setInhibitSleep(bool inhibit) {
     inhibit_sleep = inhibit;

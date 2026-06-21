@@ -793,9 +793,29 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       strcpy(reply, "ERR: unsupported on this platform");
 #endif
     } else if (memcmp(command, "start ota", 9) == 0) {
+#if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_URL)
+      // Observer pull-OTA: fetch this variant's build from the baked-in manifest.
+      // "start ota check" reports the available build without flashing.
+      const char* arg = command + 9;
+      while (*arg == ' ') arg++;
+      bool dry = (memcmp(arg, "check", 5) == 0);
+      if (WiFi.status() != WL_CONNECTED) {
+        strcpy(reply, "ERR: WiFi not connected");
+      } else {
+        // Free the MQTT bridge (TLS contexts + task) so the manifest parse and
+        // OTA download have heap headroom; the WiFi STA link survives end().
+        if (!dry) _callbacks->setBridgeState(false);
+        bool ok = _board->otaFromManifest(_callbacks->getFirmwareVer(), dry, reply);
+        // On success the board reboots and never returns here; on any abort
+        // (already up to date, partition change, download error) bring the
+        // bridge back up so the node resumes uplinking.
+        if (!ok && !dry) _callbacks->setBridgeState(true);
+      }
+#else
       if (!_board->startOTAUpdate(_prefs->node_name, reply)) {
         strcpy(reply, "Error");
       }
+#endif
     } else if (memcmp(command, "clock", 5) == 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
