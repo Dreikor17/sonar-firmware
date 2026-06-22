@@ -15,6 +15,7 @@
 
 #ifdef ESP_PLATFORM
 #include <esp_wifi.h>
+#include <esp_netif.h>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -179,6 +180,10 @@ static unsigned long s_wifi_connected_at = 0;
 static uint8_t s_wifi_disconnect_reason = 0;
 static unsigned long s_wifi_disconnect_time = 0;
 
+// Most recent global/unique-local IPv6 address (SLAAC), as a string; empty when none.
+// Populated from the ARDUINO_EVENT_WIFI_STA_GOT_IP6 handler; cleared on WiFi disconnect.
+static char s_global_ipv6[46] = "";
+
 #ifdef MQTT_MEMORY_DEBUG
 // #region agent log
 static void agentLogHeap(const char* location, const char* message, const char* hypothesisId,
@@ -199,6 +204,17 @@ static MQTTBridge* s_mqtt_bridge_instance = nullptr;
 
 unsigned long MQTTBridge::getWifiConnectedAtMillis() {
   return s_wifi_connected_at;
+}
+
+bool MQTTBridge::getGlobalIPv6(char* buf, size_t len) {
+  if (buf == nullptr || len == 0) return false;
+  if (s_global_ipv6[0] == '\0') {
+    buf[0] = '\0';
+    return false;
+  }
+  strncpy(buf, s_global_ipv6, len - 1);
+  buf[len - 1] = '\0';
+  return true;
 }
 
 void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPrefs* obs) {
@@ -829,11 +845,23 @@ void MQTTBridge::initializeWiFiInTask() {
       switch(event) {
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
           MQTT_DEBUG_PRINTLN("WiFi connected: %s", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
+          // Kick off IPv6 link-local + RA/SLAAC (additive; IPv4 path unchanged). Idempotent.
+          WiFi.enableIpV6();
           // Set flag to trigger NTP sync from loop() instead of doing it here
           if (!_ntp_synced && !_ntp_sync_pending) {
             _ntp_sync_pending = true;
           }
           break;
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP6: {
+          // Store only global/unique-local addresses; link-local isn't useful for diagnostics.
+          esp_ip6_addr_t ip6 = info.got_ip6.ip6_info.ip;
+          esp_ip6_addr_type_t type = esp_netif_ip6_get_addr_type(&ip6);
+          if (type == ESP_IP6_ADDR_IS_GLOBAL || type == ESP_IP6_ADDR_IS_UNIQUE_LOCAL) {
+            snprintf(s_global_ipv6, sizeof(s_global_ipv6), IPV6STR, IPV62STR(ip6));
+            MQTT_DEBUG_PRINTLN("WiFi IPv6: %s", s_global_ipv6);
+          }
+          break;
+        }
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
           s_wifi_disconnect_reason = info.wifi_sta_disconnected.reason;
           s_wifi_disconnect_time = millis();
@@ -1325,7 +1353,16 @@ void MQTTBridge::setupSlot(int index) {
       } else if (slot.port == 443) {
         proto = "wss";
       }
-      snprintf(slot.broker_uri, sizeof(slot.broker_uri), "%s://%s:%d", proto, slot.host, slot.port);
+      // Bare IPv6 literals (contain ':' but no '.', not already bracketed) must be wrapped
+      // in [..] so the ":port" suffix isn't mistaken for part of the address.
+      bool bare_ipv6 = (slot.host[0] != '[') &&
+                       (strchr(slot.host, ':') != nullptr) &&
+                       (strchr(slot.host, '.') == nullptr);
+      if (bare_ipv6) {
+        snprintf(slot.broker_uri, sizeof(slot.broker_uri), "%s://[%s]:%d", proto, slot.host, slot.port);
+      } else {
+        snprintf(slot.broker_uri, sizeof(slot.broker_uri), "%s://%s:%d", proto, slot.host, slot.port);
+      }
     }
     slot.client->setServer(slot.broker_uri);
     MQTT_DEBUG_PRINTLN("MQTT%d custom broker URI: %s (host='%s', port=%u)",
@@ -2080,6 +2117,9 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
       _wifi_disconnected_time = 0;
       s_wifi_connected_at = now;
       _wifi_reconnect_backoff_attempt = 0;
+      // Re-arm IPv6 link-local after a reconnect (covers paths that re-run WiFi.begin
+      // and skip the GOT_IP event ordering). Idempotent.
+      WiFi.enableIpV6();
       #ifdef ESP_PLATFORM
       wifi_ps_type_t ps_mode;
       uint8_t ps_pref = _obs->wifi_power_save;
@@ -2106,6 +2146,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
     if (_last_wifi_status == WL_CONNECTED) {
       _wifi_disconnected_time = now;
       s_wifi_connected_at = 0;
+      s_global_ipv6[0] = '\0';  // drop stale IPv6 so get wifi.status doesn't report it
       // Disconnect all slot clients when WiFi drops
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
         if (_slots[i].client && _slots[i].connected) {

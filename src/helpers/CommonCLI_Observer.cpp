@@ -780,7 +780,26 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       default: status_str = "unknown"; break;
     }
     if (status == WL_CONNECTED) {
-      sprintf(reply, "> %s, IP: %s, RSSI: %d dBm", status_str, WiFi.localIP().toString().c_str(), WiFi.RSSI());
+      // reply points at the caller's char[160] command buffer (see main.cpp).
+      const size_t kReplyBufSize = 160;
+      sprintf(reply, "> %s, IP: %s", status_str, WiFi.localIP().toString().c_str());
+#ifdef WITH_MQTT_BRIDGE
+      // Group IPv6 directly after IPv4 when a global/ULA address is assigned.
+      char v6[46];
+      if (MQTTBridge::getGlobalIPv6(v6, sizeof(v6))) {
+        size_t v6_len = strlen(reply);
+        if (v6_len < kReplyBufSize) {
+          snprintf(reply + v6_len, kReplyBufSize - v6_len, ", IPv6: %s", v6);
+        }
+      }
+#endif
+      // RSSI right after the IP addresses.
+      {
+        size_t rssi_len = strlen(reply);
+        if (rssi_len < kReplyBufSize) {
+          snprintf(reply + rssi_len, kReplyBufSize - rssi_len, ", RSSI: %d dBm", WiFi.RSSI());
+        }
+      }
 #ifdef WITH_MQTT_BRIDGE
       unsigned long connect_at = MQTTBridge::getWifiConnectedAtMillis();
       if (connect_at != 0) {
@@ -791,7 +810,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
         unsigned long m = (uptime_sec % 3600) / 60;
         unsigned long s = uptime_sec % 60;
         size_t len = strlen(reply);
-        const size_t reply_remaining = 128;
+        const size_t reply_remaining = (len < kReplyBufSize) ? (kReplyBufSize - len) : 0;
         if (d > 0) {
           snprintf(reply + len, reply_remaining, ", uptime: %lud %luh %lum %lus", d, h, m, s);
         } else if (h > 0) {
