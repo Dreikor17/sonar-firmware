@@ -120,26 +120,26 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
   // Force HTTP/1.0: a CDN (e.g. Cloudflare) answers HTTP/1.1 with
   // Transfer-Encoding: chunked and no Content-Length, and the raw chunked
   // stream can't be fed to the JSON parser (chunk-size frames corrupt it).
-  // HTTP/1.0 yields a Connection: close, unframed body that getString()
-  // assembles in full before we parse it.
+  // HTTP/1.0 yields a Connection: close, unframed body we can stream-parse.
   http.useHTTP10(true);
+  http.setTimeout(20000);  // per-read timeout while streaming the body
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
     snprintf(reply, 160, "ERR: manifest HTTP %d", code);
     http.end();
     return false;
   }
-  String body = http.getString();
-  http.end();
-  if (body.length() == 0) {
-    strcpy(reply, "ERR: empty manifest");
-    return false;
-  }
 
-  // Filter keeps only staticPath + each firmware entry's notice/version, so the
-  // parsed document stays a fraction of the full manifest. (The dynamic version
-  // key forces keeping its whole subtree, incl. release notes.) ArduinoJson v7
-  // JsonDocument allocates elastically, so this only grows to the kept subset.
+  // Stream-parse straight from the network: the filter discards all but
+  // staticPath + each firmware entry's notice/version, so peak RAM is just the
+  // small kept subset (not the ~40 KB manifest). This matters for `ota check`,
+  // which runs with the MQTT bridge still up and holding heap. (The dynamic
+  // version key forces keeping its whole subtree, incl. release notes.)
+  // readBytes() honours the stream timeout, so a slow TLS link won't be
+  // mistaken for end-of-input.
+  WiFiClient* stream = http.getStreamPtr();
+  stream->setTimeout(20000);
+
   JsonDocument filter;
   filter["staticPath"] = true;
   filter["device"][0]["firmware"][0]["notice"] = true;
@@ -147,8 +147,8 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
 
   JsonDocument doc;
   DeserializationError err =
-      deserializeJson(doc, body, DeserializationOption::Filter(filter));
-  body = String();  // free the raw manifest before we walk the parsed doc
+      deserializeJson(doc, *stream, DeserializationOption::Filter(filter));
+  http.end();
   if (err) {
     snprintf(reply, 160, "ERR: manifest parse (%s)", err.c_str());
     return false;
