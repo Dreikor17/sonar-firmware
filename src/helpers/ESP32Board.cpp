@@ -170,32 +170,51 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
       rootca_crt_bundle_end > rootca_crt_bundle_start) {
     bundle_len = (size_t)(rootca_crt_bundle_end - rootca_crt_bundle_start);
   }
-  if (bundle_len == 0) {
+  if (!dry_run && bundle_len == 0) {
     strcpy(reply, "ERR: no embedded cert bundle");
     return false;
   }
 
   // --- Fetch this variant's slim manifest ----------------------------------
-  // <OTA_MANIFEST_BASE>/<OTA_VARIANT>.json — a ~180 byte per-variant file, NOT
-  // the full config.json. Keeping the body tiny is what lets `ota check` run with
-  // the MQTT bridge up on no-PSRAM boards: only the TLS handshake costs heap, with
-  // no large JSON document layered on top.
+  // <OTA_MANIFEST_BASE>/<OTA_VARIANT>.json — a ~180 byte per-variant file, not the
+  // full config.json.
   char murl[200];
-  snprintf(murl, sizeof(murl), "%s/%s.json", OTA_MANIFEST_BASE, OTA_VARIANT);
-
-  WiFiClientSecure mclient;
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-  mclient.setCACertBundle(rootca_crt_bundle_start, bundle_len);
-#else
-  mclient.setCACertBundle(rootca_crt_bundle_start);
-#endif
-  mclient.setTimeout(15000);
-
   HTTPClient http;
-  if (!http.begin(mclient, murl)) {
-    strcpy(reply, "ERR: manifest connect failed");
-    return false;
+  WiFiClientSecure mclient;  // only used for the HTTPS (update) path
+
+  if (dry_run) {
+    // `ota check`: fetch over PLAIN HTTP. With no TLS handshake the fetch costs
+    // negligible heap, so the check runs with the MQTT bridge UP even on no-PSRAM
+    // — where the cert-bundle TLS verify would otherwise exhaust internal heap
+    // alongside the two live MQTT TLS sessions (free heap collapses to a few KB
+    // and the handshake + the bridge both fail). This only reads version info; the
+    // firmware download below (ota update) is always TLS-verified. Requires the
+    // manifest host to serve /v over HTTP (no forced HTTPS redirect).
+    if (strncmp(OTA_MANIFEST_BASE, "https://", 8) == 0) {
+      snprintf(murl, sizeof(murl), "http://%s/%s.json", OTA_MANIFEST_BASE + 8, OTA_VARIANT);
+    } else {
+      snprintf(murl, sizeof(murl), "%s/%s.json", OTA_MANIFEST_BASE, OTA_VARIANT);
+    }
+    if (!http.begin(murl)) {
+      strcpy(reply, "ERR: manifest connect failed");
+      return false;
+    }
+  } else {
+    // `ota update`: HTTPS. The bridge is torn down for an update so heap is free,
+    // and integrity matters because we're about to flash.
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+    mclient.setCACertBundle(rootca_crt_bundle_start, bundle_len);
+#else
+    mclient.setCACertBundle(rootca_crt_bundle_start);
+#endif
+    mclient.setTimeout(15000);
+    snprintf(murl, sizeof(murl), "%s/%s.json", OTA_MANIFEST_BASE, OTA_VARIANT);
+    if (!http.begin(mclient, murl)) {
+      strcpy(reply, "ERR: manifest connect failed");
+      return false;
+    }
   }
+
   // Force HTTP/1.0: a CDN (e.g. Cloudflare) answers HTTP/1.1 with chunked encoding
   // and no Content-Length; the raw chunked stream corrupts the parse. HTTP/1.0
   // yields a Connection: close, unframed body.
