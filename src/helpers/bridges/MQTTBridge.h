@@ -180,6 +180,11 @@ private:
   bool _ntp_synced;
   bool _ntp_sync_pending;  // Flag to trigger NTP sync from loop() instead of event handler
   bool _slots_setup_done;  // Deferred: slots set up after NTP sync
+  // WiFi.onEvent() handler registered once and never removed by end(); the bridge
+  // object is reused across restarts, so re-registering would leak handlers and
+  // duplicate every connect/disconnect log line. Inline-initialised so it survives
+  // construction and is NOT reset by end().
+  bool _wifi_event_registered = false;
   int _max_active_slots;   // Runtime limit: 5 with PSRAM, 2 without
 
   // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)

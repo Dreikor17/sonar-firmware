@@ -288,6 +288,14 @@ public:
     restartBridge();
   };
 
+  // Schedule a pull-OTA firmware update to run shortly (from the app loop), after
+  // the "Beginning update..." CLI reply has been transmitted. Deferred because the
+  // flash blocks the loop and then reboots, so it can't run inline with the reply.
+  // Returns true if scheduled. Default: not supported.
+  virtual bool beginDeferredOtaUpdate() {
+    return false;
+  };
+
   virtual int getQueueSize() {
     return 0; // no op by default
   };
