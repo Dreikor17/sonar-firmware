@@ -180,8 +180,10 @@ jobs:
               --notes "Rolling build of all *_observer_mqtt firmwares. The git short hash is embedded in each asset filename."
           fi
 
-          # Upload this build, overwriting same-named assets.
-          gh release upload "$RELEASE_TAG" out/* --clobber
+          # Upload this build, overwriting same-named assets. Exclude the .partsig
+          # files — those are consumed locally by the slim-manifest generator below,
+          # not published as release assets (and they'd break the hash-based prune).
+          gh release upload "$RELEASE_TAG" $(find out -maxdepth 1 -type f ! -name '*.partsig') --clobber
 
           # Prune old assets, but RETAIN the most recent KEEP_BUILDS build hashes
           # (not just the current one). The flasher SPA reads config.json once at
@@ -203,7 +205,10 @@ jobs:
           echo "Retaining build hashes:"; echo "$keep_hashes"
           gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' \
             | while read -r asset; do
-                ah=$(printf '%s' "$asset" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}')
+                # `|| true`: a non-firmware asset (no embedded hash) makes grep exit
+                # non-zero, which under `bash -e` would abort the step. Empty ah then
+                # falls through to delete-asset, cleaning up any stray non-.bin asset.
+                ah=$(printf '%s' "$asset" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}' || true)
                 if [ -n "$ah" ] && grep -qxF "$ah" <<<"$keep_hashes"; then
                   continue
                 fi
