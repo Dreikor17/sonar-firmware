@@ -1452,10 +1452,11 @@ void MyMesh::loop() {
     // headroom, then flash: otaFromManifest reboots into the new image on success
     // (so this never returns); on any abort (already up to date, partition change,
     // download error) it returns and we resume the bridge.
+    Serial.println("OTA: starting update");
     setBridgeState(false);
     char ota_reply[160];
     if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
-      MESH_DEBUG_PRINTLN("ota update aborted: %s", ota_reply);
+      Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
       setBridgeState(true);
     }
   }

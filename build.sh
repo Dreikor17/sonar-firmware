@@ -188,6 +188,13 @@ build_firmware() {
   cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
   cp .pio/build/$1/firmware.zip out/${FIRMWARE_FILENAME}.zip 2>/dev/null || true
 
+  # Emit the partition-table signature (ESP32) for OTA partition-compatibility
+  # checks. Keyed by env name so the slim-manifest generator can find it; the
+  # firmware computes the same signature at runtime from its flashed table.
+  if [ -f ".pio/build/$1/partitions.bin" ]; then
+    python3 scripts/partition_signature.py ".pio/build/$1/partitions.bin" > "out/$1.partsig" 2>/dev/null || true
+  fi
+
 }
 
 # firmwares containing $1 will be built

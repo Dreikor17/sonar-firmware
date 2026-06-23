@@ -73,6 +73,7 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[]) {
 #include <ArduinoJson.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <esp_partition.h>
 
 // Embedded CA bundle (produced by board_build.embed_files). Weak so non-bundle
 // builds still link; we check for presence at runtime.
@@ -115,6 +116,41 @@ static void ota_parseVersion(const char* ver, char* base_out, size_t base_sz, in
   } else {
     strncpy(base_out, ver, base_sz - 1);
     base_out[base_sz - 1] = 0;
+  }
+}
+
+// Canonical signature of the FLASHED partition table — MUST match
+// scripts/partition_signature.py: each entry "type:subtype:offset:size" in
+// lowercase hex, sorted by offset, joined by ','. Lets `ota update` compare the
+// target build's partition layout (carried in the manifest as partSig) against
+// what's actually on this device, instead of a blanket per-variant flag.
+static void ota_partitionSignature(char* out, size_t out_sz) {
+  struct PE { uint8_t type, subtype; uint32_t off, size; } e[24];
+  int n = 0;
+  esp_partition_iterator_t it =
+      esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, nullptr);
+  while (it != nullptr && n < (int)(sizeof(e) / sizeof(e[0]))) {
+    const esp_partition_t* p = esp_partition_get(it);
+    e[n].type = (uint8_t)p->type;
+    e[n].subtype = (uint8_t)p->subtype;
+    e[n].off = p->address;
+    e[n].size = p->size;
+    n++;
+    it = esp_partition_next(it);
+  }
+  esp_partition_iterator_release(it);  // safe on NULL (loop exhausted)
+  // insertion sort by offset (matches the script's sort key)
+  for (int i = 1; i < n; i++) {
+    PE k = e[i];
+    int j = i - 1;
+    while (j >= 0 && e[j].off > k.off) { e[j + 1] = e[j]; j--; }
+    e[j + 1] = k;
+  }
+  size_t pos = 0;
+  if (out_sz) out[0] = 0;
+  for (int i = 0; i < n && pos + 1 < out_sz; i++) {
+    pos += snprintf(out + pos, out_sz - pos, "%s%x:%x:%x:%x",
+                    i ? "," : "", e[i].type, e[i].subtype, (unsigned)e[i].off, (unsigned)e[i].size);
   }
 }
 
@@ -215,6 +251,8 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
     }
   }
 
+  if (!dry_run) { Serial.print("OTA: checking manifest "); Serial.println(murl); }
+
   // Force HTTP/1.0: a CDN (e.g. Cloudflare) answers HTTP/1.1 with chunked encoding
   // and no Content-Length; the raw chunked stream corrupts the parse. HTTP/1.0
   // yields a Connection: close, unframed body.
@@ -245,12 +283,27 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   strncpy(avail_base, doc["baseVersion"] | "", sizeof(avail_base) - 1);
   strncpy(avail_hash, doc["hash"] | "", sizeof(avail_hash) - 1);
   int avail_build = doc["build"] | -1;
-  bool partition_change = doc["partitionChange"] | false;
+  bool legacy_partition_change = doc["partitionChange"] | false;
+  char manifest_partsig[256] = {0};
+  strncpy(manifest_partsig, doc["partSig"] | "", sizeof(manifest_partsig) - 1);
   doc.clear();
 
   if (!file_url[0]) {
     strcpy(reply, "ERR: manifest missing file");
     return false;
+  }
+
+  // Partition compatibility: prefer the precise per-build signature — compare the
+  // target build's partition layout (manifest partSig) to what's actually flashed
+  // on THIS device. Refuse only on a real mismatch (OTA can't rewrite the table).
+  // Fall back to the legacy bool for manifests that predate partSig.
+  bool partition_change;
+  if (manifest_partsig[0]) {
+    char dev_partsig[256];
+    ota_partitionSignature(dev_partsig, sizeof(dev_partsig));
+    partition_change = (strcmp(dev_partsig, manifest_partsig) != 0);
+  } else {
+    partition_change = legacy_partition_change;
   }
 
   // --- Determine current-vs-available --------------------------------------
@@ -298,6 +351,9 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   const char* pc_note = partition_change ? " [partition change: cable flash]" : "";
 
   // --- Report (dry run / `ota check`) --------------------------------------
+  // Returns true iff an OTA-applicable update is available (not up-to-date and not
+  // a partition-change build). `ota check` ignores the return and just shows the
+  // reply; `ota update` uses it to decide whether to actually schedule the flash.
   if (dry_run) {
     if (up_to_date) {
       snprintf(reply, 160, "up to date: %s", avail_disp);
@@ -308,7 +364,7 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
     } else {
       snprintf(reply, 160, "update available: %s -> %s%s", own_disp, avail_disp, pc_note);
     }
-    return true;
+    return (!up_to_date && !partition_change);
   }
 
   // --- Gates (real `ota update`) -------------------------------------------
@@ -322,6 +378,8 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   }
 
   // --- Stream the .bin (the manifest's full URL) into the inactive OTA slot -
+  Serial.printf("OTA: update %s -> %s\n", own_disp, avail_disp);
+  Serial.print("OTA: downloading "); Serial.println(file_url);
   inhibit_sleep = true;  // keep awake through the flash
 
   WiFiClientSecure uclient;
@@ -332,6 +390,17 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
 #endif
   uclient.setTimeout(20000);
 
+  // Console progress to the USB serial (always on; MESH_DEBUG is off on the default
+  // observer profile). Non-capturing lambdas + a file-static decile, so the global
+  // httpUpdate object never holds a dangling reference after this function returns.
+  static int ota_progress_decile;
+  ota_progress_decile = -1;
+  httpUpdate.onProgress([](int cur, int total) {
+    if (total <= 0) return;
+    int d = (int)((int64_t)cur * 10 / total);
+    if (d != ota_progress_decile) { ota_progress_decile = d; Serial.printf("OTA: %d%%\n", d * 10); }
+  });
+  httpUpdate.onEnd([]() { Serial.println("OTA: write complete, rebooting..."); });
   httpUpdate.rebootOnUpdate(true);  // reboots into the new image on success
   t_httpUpdate_return ret = httpUpdate.update(uclient, file_url);
 
@@ -339,6 +408,7 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   inhibit_sleep = false;
   snprintf(reply, 160, "ERR: OTA failed (%d): %s", (int)ret,
            httpUpdate.getLastErrorString().c_str());
+  Serial.print("OTA: FAILED - "); Serial.println(reply);
   return false;
 #endif  // OTA_MANIFEST_BASE && OTA_VARIANT
 }

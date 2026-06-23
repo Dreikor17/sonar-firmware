@@ -809,13 +809,41 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         // the live MQTT sessions even on no-PSRAM boards. No bridge bounce needed.
         _board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply);
       } else {
-        // Update is DEFERRED: the flash blocks the loop and then reboots, so it
-        // must run only AFTER this reply has gone out over the mesh — otherwise
-        // the requester never gets a confirmation. The app loop runs it shortly.
-        if (_callbacks->beginDeferredOtaUpdate()) {
-          strcpy(reply, "Beginning update... (node will reboot if successful)");
-        } else {
-          strcpy(reply, "ERR: online OTA not available");
+        // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
+        // schedule the real update — which tears the bridge down, flashes, and
+        // reboots — when an applicable build actually exists. otaFromManifest(dry)
+        // returns true iff so; otherwise it leaves the explanation (up to date /
+        // cable flash / error) in reply, which we send without disturbing the
+        // bridge or misleading the user with a "Beginning update..." that no-ops.
+        if (_board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply)) {
+          // reply now holds "update available: <cur> -> <target> (N behind|new base)",
+          // where <target> is "vX.Y.Z.B (hash)". Pull <target> out for a friendlier
+          // start message. The "-> " ... trailing " (" framing is produced by
+          // ESP32Board::otaFromManifestImpl; <target> ends at the LAST " (" (the
+          // "(N behind)"/"(new base)" suffix), since the version's own hash-paren
+          // comes before it.
+          char target[48] = {0};
+          const char* arrow = strstr(reply, "-> ");
+          if (arrow) {
+            arrow += 3;
+            const char* suffix = nullptr;
+            for (const char* p = arrow; (p = strstr(p, " (")) != nullptr; p++) suffix = p;
+            size_t len = suffix ? (size_t)(suffix - arrow) : strlen(arrow);
+            if (len >= sizeof(target)) len = sizeof(target) - 1;
+            memcpy(target, arrow, len);
+            target[len] = 0;
+          }
+          // Update is DEFERRED so this ack goes out over the mesh before the flash
+          // blocks the loop and reboots (the app loop runs it shortly).
+          if (_callbacks->beginDeferredOtaUpdate()) {
+            if (target[0]) {
+              snprintf(reply, 160, "Updating to %s; reboots when done (~30s offline). Check 'ver' after.", target);
+            } else {
+              strcpy(reply, "Beginning update... (node will reboot if successful)");
+            }
+          } else {
+            strcpy(reply, "ERR: online OTA not available");
+          }
         }
       }
 #else

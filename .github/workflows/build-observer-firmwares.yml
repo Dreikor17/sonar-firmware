@@ -159,6 +159,8 @@ jobs:
         run: |
           mkdir -p out
           find artifacts -type f -name '*.bin' -exec cp -f {} out/ \;
+          # Per-env partition-table signatures (for the slim manifest's OTA gate).
+          find artifacts -type f -name '*.partsig' -exec cp -f {} out/ \;
           echo "Collected binaries:"; ls -1 out
 
       - name: Compute Short SHA
@@ -233,7 +235,8 @@ jobs:
             --config flasher/config.json \
             --out-dir flasher/v \
             --base-version "$FIRMWARE_VERSION" \
-            --build "$BUILD_NUMBER"
+            --build "$BUILD_NUMBER" \
+            --partsig-dir out
           printf '{\n  "baseVersion": "%s",\n  "build": %s\n}\n' \
             "$FIRMWARE_VERSION" "$BUILD_NUMBER" > flasher/observer-build-counter.json
           echo "Build $FIRMWARE_VERSION.$BUILD_NUMBER"
