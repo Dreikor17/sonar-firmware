@@ -792,13 +792,15 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #else
       strcpy(reply, "ERR: unsupported on this platform");
 #endif
-    } else if (memcmp(command, "start ota", 9) == 0) {
+    } else if (memcmp(command, "ota check", 9) == 0 || memcmp(command, "ota update", 10) == 0) {
+      // Observer pull-OTA: fetch this variant's build from the baked-in manifest
+      // and flash it. Intentionally a separate command from "start ota" (the
+      // manual ElegantOTA web-upload SoftAP) so a remote/online update is never
+      // triggered by someone expecting to hand-upload a binary.
+      //   ota check  -> report available build, do not flash
+      //   ota update -> download and flash, then reboot
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_URL)
-      // Observer pull-OTA: fetch this variant's build from the baked-in manifest.
-      // "start ota check" reports the available build without flashing.
-      const char* arg = command + 9;
-      while (*arg == ' ') arg++;
-      bool dry = (memcmp(arg, "check", 5) == 0);
+      bool dry = (memcmp(command, "ota check", 9) == 0);
       if (WiFi.status() != WL_CONNECTED) {
         strcpy(reply, "ERR: WiFi not connected");
       } else {
@@ -812,10 +814,13 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         if (!ok && !dry) _callbacks->setBridgeState(true);
       }
 #else
+      strcpy(reply, "ERR: online OTA not supported on this build");
+#endif
+    } else if (memcmp(command, "start ota", 9) == 0) {
+      // Manual OTA: bring up the ElegantOTA SoftAP for a hand-uploaded binary.
       if (!_board->startOTAUpdate(_prefs->node_name, reply)) {
         strcpy(reply, "Error");
       }
-#endif
     } else if (memcmp(command, "clock", 5) == 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
