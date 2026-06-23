@@ -117,10 +117,22 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
     strcpy(reply, "ERR: manifest connect failed");
     return false;
   }
+  // Force HTTP/1.0: a CDN (e.g. Cloudflare) answers HTTP/1.1 with
+  // Transfer-Encoding: chunked and no Content-Length, and the raw chunked
+  // stream can't be fed to the JSON parser (chunk-size frames corrupt it).
+  // HTTP/1.0 yields a Connection: close, unframed body that getString()
+  // assembles in full before we parse it.
+  http.useHTTP10(true);
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
     snprintf(reply, 160, "ERR: manifest HTTP %d", code);
     http.end();
+    return false;
+  }
+  String body = http.getString();
+  http.end();
+  if (body.length() == 0) {
+    strcpy(reply, "ERR: empty manifest");
     return false;
   }
 
@@ -135,8 +147,8 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
 
   JsonDocument doc;
   DeserializationError err =
-      deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
-  http.end();
+      deserializeJson(doc, body, DeserializationOption::Filter(filter));
+  body = String();  // free the raw manifest before we walk the parsed doc
   if (err) {
     snprintf(reply, 160, "ERR: manifest parse (%s)", err.c_str());
     return false;
