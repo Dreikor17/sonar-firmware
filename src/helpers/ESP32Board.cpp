@@ -95,6 +95,29 @@ static void ota_extractHash(const char* s, char* out, size_t out_sz) {
   out[n] = 0;
 }
 
+// Split a version token "vMAJOR.MINOR.PATCH[.BUILD]" into its base
+// ("vMAJOR.MINOR.PATCH") and build number (BUILD, or -1 if there's no 4th
+// component). The base has exactly two dots; a third dot introduces the build.
+static void ota_parseVersion(const char* ver, char* base_out, size_t base_sz, int* build_out) {
+  *build_out = -1;
+  if (base_sz) base_out[0] = 0;
+  if (!ver) return;
+  int dots = 0, third_dot = -1;
+  for (int j = 0; ver[j]; j++) {
+    if (ver[j] == '.' && ++dots == 3) { third_dot = j; break; }
+  }
+  if (third_dot >= 0) {
+    size_t n = (size_t)third_dot;
+    if (n >= base_sz) n = base_sz - 1;
+    memcpy(base_out, ver, n);
+    base_out[n] = 0;
+    *build_out = atoi(ver + third_dot + 1);
+  } else {
+    strncpy(base_out, ver, base_sz - 1);
+    base_out[base_sz - 1] = 0;
+  }
+}
+
 // Parameters handed to the worker task; lives on otaFromManifest()'s stack,
 // which stays valid because that function blocks until the worker signals done.
 struct OtaTaskArgs {
@@ -133,7 +156,7 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
 }
 
 bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char reply[]) {
-#if !defined(OTA_MANIFEST_URL) || !defined(OTA_VARIANT)
+#if !defined(OTA_MANIFEST_BASE) || !defined(OTA_VARIANT)
   strcpy(reply, "ERR: OTA not configured (build via build.sh)");
   return false;
 #else
@@ -152,7 +175,14 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
     return false;
   }
 
-  // --- Fetch + filter-parse the manifest -----------------------------------
+  // --- Fetch this variant's slim manifest ----------------------------------
+  // <OTA_MANIFEST_BASE>/<OTA_VARIANT>.json — a ~180 byte per-variant file, NOT
+  // the full config.json. Keeping the body tiny is what lets `ota check` run with
+  // the MQTT bridge up on no-PSRAM boards: only the TLS handshake costs heap, with
+  // no large JSON document layered on top.
+  char murl[200];
+  snprintf(murl, sizeof(murl), "%s/%s.json", OTA_MANIFEST_BASE, OTA_VARIANT);
+
   WiFiClientSecure mclient;
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
   mclient.setCACertBundle(rootca_crt_bundle_start, bundle_len);
@@ -162,16 +192,15 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   mclient.setTimeout(15000);
 
   HTTPClient http;
-  if (!http.begin(mclient, OTA_MANIFEST_URL)) {
+  if (!http.begin(mclient, murl)) {
     strcpy(reply, "ERR: manifest connect failed");
     return false;
   }
-  // Force HTTP/1.0: a CDN (e.g. Cloudflare) answers HTTP/1.1 with
-  // Transfer-Encoding: chunked and no Content-Length, and the raw chunked
-  // stream can't be fed to the JSON parser (chunk-size frames corrupt it).
-  // HTTP/1.0 yields a Connection: close, unframed body we can stream-parse.
+  // Force HTTP/1.0: a CDN (e.g. Cloudflare) answers HTTP/1.1 with chunked encoding
+  // and no Content-Length; the raw chunked stream corrupts the parse. HTTP/1.0
+  // yields a Connection: close, unframed body.
   http.useHTTP10(true);
-  http.setTimeout(20000);  // per-read timeout while streaming the body
+  http.setTimeout(20000);
   int code = http.GET();
   if (code != HTTP_CODE_OK) {
     snprintf(reply, 160, "ERR: manifest HTTP %d", code);
@@ -179,99 +208,96 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
     return false;
   }
 
-  // Stream-parse straight from the network: the filter discards all but
-  // staticPath + each firmware entry's notice/version, so peak RAM is just the
-  // small kept subset (not the ~40 KB manifest). This matters for `ota check`,
-  // which runs with the MQTT bridge still up and holding heap. (The dynamic
-  // version key forces keeping its whole subtree, incl. release notes.)
-  // readBytes() honours the stream timeout, so a slow TLS link won't be
-  // mistaken for end-of-input.
   WiFiClient* stream = http.getStreamPtr();
-  stream->setTimeout(20000);
-
-  JsonDocument filter;
-  filter["staticPath"] = true;
-  filter["device"][0]["firmware"][0]["notice"] = true;
-  filter["device"][0]["firmware"][0]["version"] = true;
+  stream->setTimeout(20000);  // readBytes honours this, so a slow TLS link != EOF
 
   JsonDocument doc;
-  DeserializationError err =
-      deserializeJson(doc, *stream, DeserializationOption::Filter(filter));
+  DeserializationError err = deserializeJson(doc, *stream);
   http.end();
   if (err) {
     snprintf(reply, 160, "ERR: manifest parse (%s)", err.c_str());
     return false;
   }
 
-  // Copy out of the document up front: doc gets cleared before these are used.
-  char base_url[128] = {0};
-  strncpy(base_url, doc["staticPath"] | "", sizeof(base_url) - 1);
-  if (!base_url[0]) {
-    strcpy(reply, "ERR: manifest missing staticPath");
-    return false;
-  }
-
-  // --- Locate the flash-update build for our variant -----------------------
-  const char* variant = OTA_VARIANT;
-  size_t vlen = strlen(variant);
-  char target_name[128] = {0};
-  bool partition_change = false;
-  bool found = false;
-
-  for (JsonObject dev : doc["device"].as<JsonArray>()) {
-    for (JsonObject fw : dev["firmware"].as<JsonArray>()) {
-      const char* notice = fw["notice"].is<const char*>() ? fw["notice"].as<const char*>() : nullptr;
-      for (JsonPair vp : fw["version"].as<JsonObject>()) {
-        for (JsonObject file : vp.value()["files"].as<JsonArray>()) {
-          const char* type = file["type"] | "";
-          const char* name = file["name"] | "";
-          if (strcmp(type, "flash-update") != 0) continue;
-          if (strncmp(name, variant, vlen) != 0 || name[vlen] != '-') continue;
-          strncpy(target_name, name, sizeof(target_name) - 1);
-          partition_change = (notice != nullptr && strcmp(notice, "partition-change") == 0);
-          found = true;
-          break;
-        }
-        if (found) break;
-      }
-      if (found) break;
-    }
-    if (found) break;
-  }
+  // Copy fields out before the document is reused/cleared.
+  char file_url[200] = {0}, avail_version[40] = {0}, avail_base[40] = {0}, avail_hash[24] = {0};
+  strncpy(file_url, doc["file"] | "", sizeof(file_url) - 1);
+  strncpy(avail_version, doc["version"] | "", sizeof(avail_version) - 1);
+  strncpy(avail_base, doc["baseVersion"] | "", sizeof(avail_base) - 1);
+  strncpy(avail_hash, doc["hash"] | "", sizeof(avail_hash) - 1);
+  int avail_build = doc["build"] | -1;
+  bool partition_change = doc["partitionChange"] | false;
   doc.clear();
 
-  if (!found) {
-    snprintf(reply, 160, "ERR: no build for %s in manifest", variant);
+  if (!file_url[0]) {
+    strcpy(reply, "ERR: manifest missing file");
     return false;
   }
 
-  char avail_hash[24], cur_hash[24];
-  ota_extractHash(target_name, avail_hash, sizeof(avail_hash));
-  ota_extractHash(current_ver, cur_hash, sizeof(cur_hash));
-  // Compare by shared prefix: git abbreviates the same commit to 7 chars on a
-  // shallow CI clone but 8 locally, so an exact match would miss equal builds.
-  size_t la = strlen(avail_hash), lc = strlen(cur_hash);
-  size_t m = (la < lc) ? la : lc;
-  bool up_to_date = (m >= 7 && strncmp(avail_hash, cur_hash, m) == 0);
+  // --- Determine current-vs-available --------------------------------------
+  // Our running version token (e.g. "v1.16.0.5"), i.e. current_ver up to the
+  // first '-' (which precedes "-observer-<hash>").
+  char own_version[40] = {0};
+  for (size_t i = 0; current_ver && current_ver[i] && current_ver[i] != '-' && i < sizeof(own_version) - 1; i++) {
+    own_version[i] = current_ver[i];
+  }
+  char own_base[40];
+  int own_build;
+  ota_parseVersion(own_version, own_base, sizeof(own_base), &own_build);
 
+  // Fallback identity by commit hash (handles pre-build-number / local images that
+  // carry no 4th version component). Shared-prefix compare absorbs the 7- vs 8-char
+  // git abbreviation difference.
+  char cur_hash[24];
+  ota_extractHash(current_ver, cur_hash, sizeof(cur_hash));
+  size_t lh = strlen(avail_hash), lc = strlen(cur_hash);
+  size_t m = (lh < lc) ? lh : lc;
+  bool hash_equal = (m >= 7 && strncmp(avail_hash, cur_hash, m) == 0);
+
+  bool same_base = (own_base[0] && avail_base[0] && strcmp(own_base, avail_base) == 0);
+  bool have_builds = (own_build >= 0 && avail_build >= 0);
+  bool diff_base = (own_base[0] && avail_base[0] && !same_base);
+
+  int behind = 0;
+  bool up_to_date;
+  if (same_base && have_builds) {
+    behind = avail_build - own_build;
+    up_to_date = (behind <= 0);
+  } else if (diff_base) {
+    up_to_date = false;  // different base version is always an update
+  } else {
+    up_to_date = hash_equal;  // unknown build numbers -> fall back to hash
+  }
+
+  const char* avail_disp = avail_version[0] ? avail_version : avail_hash;
+  const char* own_disp = own_version[0] ? own_version : cur_hash;
+  const char* pc_note = partition_change ? " [partition change: cable flash]" : "";
+
+  // --- Report (dry run / `ota check`) --------------------------------------
   if (dry_run) {
-    snprintf(reply, 160, "%s: %s -> %s%s", up_to_date ? "up to date" : "update available",
-             cur_hash, avail_hash, partition_change ? " [partition change: cable flash]" : "");
+    if (up_to_date) {
+      snprintf(reply, 160, "up to date: %s", avail_disp);
+    } else if (same_base && have_builds) {
+      snprintf(reply, 160, "update available: %s -> %s (%d behind)%s", own_disp, avail_disp, behind, pc_note);
+    } else if (diff_base) {
+      snprintf(reply, 160, "update available: %s -> %s (new base)%s", own_disp, avail_disp, pc_note);
+    } else {
+      snprintf(reply, 160, "update available: %s -> %s%s", own_disp, avail_disp, pc_note);
+    }
     return true;
   }
+
+  // --- Gates (real `ota update`) -------------------------------------------
   if (partition_change) {
-    snprintf(reply, 160, "ERR: %s needs cable flash (partition change)", avail_hash);
+    snprintf(reply, 160, "ERR: %s needs cable flash (partition change)", avail_disp);
     return false;
   }
   if (up_to_date) {
-    snprintf(reply, 160, "OK: already up to date (%s)", cur_hash);
+    snprintf(reply, 160, "OK: already up to date (%s)", avail_disp);
     return false;
   }
 
-  // --- Stream the .bin into the inactive OTA slot --------------------------
-  char url[256];
-  snprintf(url, sizeof(url), "%s/%s", base_url, target_name);
-
+  // --- Stream the .bin (the manifest's full URL) into the inactive OTA slot -
   inhibit_sleep = true;  // keep awake through the flash
 
   WiFiClientSecure uclient;
@@ -283,14 +309,14 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   uclient.setTimeout(20000);
 
   httpUpdate.rebootOnUpdate(true);  // reboots into the new image on success
-  t_httpUpdate_return ret = httpUpdate.update(uclient, url);
+  t_httpUpdate_return ret = httpUpdate.update(uclient, file_url);
 
   // Only reached on failure (success reboots inside update()).
   inhibit_sleep = false;
   snprintf(reply, 160, "ERR: OTA failed (%d): %s", (int)ret,
            httpUpdate.getLastErrorString().c_str());
   return false;
-#endif  // OTA_MANIFEST_URL && OTA_VARIANT
+#endif  // OTA_MANIFEST_BASE && OTA_VARIANT
 }
 #else
 bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char reply[]) {

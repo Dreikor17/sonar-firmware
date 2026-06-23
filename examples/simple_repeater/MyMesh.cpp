@@ -1445,7 +1445,7 @@ void MyMesh::loop() {
     MESH_DEBUG_PRINTLN("Radio params restored");
   }
 
-#if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_URL)
+#if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
   if (_ota_update_at && millisHasNowPassed(_ota_update_at)) { // deferred `ota update`
     _ota_update_at = 0;                                       // clear timer
     // The "Beginning update..." reply has now gone out. Free the bridge for heap

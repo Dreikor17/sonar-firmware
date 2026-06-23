@@ -149,11 +149,22 @@ build_firmware() {
   case "$1" in
     *observer*) VARIANT_TAG="-observer" ;;
   esac
-  EMBEDDED_VERSION_STRING="${FIRMWARE_VERSION}${VARIANT_TAG}-${COMMIT_HASH}"
+
+  # Observer build number: when CI provides FIRMWARE_BUILD_NUMBER (the per-base
+  # published-build counter), append it as a 4th version component so the node
+  # reports e.g. v1.16.0.5-observer-abcdef and `ota check` can show how many
+  # builds behind it is. Local dev builds leave it unset → no 4th component.
+  # The *filename* (FIRMWARE_VERSION_STRING above) is deliberately left without
+  # the build number so assets stay <env>-v<base>-<hash>.bin.
+  BUILD_NUMBER_SUFFIX=""
+  if [ -n "$FIRMWARE_BUILD_NUMBER" ]; then
+    BUILD_NUMBER_SUFFIX=".${FIRMWARE_BUILD_NUMBER}"
+  fi
+  EMBEDDED_VERSION_STRING="${FIRMWARE_VERSION}${BUILD_NUMBER_SUFFIX}${VARIANT_TAG}-${COMMIT_HASH}"
 
   # add firmware version info to end of existing platformio build flags in environment vars.
-  # OTA_VARIANT is the env name ($1) — it is exactly the asset-filename prefix used above, so the
-  # observer pull-OTA can match its own build in the web-flasher manifest (config.json).
+  # OTA_VARIANT is the env name ($1) — it selects this build's slim per-variant manifest
+  # (<OTA_MANIFEST_BASE>/<OTA_VARIANT>.json) that the observer pull-OTA fetches.
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${EMBEDDED_VERSION_STRING}\"' -DOTA_VARIANT='\"$1\"'"
 
   # disable debug flags if requested
