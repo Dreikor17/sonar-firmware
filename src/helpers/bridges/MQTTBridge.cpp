@@ -754,27 +754,44 @@ void MQTTBridge::initializeWiFiInTask() {
   WiFi.setAutoReconnect(true);
   WiFi.setAutoConnect(true);
 
-  // Set up WiFi event handlers for better diagnostics and immediate disconnection detection
-  WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
-    switch(event) {
-      case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-        MQTT_DEBUG_PRINTLN("WiFi connected: %s", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
-        // Set flag to trigger NTP sync from loop() instead of doing it here
-        if (!_ntp_synced && !_ntp_sync_pending) {
-          _ntp_sync_pending = true;
-        }
-        break;
-      case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-        s_wifi_disconnect_reason = info.wifi_sta_disconnected.reason;
-        s_wifi_disconnect_time = millis();
-        MQTT_DEBUG_PRINTLN("WiFi disconnected: reason %d", s_wifi_disconnect_reason);
-        break;
-      default:
-        break;
-    }
-  });
+  // Set up WiFi event handlers for better diagnostics and immediate disconnection
+  // detection. Register ONCE — the bridge is reused across restarts (e.g. stopped
+  // for `ota check`/`ota update`, or `set mqtt…` reconfigure) and WiFi.onEvent()
+  // never removes prior callbacks, so re-registering leaks handlers and duplicates
+  // every log line.
+  if (!_wifi_event_registered) {
+    WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
+      switch(event) {
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+          MQTT_DEBUG_PRINTLN("WiFi connected: %s", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
+          // Set flag to trigger NTP sync from loop() instead of doing it here
+          if (!_ntp_synced && !_ntp_sync_pending) {
+            _ntp_sync_pending = true;
+          }
+          break;
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+          s_wifi_disconnect_reason = info.wifi_sta_disconnected.reason;
+          s_wifi_disconnect_time = millis();
+          MQTT_DEBUG_PRINTLN("WiFi disconnected: reason %d", s_wifi_disconnect_reason);
+          break;
+        default:
+          break;
+      }
+    });
+    _wifi_event_registered = true;
+  }
 
-  WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
+  // Only (re)start the WiFi association if it isn't already up. end() leaves the
+  // STA link connected, so on a restart (e.g. after `ota check`) calling
+  // WiFi.begin() again forces a needless disconnect/reconnect — which also races
+  // the MQTT task's first DNS lookup (getaddrinfo fails until WiFi/DNS recovers).
+  // When already connected, the deferred slot setup still fires in mqttTaskLoop()
+  // because _ntp_synced persists across end() (only _slots_setup_done is reset).
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
+  } else if (!_ntp_synced && !_ntp_sync_pending) {
+    _ntp_sync_pending = true;  // already connected but never synced — kick NTP now
+  }
 
   // NOTE: Slot setup is deferred until after NTP sync in mqttTaskLoop().
   // JWT-auth slots need valid timestamps for token creation, and connecting

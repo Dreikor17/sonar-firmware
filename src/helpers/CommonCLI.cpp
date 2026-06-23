@@ -792,7 +792,40 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 #else
       strcpy(reply, "ERR: unsupported on this platform");
 #endif
+    } else if (memcmp(command, "ota check", 9) == 0 || memcmp(command, "ota update", 10) == 0) {
+      // Observer pull-OTA: fetch this variant's build from the baked-in manifest
+      // and flash it. Intentionally a separate command from "start ota" (the
+      // manual ElegantOTA web-upload SoftAP) so a remote/online update is never
+      // triggered by someone expecting to hand-upload a binary.
+      //   ota check  -> report available build, do not flash
+      //   ota update -> download and flash, then reboot
+#if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_URL)
+      if (WiFi.status() != WL_CONNECTED) {
+        strcpy(reply, "ERR: WiFi not connected");
+      } else if (memcmp(command, "ota check", 9) == 0) {
+        // Check is synchronous so its result lands in this reply. Free the MQTT
+        // bridge first: on a no-PSRAM board only ~70 KB heap is free with the
+        // bridge up, and a third TLS connection (the manifest fetch) alongside the
+        // two live MQTT sessions drives free heap to a few hundred bytes, which
+        // truncates the read. The WiFi STA link survives end(); restore after.
+        _callbacks->setBridgeState(false);
+        _board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply);
+        _callbacks->setBridgeState(true);
+      } else {
+        // Update is DEFERRED: the flash blocks the loop and then reboots, so it
+        // must run only AFTER this reply has gone out over the mesh — otherwise
+        // the requester never gets a confirmation. The app loop runs it shortly.
+        if (_callbacks->beginDeferredOtaUpdate()) {
+          strcpy(reply, "Beginning update... (node will reboot if successful)");
+        } else {
+          strcpy(reply, "ERR: online OTA not available");
+        }
+      }
+#else
+      strcpy(reply, "ERR: online OTA not supported on this build");
+#endif
     } else if (memcmp(command, "start ota", 9) == 0) {
+      // Manual OTA: bring up the ElegantOTA SoftAP for a hand-uploaded binary.
       if (!_board->startOTAUpdate(_prefs->node_name, reply)) {
         strcpy(reply, "Error");
       }
