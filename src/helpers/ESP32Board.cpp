@@ -288,8 +288,13 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
     up_to_date = hash_equal;  // unknown build numbers -> fall back to hash
   }
 
-  const char* avail_disp = avail_version[0] ? avail_version : avail_hash;
-  const char* own_disp = own_version[0] ? own_version : cur_hash;
+  // Display strings carry the short commit hash in the same form as the asset
+  // filename, e.g. "v1.16.0.2 (5acfdd7)" (or just the hash if there's no version).
+  char avail_disp[72], own_disp[72];
+  if (avail_version[0]) snprintf(avail_disp, sizeof(avail_disp), "%s (%s)", avail_version, avail_hash);
+  else                  snprintf(avail_disp, sizeof(avail_disp), "%s", avail_hash);
+  if (own_version[0])   snprintf(own_disp, sizeof(own_disp), "%s (%s)", own_version, cur_hash);
+  else                  snprintf(own_disp, sizeof(own_disp), "%s", cur_hash);
   const char* pc_note = partition_change ? " [partition change: cable flash]" : "";
 
   // --- Report (dry run / `ota check`) --------------------------------------
@@ -312,7 +317,7 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
     return false;
   }
   if (up_to_date) {
-    snprintf(reply, 160, "OK: already up to date (%s)", avail_disp);
+    snprintf(reply, 160, "OK: already up to date: %s", avail_disp);
     return false;
   }
 
