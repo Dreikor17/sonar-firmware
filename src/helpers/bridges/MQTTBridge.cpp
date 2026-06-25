@@ -1139,7 +1139,14 @@ void MQTTBridge::initSlotClients() {
       _slots[index].last_tls_stack_err = error.esp_tls_stack_err;
       _slots[index].last_sock_errno = error.esp_transport_sock_errno;
       _slots[index].last_error_time = millis();
-      if (error.esp_tls_last_esp_err != 0 || error.esp_tls_stack_err != 0 || error.esp_transport_sock_errno != 0) {
+      if (error.error_type == MQTT_ERROR_TYPE_CONNECTION_REFUSED) {
+        // Broker rejected the MQTT CONNECT itself — not a transport failure.
+        // return code: 1=protocol, 2=client-id rejected, 3=server unavailable,
+        // 4=bad username/password, 5=not authorized. Codes 3/4/5 point at a
+        // server-side lockout or auth problem rather than the network.
+        MQTT_DEBUG_PRINTLN("MQTT%d connection refused by broker (return code=%d)",
+          index + 1, (int)error.connect_return_code);
+      } else if (error.esp_tls_last_esp_err != 0 || error.esp_tls_stack_err != 0 || error.esp_transport_sock_errno != 0) {
         MQTT_DEBUG_PRINTLN("MQTT%d error: tls=%d, tls_stack=%d, sock=%d, type=%d",
           index + 1, error.esp_tls_last_esp_err, error.esp_tls_stack_err,
           error.esp_transport_sock_errno, error.error_type);
