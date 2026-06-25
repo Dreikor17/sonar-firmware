@@ -368,6 +368,16 @@ class CommonCLI {
   void handleGetCmd(uint32_t sender_timestamp, char* command, char* reply);
   void handleSetCmd(uint32_t sender_timestamp, char* command, char* reply);
 
+  // Observer/MQTT/WiFi/timezone/alert/SNMP CLI handling lives in the fork-owned
+  // CommonCLI_Observer.cpp to keep these branches out of the upstream-tracked
+  // CommonCLI.cpp. Each returns true if it recognized (handled) the command, or
+  // false to fall through to the base get/set parsing.
+  bool handleObserverSetCmd(uint32_t sender_timestamp, const char* config, char* reply);
+  bool handleObserverGetCmd(uint32_t sender_timestamp, const char* config, char* reply);
+  // Observer-only top-level commands (ota check/update, tls.bundletest, alert test)
+  // also live in CommonCLI_Observer.cpp; returns true if it handled the command.
+  bool handleObserverCommand(uint32_t sender_timestamp, char* command, char* reply);
+
 public:
   CommonCLI(mesh::MainBoard& board, mesh::RTCClock& rtc, SensorManager& sensors, RegionMap& region_map, ClientACL& acl, NodePrefs* prefs, CommonCLICallbacks* callbacks)
       : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks) { }
