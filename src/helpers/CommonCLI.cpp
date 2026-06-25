@@ -50,6 +50,21 @@ static int getMQTTPresetNameCount() {
   return MQTT_PRESET_COUNT + 2; // built-ins + custom + none
 }
 
+static bool isValidNtpHostname(const char* host) {
+  if (!host || host[0] == '\0') return false;
+  size_t len = strlen(host);
+  if (len > 63) return false;
+  if (host[0] == '.' || host[len - 1] == '.') return false;
+  for (size_t i = 0; i < len; i++) {
+    char c = host[i];
+    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+          (c >= '0' && c <= '9') || c == '.' || c == '-')) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static const char* getMQTTPresetNameByIndex(int index) {
   if (index < MQTT_PRESET_COUNT) return MQTT_PRESETS[index].name;
   if (index == MQTT_PRESET_COUNT) return MQTT_PRESET_CUSTOM;
@@ -657,6 +672,7 @@ void CommonCLI::syncMQTTPrefsToNodePrefs() {
   }
   StrHelper::strncpy(_prefs->mqtt_owner_public_key, _mqtt_prefs.mqtt_owner_public_key, sizeof(_prefs->mqtt_owner_public_key));
   StrHelper::strncpy(_prefs->mqtt_email, _mqtt_prefs.mqtt_email, sizeof(_prefs->mqtt_email));
+  StrHelper::strncpy(_prefs->mqtt_ntp_server, _mqtt_prefs.mqtt_ntp_server, sizeof(_prefs->mqtt_ntp_server));
 }
 
 void CommonCLI::syncNodePrefsToMQTTPrefs() {
@@ -688,6 +704,7 @@ void CommonCLI::syncNodePrefsToMQTTPrefs() {
   }
   StrHelper::strncpy(_mqtt_prefs.mqtt_owner_public_key, _prefs->mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
   StrHelper::strncpy(_mqtt_prefs.mqtt_email, _prefs->mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
+  StrHelper::strncpy(_mqtt_prefs.mqtt_ntp_server, _prefs->mqtt_ntp_server, sizeof(_mqtt_prefs.mqtt_ntp_server));
 }
 #endif
 
@@ -1466,6 +1483,35 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       strcpy(reply, "Error: interval must be between 1-60 minutes");
     }
+  } else if (memcmp(config, "mqtt.ntp ", 9) == 0) {
+    const char* host = &config[9];
+    while (*host == ' ') host++;
+    bool clearing = strcmp(host, "none") == 0;
+    if (!clearing && !isValidNtpHostname(host)) {
+      strcpy(reply, "Error: invalid NTP hostname");
+    } else {
+      if (clearing) {
+        _prefs->mqtt_ntp_server[0] = '\0';
+      } else {
+        StrHelper::strncpy(_prefs->mqtt_ntp_server, host, sizeof(_prefs->mqtt_ntp_server));
+      }
+      savePrefs();
+#ifdef ESP_PLATFORM
+      // Validate by running an immediate sync. syncMqttNtp() marshals onto the MQTT
+      // task (Core 0) so no NTP I/O happens on this (Core 1) CLI thread.
+      if (WiFi.status() != WL_CONNECTED) {
+        strcpy(reply, "OK - saved (WiFi not connected; NTP sync pending)");
+      } else if (!_callbacks->isMqttBridgeRunning()) {
+        strcpy(reply, "OK - saved (MQTT bridge not running)");
+      } else if (_callbacks->syncMqttNtp()) {
+        strcpy(reply, "OK - time synced");
+      } else {
+        strcpy(reply, "Error: NTP sync failed");
+      }
+#else
+      strcpy(reply, "OK - saved");
+#endif
+    }
   } else if (memcmp(config, "wifi.ssid ", 10) == 0) {
     StrHelper::strncpy(_prefs->wifi_ssid, &config[10], sizeof(_prefs->wifi_ssid));
     savePrefs();
@@ -2020,6 +2066,22 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
   } else if (memcmp(config, "mqtt.interval", 13) == 0) {
     uint32_t minutes = (_prefs->mqtt_status_interval + 29999) / 60000;
     sprintf(reply, "> %u minutes (%lu ms)", minutes, (unsigned long)_prefs->mqtt_status_interval);
+  } else if (memcmp(config, "mqtt.ntp.diag", 13) == 0 && (config[13] == '\0' || config[13] == ' ')) {
+#ifdef ESP_PLATFORM
+    // Connectivity probe across all configured NTP servers; never updates the clock.
+    // Serial console (sender_timestamp == 0) gets a detailed table; LoRa gets a compact list.
+    if (WiFi.status() != WL_CONNECTED) {
+      strcpy(reply, "Error: WiFi not connected");
+    } else if (!_callbacks->isMqttBridgeRunning()) {
+      strcpy(reply, "Error: MQTT bridge not running");
+    } else if (!_callbacks->runMqttNtpDiag(reply, 160, sender_timestamp == 0)) {
+      strcpy(reply, "Error: NTP diag unavailable");
+    }
+#else
+    strcpy(reply, "Error: not supported on this platform");
+#endif
+  } else if (memcmp(config, "mqtt.ntp", 8) == 0 && (config[8] == '\0' || config[8] == ' ')) {
+    sprintf(reply, "> %s", MQTTBridge::effectiveNtpPrimary(_prefs));
   } else if (config[0] == 'm' && config[1] == 'q' && config[2] == 't' && config[3] == 't' &&
              config[4] >= '1' && config[4] <= ('0' + MAX_MQTT_SLOTS) && config[5] == '.') {
     // Slot-based commands: get mqtt1.preset, get mqtt1.server, etc.
