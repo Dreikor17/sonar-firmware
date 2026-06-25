@@ -401,28 +401,6 @@ int MQTTMessageBuilder::buildRawJSON(
   return buildRawMessage(origin, origin_id, timestamp, raw_hex, buffer, buffer_size);
 }
 
-const char* MQTTMessageBuilder::getPacketTypeString(int packet_type) {
-  switch (packet_type) {
-    case 0: return "0";   // REQ
-    case 1: return "1";   // RESPONSE
-    case 2: return "2";   // TXT_MSG
-    case 3: return "3";   // ACK
-    case 4: return "4";   // ADVERT
-    case 5: return "5";   // GRP_TXT
-    case 6: return "6";   // GRP_DATA
-    case 7: return "7";   // ANON_REQ
-    case 8: return "8";   // PATH
-    case 9: return "9";   // TRACE
-    case 10: return "10"; // MULTIPART
-    case 11: return "11"; // Type11
-    case 12: return "12"; // Type12
-    case 13: return "13"; // Type13
-    case 14: return "14"; // Type14
-    case 15: return "15"; // RAW_CUSTOM
-    default: return "0";
-  }
-}
-
 const char* MQTTMessageBuilder::getRouteTypeString(int route_type) {
   switch (route_type) {
     case 0: return "F"; // FLOOD
@@ -432,26 +410,15 @@ const char* MQTTMessageBuilder::getRouteTypeString(int route_type) {
   }
 }
 
-void MQTTMessageBuilder::formatTimestamp(unsigned long timestamp, char* buffer, size_t buffer_size) {
-  // Simplified timestamp formatting - in real implementation would use proper time
-  snprintf(buffer, buffer_size, "2024-01-01T12:00:00.000000");
-}
-
-void MQTTMessageBuilder::formatTime(unsigned long timestamp, char* buffer, size_t buffer_size) {
-  // Simplified time formatting
-  snprintf(buffer, buffer_size, "12:00:00");
-}
-
-void MQTTMessageBuilder::formatDate(unsigned long timestamp, char* buffer, size_t buffer_size) {
-  // Simplified date formatting
-  snprintf(buffer, buffer_size, "01/01/2024");
-}
-
 void MQTTMessageBuilder::bytesToHex(const uint8_t* data, size_t len, char* hex, size_t hex_size) {
   if (hex_size < len * 2 + 1) return;
-  
+
+  // Nibble lookup instead of a per-byte snprintf("%02X"): same uppercase hex
+  // output, but avoids re-parsing the format string up to ~512 times per publish.
+  static const char HEX_DIGITS[] = "0123456789ABCDEF";
   for (size_t i = 0; i < len; i++) {
-    snprintf(hex + i * 2, 3, "%02X", data[i]);
+    hex[i * 2]     = HEX_DIGITS[data[i] >> 4];
+    hex[i * 2 + 1] = HEX_DIGITS[data[i] & 0x0F];
   }
   hex[len * 2] = '\0';
 }

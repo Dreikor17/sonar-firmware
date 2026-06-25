@@ -19,9 +19,6 @@
  * regex fields.
  */
 class MQTTMessageBuilder {
-private:
-  static const int JSON_BUFFER_SIZE = 1024;
-  
 public:
   /**
    * Format the MQTT JSON `timestamp` field (same rule for status, packet, raw).
@@ -215,29 +212,9 @@ public:
 
 private:
   /**
-   * Convert packet type to string
-   */
-  static const char* getPacketTypeString(int packet_type);
-
-  /**
    * Convert route type to string
    */
   static const char* getRouteTypeString(int route_type);
-
-  /**
-   * Format timestamp to ISO 8601 format
-   */
-  static void formatTimestamp(unsigned long timestamp, char* buffer, size_t buffer_size);
-
-  /**
-   * Format time to HH:MM:SS format
-   */
-  static void formatTime(unsigned long timestamp, char* buffer, size_t buffer_size);
-
-  /**
-   * Format date to DD/MM/YYYY format
-   */
-  static void formatDate(unsigned long timestamp, char* buffer, size_t buffer_size);
 
   /**
    * Convert bytes to hex string (uppercase)
