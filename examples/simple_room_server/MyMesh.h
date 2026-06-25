@@ -296,5 +296,20 @@ public:
   int getQueueSize() override {
     return bridge ? bridge->getQueueSize() : 0;
   }
+
+  bool isMqttBridgeRunning() override {
+    return bridge && bridge->isRunning();
+  }
+
+  bool syncMqttNtp() override {
+    if (!bridge || !bridge->isRunning()) return false;
+    // Marshal onto the MQTT task (Core 0); this runs on the CLI thread (Core 1).
+    return bridge->requestForcedNtpSync();
+  }
+
+  bool runMqttNtpDiag(char* reply, size_t reply_size, bool verbose) override {
+    if (!bridge || !bridge->isRunning()) return false;
+    return bridge->ntpDiag(reply, reply_size, verbose);
+  }
 #endif
 };

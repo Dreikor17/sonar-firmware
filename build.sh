@@ -149,10 +149,23 @@ build_firmware() {
   case "$1" in
     *observer*) VARIANT_TAG="-observer" ;;
   esac
-  EMBEDDED_VERSION_STRING="${FIRMWARE_VERSION}${VARIANT_TAG}-${COMMIT_HASH}"
 
-  # add firmware version info to end of existing platformio build flags in environment vars
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${EMBEDDED_VERSION_STRING}\"'"
+  # Observer build number: when CI provides FIRMWARE_BUILD_NUMBER (the per-base
+  # published-build counter), append it as a 4th version component so the node
+  # reports e.g. v1.16.0.5-observer-abcdef and `ota check` can show how many
+  # builds behind it is. Local dev builds leave it unset → no 4th component.
+  # The *filename* (FIRMWARE_VERSION_STRING above) is deliberately left without
+  # the build number so assets stay <env>-v<base>-<hash>.bin.
+  BUILD_NUMBER_SUFFIX=""
+  if [ -n "$FIRMWARE_BUILD_NUMBER" ]; then
+    BUILD_NUMBER_SUFFIX=".${FIRMWARE_BUILD_NUMBER}"
+  fi
+  EMBEDDED_VERSION_STRING="${FIRMWARE_VERSION}${BUILD_NUMBER_SUFFIX}${VARIANT_TAG}-${COMMIT_HASH}"
+
+  # add firmware version info to end of existing platformio build flags in environment vars.
+  # OTA_VARIANT is the env name ($1) — it selects this build's slim per-variant manifest
+  # (<OTA_MANIFEST_BASE>/<OTA_VARIANT>.json) that the observer pull-OTA fetches.
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${EMBEDDED_VERSION_STRING}\"' -DOTA_VARIANT='\"$1\"'"
 
   # disable debug flags if requested
   disable_debug_flags
@@ -174,6 +187,13 @@ build_firmware() {
   cp .pio/build/$1/firmware.hex out/${FIRMWARE_FILENAME}.hex 2>/dev/null || true
   cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
   cp .pio/build/$1/firmware.zip out/${FIRMWARE_FILENAME}.zip 2>/dev/null || true
+
+  # Emit the partition-table signature (ESP32) for OTA partition-compatibility
+  # checks. Keyed by env name so the slim-manifest generator can find it; the
+  # firmware computes the same signature at runtime from its flashed table.
+  if [ -f ".pio/build/$1/partitions.bin" ]; then
+    python3 scripts/partition_signature.py ".pio/build/$1/partitions.bin" > "out/$1.partsig" 2>/dev/null || true
+  fi
 
 }
 

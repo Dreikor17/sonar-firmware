@@ -1076,6 +1076,33 @@ region save
 
 ---
 
+#### View or change the NTP server (MQTT observer only)
+**Usage:**
+- `get mqtt.ntp`
+- `set mqtt.ntp <hostname>`
+- `set mqtt.ntp none`
+
+**Description:** Sets the primary NTP server used for clock sync (required for JWT MQTT auth). On `set`, the device attempts an immediate sync of the just-configured server (primary only, so a typo fails fast) when WiFi is connected and the MQTT bridge is running.
+
+**Fallbacks:** If the primary fails, the firmware tries `pool.ntp.org`, `time.google.com`, `time.cloudflare.com`, `time.aws.com`, and `time.nist.gov` in order (skipping duplicates).
+
+**Default:** `pool.ntp.org` (when unset or `none`)
+
+---
+
+#### Diagnose NTP server connectivity (MQTT observer only)
+**Usage:**
+- `get mqtt.ntp.diag`
+
+**Description:** Probes every configured NTP server (the custom primary, if set, plus the built-in fallbacks) and reports whether each responds. This is a pure connectivity diagnostic — it does **not** change the system clock.
+
+- **Serial console:** prints a detailed table with each server's reported UTC time (or `FAIL`).
+- **Over LoRa:** returns a compact `<server> ok|fail` list, one per line.
+
+Requires WiFi connected and the MQTT bridge running.
+
+---
+
 #### View or change the speed of the bridge (RS-232 only)
 **Usage:**
 - `get bridge.baud`
