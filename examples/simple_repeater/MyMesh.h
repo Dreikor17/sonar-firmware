@@ -132,7 +132,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #ifdef WITH_SNMP
   MeshSNMPAgent _snmp_agent;
 #endif
+#ifdef WITH_MQTT_BRIDGE
   AlertReporter _alerter;
+#endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
@@ -168,9 +170,11 @@ protected:
   int getAGCResetInterval() const override {
     return ((int)_prefs.agc_reset_interval) * 4000;   // milliseconds
   }
+#ifdef WITH_MQTT_BRIDGE
   uint32_t getRadioWatchdogMillis() const override {
-    return ((uint32_t)_prefs.radio_watchdog_minutes) * 60000UL;
+    return ((uint32_t)_cli.getObserverPrefs()->radio_watchdog_minutes) * 60000UL;
   }
+#endif
   uint8_t getExtraAckTransmitCount() const override {
     return _prefs.multi_acks;
   }
@@ -215,8 +219,10 @@ public:
   // CommonCLICallbacks
   void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) override;
 
+#ifdef WITH_MQTT_BRIDGE
   void onAlertConfigChanged() override { _alerter.onConfigChanged(); }
   bool sendAlertText(const char* text) override { return _alerter.sendText(text); }
+#endif
   bool resolveAlertScope(TransportKey& dest) override;
   bool formatFileSystem() override;
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
@@ -253,7 +259,7 @@ public:
   void setBridgeState(bool enable) override {
     if (!bridge) {
 #ifdef WITH_MQTT_BRIDGE
-      bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);
+      bridge = new MQTTBridge(&_prefs, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
 #endif
       if (!bridge) return;
     }
@@ -303,8 +309,12 @@ public:
   }
 
   void restartBridgeSlot(int slot) override {
+#ifdef WITH_MQTT_BRIDGE
     if (!bridge || !bridge->isRunning()) return;
-    bridge->setSlotPreset(slot, _prefs.mqtt_slot_preset[slot]);
+    bridge->setSlotPreset(slot, _cli.getObserverPrefs()->mqtt_slot_preset[slot]);
+#else
+    (void)slot;
+#endif
   }
 
   // Schedule the pull-OTA flash to run from loop() in ~2.5 s, leaving time for the

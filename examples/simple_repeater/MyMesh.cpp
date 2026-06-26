@@ -951,21 +951,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #ifdef WITH_MQTT_BRIDGE
   _prefs.agc_reset_interval = 7;    // 28 seconds (secs/4) — prevents AGC drift on long-running observers
 #endif
-  _prefs.radio_watchdog_minutes = 5; // 5 minutes default
-
-  // Alert channel defaults — disabled by default, and the channel is left
-  // unconfigured so a freshly-flashed observer never broadcasts on the
-  // well-known Public hashtag. Operators must explicitly pick a private
-  // key (`set alert.psk`) or a hashtag (`set alert.hashtag`) before alerts
-  // can fire. The sender prefix on outgoing alert messages is always the
-  // node name (`set name ...`), so there's no separate `alert.name`.
-  _prefs.alert_enabled = 0;
-  _prefs.alert_psk_hex[0] = '\0';
-  _prefs.alert_hashtag[0] = '\0';
-  _prefs.alert_region[0] = '\0';      // empty = use default_scope
-  _prefs.alert_wifi_minutes = 30;     // 30 minutes
-  _prefs.alert_mqtt_minutes = 240;    // 4 hours
-  _prefs.alert_min_interval_min = 60; // re-arm window: 1 hour
+  // Observer defaults (radio_watchdog, alert.*, snmp.*) moved to applyMQTTDefaults()
+  // in MQTTDefaults.h — they live in /mqtt_prefs now, not NodePrefs.
 
   // bridge defaults
   _prefs.bridge_enabled = 1;    // enabled
@@ -976,21 +963,12 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
   StrHelper::strncpy(_prefs.bridge_secret, "LVSITANOS", sizeof(_prefs.bridge_secret));
 
-  // SNMP defaults
-  _prefs.snmp_enabled = 0;
-  StrHelper::strncpy(_prefs.snmp_community, "public", sizeof(_prefs.snmp_community));
-
   // GPS defaults
   _prefs.gps_enabled = 0;
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
 
-  // MQTT slot/IATA/timezone defaults come from /mqtt_prefs via loadPrefs (see MQTTDefaults.h)
-  _prefs.mqtt_origin[0] = '\0';
-
-  // WiFi defaults (user-configured via CLI; placeholders until set)
-  StrHelper::strncpy(_prefs.wifi_ssid, "ssid_here", sizeof(_prefs.wifi_ssid));
-  StrHelper::strncpy(_prefs.wifi_password, "password_here", sizeof(_prefs.wifi_password));
+  // MQTT/WiFi/timezone/radio_watchdog defaults live in /mqtt_prefs now (see applyMQTTDefaults).
 
   _prefs.adc_multiplier = 0.0f; // 0.0f means use default board multiplier
 
@@ -1042,7 +1020,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   if (_prefs.bridge_enabled) {
 #ifdef WITH_MQTT_BRIDGE
     // Defer construction to avoid static init crashes on ESP32 classic
-    bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);
+    bridge = new MQTTBridge(&_prefs, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
 #endif
     if (bridge) {
       // Set device public key for MQTT topics
@@ -1065,7 +1043,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
       // Set stats sources for automatic stats collection
       bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
 #ifdef WITH_SNMP
-      if (_prefs.snmp_enabled) {
+      if (_cli.getObserverPrefs()->snmp_enabled) {
         _snmp_agent.setNodeName(_prefs.node_name);
         _snmp_agent.setFirmwareVersion(getFirmwareVer());
         bridge->setSNMPAgent(&_snmp_agent);
@@ -1082,8 +1060,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // Passing `this` as the callbacks lets the reporter resolve a TransportKey
   // scope (alert.region override, falling back to default_scope) so alert
   // floods ride the same scope as adverts/channel messages.
-  _alerter.begin(&_prefs, this, this);
-#if defined(WITH_MQTT_BRIDGE)
+#ifdef WITH_MQTT_BRIDGE
+  _alerter.begin(&_prefs, _cli.getObserverPrefs(), this, this);
   _alerter.setBridge(bridge);
 #endif
 
@@ -1118,12 +1096,15 @@ bool MyMesh::resolveAlertScope(TransportKey& dest) {
   // RegionMap so the operator can name a region that doesn't exist yet
   // without polluting region_map state — we just silently fall through
   // to default_scope on miss.
-  if (_prefs.alert_region[0]) {
-    auto r = region_map.findByNamePrefix(_prefs.alert_region);
+#ifdef WITH_MQTT_BRIDGE
+  const char* alert_region = _cli.getObserverPrefs()->alert_region;
+  if (alert_region[0]) {
+    auto r = region_map.findByNamePrefix(alert_region);
     if (r && region_map.getTransportKeysFor(*r, &dest, 1) > 0 && !dest.isNull()) {
       return true;
     }
   }
+#endif
   if (!default_scope.isNull()) {
     dest = default_scope;
     return true;
@@ -1473,7 +1454,9 @@ void MyMesh::loop() {
   uptime_millis += now - last_millis;
   last_millis = now;
 
+#ifdef WITH_MQTT_BRIDGE
   _alerter.onLoop(now);
+#endif
 
 #ifdef WITH_SNMP
   // Push radio stats to SNMP agent every 2 seconds

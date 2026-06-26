@@ -180,7 +180,9 @@ protected:
   virtual uint32_t getCADFailMaxDuration() const;
   virtual int getInterferenceThreshold() const { return 0; }    // disabled by default
   virtual int getAGCResetInterval() const { return 0; }    // disabled by default
-  virtual uint32_t getRadioWatchdogMillis() const;
+#ifdef WITH_MQTT_BRIDGE
+  virtual uint32_t getRadioWatchdogMillis() const;  // observer-only radio recovery
+#endif
 
 public:
   void begin();

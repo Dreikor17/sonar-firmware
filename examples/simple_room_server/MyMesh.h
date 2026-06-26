@@ -126,7 +126,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #ifdef WITH_MQTT_BRIDGE
   MQTTBridge* bridge;
 #endif
+#ifdef WITH_MQTT_BRIDGE
   AlertReporter _alerter;
+#endif
 
   void addPost(ClientInfo* client, const char* postData);
   void pushPostToClient(ClientInfo* client, PostInfo& post);
@@ -201,8 +203,10 @@ public:
   // CommonCLICallbacks
   void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) override;
 
+#ifdef WITH_MQTT_BRIDGE
   void onAlertConfigChanged() override { _alerter.onConfigChanged(); }
   bool sendAlertText(const char* text) override { return _alerter.sendText(text); }
+#endif
   bool resolveAlertScope(TransportKey& dest) override;
   bool formatFileSystem() override;
   void sendSelfAdvertisement(int delay_millis, bool flood) override;
@@ -241,7 +245,7 @@ public:
   void setBridgeState(bool enable) override {
     if (!bridge) {
 #ifdef WITH_MQTT_BRIDGE
-      bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);
+      bridge = new MQTTBridge(&_prefs, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
 #endif
       if (!bridge) return;
     }
@@ -289,8 +293,12 @@ public:
   }
 
   void restartBridgeSlot(int slot) override {
+#ifdef WITH_MQTT_BRIDGE
     if (!bridge || !bridge->isRunning()) return;
-    bridge->setSlotPreset(slot, _prefs.mqtt_slot_preset[slot]);
+    bridge->setSlotPreset(slot, _cli.getObserverPrefs()->mqtt_slot_preset[slot]);
+#else
+    (void)slot;
+#endif
   }
 
   int getQueueSize() override {
