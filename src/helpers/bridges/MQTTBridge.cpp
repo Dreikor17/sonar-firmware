@@ -107,13 +107,20 @@ static bool isWiFiConfigValid(const MQTTPrefs* obs) {
 
 #ifdef WITH_MQTT_BRIDGE
 
+// A custom slot endpoint is complete if a port is set, or if the host is a
+// full URI with a scheme (esp-mqtt applies scheme default ports, and the URI
+// builder in setupSlot() preserves any embedded port/path).
+static bool customEndpointComplete(const char* host, uint16_t port) {
+  return host[0] != '\0' && (port != 0 || strstr(host, "://") != nullptr);
+}
+
 bool MQTTBridge::isConfigValid(const MQTTPrefs* obs) {
   if (!obs || !isWiFiConfigValid(obs)) return false;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     const char* preset_name = obs->mqtt_slot_preset[i];
     if (preset_name[0] == '\0' || strcmp(preset_name, MQTT_PRESET_NONE) == 0) continue;
     if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
-      if (obs->mqtt_slot_host[i][0] != '\0' && obs->mqtt_slot_port[i] != 0) return true;
+      if (customEndpointComplete(obs->mqtt_slot_host[i], obs->mqtt_slot_port[i])) return true;
     } else if (findMQTTPreset(preset_name) != nullptr) {
       return true;
     }
@@ -1926,7 +1933,7 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
     slot.enabled = true;
     slot.preset = nullptr;
     // Custom broker settings should already be set via setSlotCustomBroker
-    if (_initialized && strlen(slot.host) > 0 && slot.port > 0) {
+    if (_initialized && customEndpointComplete(slot.host, slot.port)) {
       setupSlot(slot_index);
     }
     return;
