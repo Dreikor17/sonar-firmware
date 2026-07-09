@@ -258,6 +258,10 @@ float MyMesh::getAirtimeBudgetFactor() const {
   return _prefs.airtime_factor;
 }
 
+bool MyMesh::getCADEnabled() const {
+  return true; // hardware CAD before TX (no CLI toggle on companion; enabled by default)
+}
+
 int MyMesh::getInterferenceThreshold() const {
   return 0; // disabled for now, until currentRSSI() problem is resolved
 }

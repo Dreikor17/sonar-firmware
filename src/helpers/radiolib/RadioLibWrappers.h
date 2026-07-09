@@ -14,9 +14,11 @@ protected:
   unsigned long last_recv_millis;
   unsigned long last_radio_interrupt_millis;  // updated on any ISR event, even CRC errors
   uint8_t _preamble_sf;
+  bool _cad_enabled;
 
   void idle() override;
   void startRecv() override;
+  int16_t performChannelScan();
   float packetScoreInt(float snr, int sf, int packet_len);
   virtual bool isReceivingPacket() =0;
   virtual void doResetAGC();
@@ -26,6 +28,7 @@ public:
     n_recv = n_sent = n_recv_errors = 0;
     last_recv_millis = 0;
     last_radio_interrupt_millis = 0;
+    _cad_enabled = false;
   }
 
   void begin() override;
@@ -55,6 +58,7 @@ public:
 
   int getNoiseFloor() const override { return _noise_floor; }
   void triggerNoiseFloorCalibrate(int threshold) override;
+  void setCADEnabled(bool enable) override { _cad_enabled = enable; }
   void resetAGC() override;
 
   void loop() override;

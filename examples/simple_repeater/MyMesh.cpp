@@ -979,6 +979,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.rx_boosted_gain = 1; // enabled by default;
 #endif
 #endif
+  _prefs.radio_fem_rxgain = 1;      // LoRa FEM RX gain on by default (FEM boards)
+  _prefs.cad_enabled = 0;           // hardware CAD before TX (off by default; 'set cad on')
 
   pending_discover_tag = 0;
   pending_discover_until = 0;

@@ -66,6 +66,12 @@ struct NodePrefs { // persisted to file
 
   uint8_t loop_detect;
 
+  // Restored from upstream (dropped by the 22eb9b87 revert). Persisted at the same
+  // /com_prefs offsets upstream uses (293, 294) so the file stays upstream-aligned.
+  uint8_t radio_fem_rxgain;  // LoRa FEM RX-gain (LNA); default on. Hardware driving is
+                             // wired per-board in the FEM-restore change; persisted here.
+  uint8_t cad_enabled;       // hardware Channel Activity Detection before TX; default off
+
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) were moved out of
   // NodePrefs into MQTTPrefs (persisted to /mqtt_prefs) so this struct stays
   // aligned with upstream. See struct MQTTPrefs below.

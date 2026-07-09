@@ -150,8 +150,15 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     // MQTT gap here followed by a trailing observer block; detect that layout by the
     // extra length, skip the gap, and recover the tail so those settings survive
     // the upgrade (the file is rewritten in the new layout by loadPrefs afterwards).
+    // Defaults for the trailing fields that older/shorter files may not contain.
+    // (upstream defaults: FEM RX gain on, CAD off) — overwritten below if present.
+    _prefs->radio_fem_rxgain = 1;
+    _prefs->cad_enabled = 0;
+    // New-format tail is 5 bytes (rx_boosted_gain, flood_max_unscoped/advert,
+    // radio_fem_rxgain, cad_enabled). A larger `extra` means an old fork file with
+    // the legacy MQTT gap; detect and recover it below.
     size_t extra = file.available();
-    if (extra > 3) {
+    if (extra > 5) {
       _com_prefs_needs_upgrade = true;
       size_t gap = 0;
       if (extra > LEGACY_MQTT_GAP_6SLOT && extra <= LEGACY_MQTT_GAP_6SLOT + LEGACY_OBS_TAIL_MAX) {
@@ -256,6 +263,12 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
       if (file.available() >= (int)sizeof(_prefs->flood_max_advert)) {
         file.read((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));
       }
+      if (file.available() >= (int)sizeof(_prefs->radio_fem_rxgain)) {   // 293
+        file.read((uint8_t *)&_prefs->radio_fem_rxgain, sizeof(_prefs->radio_fem_rxgain));
+      }
+      if (file.available() >= (int)sizeof(_prefs->cad_enabled)) {        // 294
+        file.read((uint8_t *)&_prefs->cad_enabled, sizeof(_prefs->cad_enabled));
+      }
     }
 
     // sanitise bad pref values
@@ -272,6 +285,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     _prefs->adc_multiplier = constrain(_prefs->adc_multiplier, 0.0f, 10.0f);
     _prefs->path_hash_mode = constrain(_prefs->path_hash_mode, 0, 2);   // NOTE: mode 3 reserved for future
     _prefs->loop_detect = constrain(_prefs->loop_detect, 0, 3);          // LOOP_DETECT_OFF..LOOP_DETECT_STRICT
+    _prefs->radio_fem_rxgain = constrain(_prefs->radio_fem_rxgain, 0, 1); // boolean
+    _prefs->cad_enabled = constrain(_prefs->cad_enabled, 0, 1);          // boolean
 
     // sanitise bad bridge pref values
     _prefs->bridge_enabled = constrain(_prefs->bridge_enabled, 0, 1);
@@ -348,9 +363,11 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
     // MQTT/observer settings are stored in /mqtt_prefs, not here. No zero-gap is
     // written anymore — /com_prefs holds only the (non-observer) fields below.
-    file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));
-    file.write((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped));
-    file.write((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));
+    file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));      // 290
+    file.write((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped)); // 291
+    file.write((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));    // 292
+    file.write((uint8_t *)&_prefs->radio_fem_rxgain, sizeof(_prefs->radio_fem_rxgain));    // 293
+    file.write((uint8_t *)&_prefs->cad_enabled, sizeof(_prefs->cad_enabled));              // 294
 
     file.close();
   }
@@ -963,6 +980,10 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->interference_threshold = atoi(&config[11]);
     savePrefs();
     strcpy(reply, "OK");
+  } else if (memcmp(config, "cad ", 4) == 0) {
+    _prefs->cad_enabled = memcmp(&config[4], "on", 2) == 0;
+    savePrefs();
+    strcpy(reply, "OK");
   } else if (memcmp(config, "agc.reset.interval ", 19) == 0) {
     _prefs->agc_reset_interval = atoi(&config[19]) / 4;
     savePrefs();
@@ -1249,6 +1270,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %s", StrHelper::ftoa(_prefs->airtime_factor));
   } else if (memcmp(config, "int.thresh", 10) == 0) {
     sprintf(reply, "> %d", (uint32_t) _prefs->interference_threshold);
+  } else if (memcmp(config, "cad", 3) == 0) {
+    sprintf(reply, "> %s", _prefs->cad_enabled ? "on" : "off");
   } else if (memcmp(config, "agc.reset.interval", 18) == 0) {
     sprintf(reply, "> %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
   } else if (memcmp(config, "multi.acks", 10) == 0) {
