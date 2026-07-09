@@ -206,7 +206,7 @@ void AlertReporter::formatAge(unsigned long age_ms, char* out, size_t out_size) 
 }
 
 void AlertReporter::onLoop(unsigned long now_ms) {
-  if (!_prefs || !_obs->alert_enabled) return;
+  if (!_prefs || !_obs || !_obs->alert_enabled) return;
   if (!_mesh) return;
 
   // Throttle: ~5 s cadence. The thresholds are minutes-scale so this is fine.

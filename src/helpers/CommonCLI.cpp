@@ -378,6 +378,7 @@ static File openMqttPrefsRead(FILESYSTEM* fs) {
 void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
   // Initialize with defaults first
   setMQTTPrefsDefaults(&_mqtt_prefs);
+  _mqtt_prefs_hold = false;
 
   // Whether the loaded /mqtt_prefs already contained the observer fields (snmp/
   // watchdog/alert) appended in Phase 2 — if not, they may be carried over from an
@@ -411,8 +412,10 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
             }
           } else {
             // Unknown (newer) version: don't risk misreading a layout we don't know.
-            // Keep defaults for this boot and leave the file untouched (no downgrade).
-            MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs version unsupported, using defaults");
+            // Keep defaults for this boot and hold the file so later savePrefs()
+            // calls can't overwrite the newer config (no downgrade).
+            _mqtt_prefs_hold = true;
+            MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs version unsupported, using defaults (file preserved)");
           }
         }
       }
@@ -611,6 +614,13 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
 }
 
 void CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
+  if (_mqtt_prefs_hold) {
+    // /mqtt_prefs was written by newer firmware; overwriting it here (v1 header +
+    // this boot's defaults) would destroy that config. Observer settings changed
+    // this boot are not persisted until current-or-older firmware is flashed.
+    MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs from newer firmware, not overwriting");
+    return;
+  }
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   fs->remove("/mqtt_prefs");
   File file = fs->open("/mqtt_prefs", FILE_O_WRITE);

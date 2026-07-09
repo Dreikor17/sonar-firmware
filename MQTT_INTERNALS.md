@@ -47,7 +47,11 @@ Remaining integration points in upstream files:
 bytes of a legacy (headerless) file, whose payload begins with the `mqtt_origin`
 string. Bump `MQTT_PREFS_VERSION` when the payload layout changes incompatibly; a file
 whose version this firmware doesn't recognize is left untouched and the in-memory prefs
-fall back to defaults (no downgrade, no misread).
+fall back to defaults (no downgrade, no misread). `saveMQTTPrefs()` also refuses to
+write while such a file is present (`_mqtt_prefs_hold`), so a `set` command after a
+firmware downgrade can't clobber the newer config — observer settings changed in that
+state simply don't persist. The frozen legacy layouts are pinned with `static_assert`s
+in `CommonCLI.h`, so every target build re-verifies the fleet's file offsets.
 
 Adding a field to the current version stays backward compatible: append it to the end
 of `MQTTPrefs`. An older, shorter payload still loads and the missing tail keeps its
