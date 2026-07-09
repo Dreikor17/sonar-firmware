@@ -129,29 +129,17 @@ struct MQTTPrefs {
   char mqtt_owner_public_key[65]; // Owner public key (hex string)
   char mqtt_email[64]; // Owner email address
 
-  // --- Legacy fields (vestigial, kept for binary compatibility) ---
-  // Migration now uses OldMQTTPrefs/ThreeSlotMQTTPrefs structs. These fields are unused
-  // but must remain to preserve byte offsets for devices that already saved a new-format /mqtt_prefs file.
-  uint8_t _legacy_analyzer_us_enabled;
-  uint8_t _legacy_analyzer_eu_enabled;
-  char _legacy_mqtt_server[64];
-  uint16_t _legacy_mqtt_port;
-  char _legacy_mqtt_username[32];
-  char _legacy_mqtt_password[64];
-
-  // --- New fields (appended at end for migration safety) ---
+  // Per-slot extended fields
   char mqtt_slot_token[MAX_MQTT_SLOTS][48];    // Per-slot token (e.g., MeshRank account token)
   char mqtt_slot_topic[MAX_MQTT_SLOTS][96];    // Per-slot custom topic template (custom preset only)
   char mqtt_slot_audience[MAX_MQTT_SLOTS][64];  // JWT audience (non-empty enables JWT auth for custom slots)
 
-  // --- Appended fields (added after initial 6-slot migration) ---
   uint8_t mqtt_rx_enabled;       // Enable RX packet uplinking (default: on)
   char mqtt_ntp_server[64];      // Custom NTP server; empty = pool.ntp.org
 
-  // --- Observer non-MQTT settings, moved out of NodePrefs (Phase 2). Appended at
-  // the end so existing /mqtt_prefs files (which lack them) still load. On first
-  // boot after upgrade, loadPrefsInt() captures the old /com_prefs trailing block
-  // into LegacyObserverTail and loadMQTTPrefs() copies the values here. ---
+  // Observer non-MQTT settings (moved out of NodePrefs so this file stays aligned
+  // with upstream). New fields are appended here so a shorter /mqtt_prefs payload
+  // from an earlier v1 firmware still loads; the missing tail keeps its default.
   uint8_t snmp_enabled;            // boolean
   char snmp_community[24];         // community string (default "public")
   uint8_t radio_watchdog_minutes;  // 0=disabled, 1-120 minutes (observer-only radio recovery)
@@ -162,6 +150,19 @@ struct MQTTPrefs {
   uint16_t alert_min_interval_min; // min minutes between same-fault alerts, default 60
   char alert_hashtag[24];          // readback for `get alert.hashtag`
   char alert_region[31];           // optional region override; empty = default_scope
+};
+
+// /mqtt_prefs is written with an 8-byte header so the format is self-describing.
+// Files with no header are legacy (versionless) and detected by size in loadMQTTPrefs.
+// The magic leads with a non-ASCII byte so it can never collide with the first
+// bytes of a legacy file, whose payload starts with the mqtt_origin string.
+static const uint8_t MQTT_PREFS_MAGIC[4] = {0xF5, 'M', 'Q', 'P'};
+static const uint16_t MQTT_PREFS_VERSION = 1;  // bump when the MQTTPrefs payload layout changes incompatibly
+
+struct MQTTPrefsHeader {
+  uint8_t  magic[4];    // MQTT_PREFS_MAGIC
+  uint16_t version;     // MQTT_PREFS_VERSION
+  uint16_t payload_len; // sizeof(MQTTPrefs) at write time (sanity / forward-compat)
 };
 
 // 3-slot MQTTPrefs layout — used for migrating from 3-slot to 6-slot format.
@@ -195,6 +196,44 @@ struct ThreeSlotMQTTPrefs {
   char _legacy_mqtt_password[64];
   char mqtt_slot_token[3][48];
   char mqtt_slot_topic[3][96];
+};
+
+// Versionless 6-slot layout as shipped on mqtt-bridge-implementation-flex (the
+// several-thousand-device deployed fleet). This is the current MQTTPrefs minus the
+// observer tail, and it still carries the now-removed `_legacy_*` fields mid-struct.
+// loadMQTTPrefs reads a headerless file of this size into this struct, then
+// field-copies (dropping `_legacy_*`) into the compact versioned MQTTPrefs.
+struct Legacy6SlotMQTTPrefs {
+  char mqtt_origin[32];
+  char mqtt_iata[8];
+  uint8_t mqtt_status_enabled;
+  uint8_t mqtt_packets_enabled;
+  uint8_t mqtt_raw_enabled;
+  uint8_t mqtt_tx_enabled;
+  uint32_t mqtt_status_interval;
+  char wifi_ssid[32];
+  char wifi_password[64];
+  uint8_t wifi_power_save;
+  char timezone_string[32];
+  int8_t timezone_offset;
+  char mqtt_slot_preset[MAX_MQTT_SLOTS][24];
+  char mqtt_slot_host[MAX_MQTT_SLOTS][64];
+  uint16_t mqtt_slot_port[MAX_MQTT_SLOTS];
+  char mqtt_slot_username[MAX_MQTT_SLOTS][32];
+  char mqtt_slot_password[MAX_MQTT_SLOTS][64];
+  char mqtt_owner_public_key[65];
+  char mqtt_email[64];
+  uint8_t _legacy_analyzer_us_enabled;
+  uint8_t _legacy_analyzer_eu_enabled;
+  char _legacy_mqtt_server[64];
+  uint16_t _legacy_mqtt_port;
+  char _legacy_mqtt_username[32];
+  char _legacy_mqtt_password[64];
+  char mqtt_slot_token[MAX_MQTT_SLOTS][48];
+  char mqtt_slot_topic[MAX_MQTT_SLOTS][96];
+  char mqtt_slot_audience[MAX_MQTT_SLOTS][64];
+  uint8_t mqtt_rx_enabled;
+  char mqtt_ntp_server[64];
 };
 
 // Observer settings captured from the trailing block of an old-format /com_prefs

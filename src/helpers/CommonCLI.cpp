@@ -367,6 +367,14 @@ static void setMQTTPrefsDefaults(MQTTPrefs* prefs) {
   applyMQTTDefaults(prefs);
 }
 
+static File openMqttPrefsRead(FILESYSTEM* fs) {
+#if defined(RP2040_PLATFORM)
+  return fs->open("/mqtt_prefs", "r");
+#else
+  return fs->open("/mqtt_prefs");
+#endif
+}
+
 void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
   // Initialize with defaults first
   setMQTTPrefsDefaults(&_mqtt_prefs);
@@ -378,137 +386,200 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
 
   bool file_existed = fs->exists("/mqtt_prefs");
   if (file_existed) {
-    // Load from separate MQTT prefs file
-#if defined(RP2040_PLATFORM)
-    File file = fs->open("/mqtt_prefs", "r");
-#else
-    File file = fs->open("/mqtt_prefs");
-#endif
+    // First, peek the header to see if this is a versioned file.
+    File file = openMqttPrefsRead(fs);
+    bool versioned = false;
     if (file) {
       size_t file_size = file.size();
-
-      // Detect old (pre-slot) format by file size.
-      // Old MQTTPrefs was ~472 bytes (no slot fields). New is ~1464 bytes.
-      // If the file is smaller than the new struct but close to OldMQTTPrefs size,
-      // read it with the old layout and migrate.
-      if (file_size > 0 && file_size <= sizeof(OldMQTTPrefs)) {
-        OldMQTTPrefs old_prefs;
-        memset(&old_prefs, 0, sizeof(old_prefs));
-        size_t bytes_read = file.read((uint8_t *)&old_prefs, file_size < sizeof(old_prefs) ? file_size : sizeof(old_prefs));
-        file.close();
-
-        if (bytes_read > 0) {
-          MESH_DEBUG_PRINTLN("MQTT: Migrating old-format prefs to slot-based layout");
-
-          // Copy common fields (identical layout at start of both structs)
-          memcpy(_mqtt_prefs.mqtt_origin, old_prefs.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
-          memcpy(_mqtt_prefs.mqtt_iata, old_prefs.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
-          _mqtt_prefs.mqtt_status_enabled = old_prefs.mqtt_status_enabled;
-          _mqtt_prefs.mqtt_packets_enabled = old_prefs.mqtt_packets_enabled;
-          _mqtt_prefs.mqtt_raw_enabled = old_prefs.mqtt_raw_enabled;
-          _mqtt_prefs.mqtt_tx_enabled = old_prefs.mqtt_tx_enabled;
-          _mqtt_prefs.mqtt_status_interval = old_prefs.mqtt_status_interval;
-          memcpy(_mqtt_prefs.wifi_ssid, old_prefs.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
-          memcpy(_mqtt_prefs.wifi_password, old_prefs.wifi_password, sizeof(_mqtt_prefs.wifi_password));
-          _mqtt_prefs.wifi_power_save = old_prefs.wifi_power_save;
-          memcpy(_mqtt_prefs.timezone_string, old_prefs.timezone_string, sizeof(_mqtt_prefs.timezone_string));
-          _mqtt_prefs.timezone_offset = old_prefs.timezone_offset;
-
-          // Migrate shared auth fields
-          memcpy(_mqtt_prefs.mqtt_owner_public_key, old_prefs.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
-          memcpy(_mqtt_prefs.mqtt_email, old_prefs.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
-
-          // Migrate analyzer presets to slots
-          if (old_prefs.mqtt_analyzer_us_enabled == 1) {
-            strncpy(_mqtt_prefs.mqtt_slot_preset[0], "analyzer-us", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
+      if (file_size >= sizeof(MQTTPrefsHeader)) {
+        MQTTPrefsHeader hdr;
+        if (file.read((uint8_t *)&hdr, sizeof(hdr)) == sizeof(hdr)
+            && memcmp(hdr.magic, MQTT_PREFS_MAGIC, sizeof(hdr.magic)) == 0) {
+          versioned = true;
+          if (hdr.version == MQTT_PREFS_VERSION) {
+            // Current version: the payload follows the header. Read up to
+            // sizeof(MQTTPrefs); a shorter payload (an earlier v1 firmware that
+            // hadn't appended a tail field) leaves the trailing fields at their
+            // defaults, and a longer one (a future append) is truncated harmlessly.
+            size_t payload_avail = file_size - sizeof(hdr);
+            size_t to_read = payload_avail < sizeof(_mqtt_prefs) ? payload_avail : sizeof(_mqtt_prefs);
+            size_t got = file.read((uint8_t *)&_mqtt_prefs, to_read);
+            if (got != to_read) {
+              setMQTTPrefsDefaults(&_mqtt_prefs);
+            } else {
+              has_observer_fields = true;  // observer tail is part of the v1 payload
+            }
           } else {
-            strncpy(_mqtt_prefs.mqtt_slot_preset[0], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
+            // Unknown (newer) version: don't risk misreading a layout we don't know.
+            // Keep defaults for this boot and leave the file untouched (no downgrade).
+            MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs version unsupported, using defaults");
           }
-          if (old_prefs.mqtt_analyzer_eu_enabled == 1) {
-            strncpy(_mqtt_prefs.mqtt_slot_preset[1], "analyzer-eu", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
-          } else {
-            strncpy(_mqtt_prefs.mqtt_slot_preset[1], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
-          }
-
-          // Migrate custom server to slot 3
-          if (old_prefs.mqtt_server[0] != '\0' && old_prefs.mqtt_port > 0) {
-            strncpy(_mqtt_prefs.mqtt_slot_preset[2], "custom", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
-            strncpy(_mqtt_prefs.mqtt_slot_host[2], old_prefs.mqtt_server, sizeof(_mqtt_prefs.mqtt_slot_host[2]) - 1);
-            _mqtt_prefs.mqtt_slot_port[2] = old_prefs.mqtt_port;
-            strncpy(_mqtt_prefs.mqtt_slot_username[2], old_prefs.mqtt_username, sizeof(_mqtt_prefs.mqtt_slot_username[2]) - 1);
-            strncpy(_mqtt_prefs.mqtt_slot_password[2], old_prefs.mqtt_password, sizeof(_mqtt_prefs.mqtt_slot_password[2]) - 1);
-          } else {
-            strncpy(_mqtt_prefs.mqtt_slot_preset[2], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
-          }
-
-          // Save migrated prefs in new format
-          saveMQTTPrefs(fs);
         }
-      } else if (file_size > 0 && file_size <= sizeof(ThreeSlotMQTTPrefs)) {
-        // 3-slot format → 6-slot migration
-        // Array sizes changed from [3] to [6], shifting all field offsets.
-        // Read into old layout struct and field-copy to new layout.
-        ThreeSlotMQTTPrefs old3;
-        memset(&old3, 0, sizeof(old3));
-        size_t bytes_to_read = file_size < sizeof(old3) ? file_size : sizeof(old3);
-        size_t bytes_read = file.read((uint8_t *)&old3, bytes_to_read);
-        file.close();
+      }
+      file.close();
+    }
 
-        if (bytes_read > 0) {
-          MESH_DEBUG_PRINTLN("MQTT: Migrating 3-slot prefs to 6-slot layout");
+    if (!versioned) {
+      // Headerless (legacy) file. Detect the historical on-disk layout by size,
+      // migrate it into the compact versioned struct, and re-save — which adds the
+      // header and drops the vestigial `_legacy_*` fields. Reopen because the peek
+      // above advanced the read cursor past the (non-matching) leading bytes.
+      File file = openMqttPrefsRead(fs);
+      if (file) {
+        size_t file_size = file.size();
 
-          // Copy non-slot fields (identical layout)
-          memcpy(_mqtt_prefs.mqtt_origin, old3.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
-          memcpy(_mqtt_prefs.mqtt_iata, old3.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
-          _mqtt_prefs.mqtt_status_enabled = old3.mqtt_status_enabled;
-          _mqtt_prefs.mqtt_packets_enabled = old3.mqtt_packets_enabled;
-          _mqtt_prefs.mqtt_raw_enabled = old3.mqtt_raw_enabled;
-          _mqtt_prefs.mqtt_tx_enabled = old3.mqtt_tx_enabled;
-          _mqtt_prefs.mqtt_status_interval = old3.mqtt_status_interval;
-          memcpy(_mqtt_prefs.wifi_ssid, old3.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
-          memcpy(_mqtt_prefs.wifi_password, old3.wifi_password, sizeof(_mqtt_prefs.wifi_password));
-          _mqtt_prefs.wifi_power_save = old3.wifi_power_save;
-          memcpy(_mqtt_prefs.timezone_string, old3.timezone_string, sizeof(_mqtt_prefs.timezone_string));
-          _mqtt_prefs.timezone_offset = old3.timezone_offset;
+        // Detect old (pre-slot) format by file size.
+        // Old MQTTPrefs was ~472 bytes (no slot fields).
+        // If the file is smaller than the new struct but close to OldMQTTPrefs size,
+        // read it with the old layout and migrate.
+        if (file_size > 0 && file_size <= sizeof(OldMQTTPrefs)) {
+          OldMQTTPrefs old_prefs;
+          memset(&old_prefs, 0, sizeof(old_prefs));
+          size_t bytes_read = file.read((uint8_t *)&old_prefs, file_size < sizeof(old_prefs) ? file_size : sizeof(old_prefs));
+          file.close();
 
-          // Copy slot fields for indices 0-2 from old layout
-          for (int i = 0; i < 3; i++) {
-            memcpy(_mqtt_prefs.mqtt_slot_preset[i], old3.mqtt_slot_preset[i], sizeof(_mqtt_prefs.mqtt_slot_preset[i]));
-            memcpy(_mqtt_prefs.mqtt_slot_host[i], old3.mqtt_slot_host[i], sizeof(_mqtt_prefs.mqtt_slot_host[i]));
-            _mqtt_prefs.mqtt_slot_port[i] = old3.mqtt_slot_port[i];
-            memcpy(_mqtt_prefs.mqtt_slot_username[i], old3.mqtt_slot_username[i], sizeof(_mqtt_prefs.mqtt_slot_username[i]));
-            memcpy(_mqtt_prefs.mqtt_slot_password[i], old3.mqtt_slot_password[i], sizeof(_mqtt_prefs.mqtt_slot_password[i]));
-            memcpy(_mqtt_prefs.mqtt_slot_token[i], old3.mqtt_slot_token[i], sizeof(_mqtt_prefs.mqtt_slot_token[i]));
-            memcpy(_mqtt_prefs.mqtt_slot_topic[i], old3.mqtt_slot_topic[i], sizeof(_mqtt_prefs.mqtt_slot_topic[i]));
+          if (bytes_read > 0) {
+            MESH_DEBUG_PRINTLN("MQTT: Migrating old-format prefs to versioned layout");
+
+            // Copy common fields (identical layout at start of both structs)
+            memcpy(_mqtt_prefs.mqtt_origin, old_prefs.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
+            memcpy(_mqtt_prefs.mqtt_iata, old_prefs.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
+            _mqtt_prefs.mqtt_status_enabled = old_prefs.mqtt_status_enabled;
+            _mqtt_prefs.mqtt_packets_enabled = old_prefs.mqtt_packets_enabled;
+            _mqtt_prefs.mqtt_raw_enabled = old_prefs.mqtt_raw_enabled;
+            _mqtt_prefs.mqtt_tx_enabled = old_prefs.mqtt_tx_enabled;
+            _mqtt_prefs.mqtt_status_interval = old_prefs.mqtt_status_interval;
+            memcpy(_mqtt_prefs.wifi_ssid, old_prefs.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
+            memcpy(_mqtt_prefs.wifi_password, old_prefs.wifi_password, sizeof(_mqtt_prefs.wifi_password));
+            _mqtt_prefs.wifi_power_save = old_prefs.wifi_power_save;
+            memcpy(_mqtt_prefs.timezone_string, old_prefs.timezone_string, sizeof(_mqtt_prefs.timezone_string));
+            _mqtt_prefs.timezone_offset = old_prefs.timezone_offset;
+
+            // Migrate shared auth fields
+            memcpy(_mqtt_prefs.mqtt_owner_public_key, old_prefs.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
+            memcpy(_mqtt_prefs.mqtt_email, old_prefs.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
+
+            // Migrate analyzer presets to slots
+            if (old_prefs.mqtt_analyzer_us_enabled == 1) {
+              strncpy(_mqtt_prefs.mqtt_slot_preset[0], "analyzer-us", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
+            } else {
+              strncpy(_mqtt_prefs.mqtt_slot_preset[0], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
+            }
+            if (old_prefs.mqtt_analyzer_eu_enabled == 1) {
+              strncpy(_mqtt_prefs.mqtt_slot_preset[1], "analyzer-eu", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
+            } else {
+              strncpy(_mqtt_prefs.mqtt_slot_preset[1], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
+            }
+
+            // Migrate custom server to slot 3
+            if (old_prefs.mqtt_server[0] != '\0' && old_prefs.mqtt_port > 0) {
+              strncpy(_mqtt_prefs.mqtt_slot_preset[2], "custom", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
+              strncpy(_mqtt_prefs.mqtt_slot_host[2], old_prefs.mqtt_server, sizeof(_mqtt_prefs.mqtt_slot_host[2]) - 1);
+              _mqtt_prefs.mqtt_slot_port[2] = old_prefs.mqtt_port;
+              strncpy(_mqtt_prefs.mqtt_slot_username[2], old_prefs.mqtt_username, sizeof(_mqtt_prefs.mqtt_slot_username[2]) - 1);
+              strncpy(_mqtt_prefs.mqtt_slot_password[2], old_prefs.mqtt_password, sizeof(_mqtt_prefs.mqtt_slot_password[2]) - 1);
+            } else {
+              strncpy(_mqtt_prefs.mqtt_slot_preset[2], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
+            }
+
+            // Save migrated prefs in the versioned format
+            saveMQTTPrefs(fs);
           }
-          // Slots 3-5 keep defaults ("none") from setMQTTPrefsDefaults()
+        } else if (file_size > 0 && file_size <= sizeof(ThreeSlotMQTTPrefs)) {
+          // 3-slot format → compact 6-slot migration
+          // Array sizes changed from [3] to [6], shifting all field offsets.
+          // Read into old layout struct and field-copy to new layout.
+          ThreeSlotMQTTPrefs old3;
+          memset(&old3, 0, sizeof(old3));
+          size_t bytes_to_read = file_size < sizeof(old3) ? file_size : sizeof(old3);
+          size_t bytes_read = file.read((uint8_t *)&old3, bytes_to_read);
+          file.close();
 
-          // Copy shared auth fields
-          memcpy(_mqtt_prefs.mqtt_owner_public_key, old3.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
-          memcpy(_mqtt_prefs.mqtt_email, old3.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
+          if (bytes_read > 0) {
+            MESH_DEBUG_PRINTLN("MQTT: Migrating 3-slot prefs to versioned layout");
 
-          // Save migrated prefs in new 6-slot format
-          saveMQTTPrefs(fs);
-        }
-      } else if (file_size > 0) {
-        // 6-slot format: read directly. The observer fields (snmp/watchdog/alert)
-        // count as present only when the file holds the full struct; shorter (older)
-        // files are read only up to the observer boundary, so trailing struct
-        // padding in an old-firmware file can't bleed into the new fields.
-        bool full_struct = file_size >= sizeof(_mqtt_prefs);
-        size_t obs_boundary = offsetof(MQTTPrefs, snmp_enabled);
-        size_t bytes_to_read = full_struct ? sizeof(_mqtt_prefs)
-                             : (file_size < obs_boundary ? file_size : obs_boundary);
-        size_t bytes_read = file.read((uint8_t *)&_mqtt_prefs, bytes_to_read);
-        file.close();
-        if (bytes_read != bytes_to_read) {
+            // Copy non-slot fields (identical layout)
+            memcpy(_mqtt_prefs.mqtt_origin, old3.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
+            memcpy(_mqtt_prefs.mqtt_iata, old3.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
+            _mqtt_prefs.mqtt_status_enabled = old3.mqtt_status_enabled;
+            _mqtt_prefs.mqtt_packets_enabled = old3.mqtt_packets_enabled;
+            _mqtt_prefs.mqtt_raw_enabled = old3.mqtt_raw_enabled;
+            _mqtt_prefs.mqtt_tx_enabled = old3.mqtt_tx_enabled;
+            _mqtt_prefs.mqtt_status_interval = old3.mqtt_status_interval;
+            memcpy(_mqtt_prefs.wifi_ssid, old3.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
+            memcpy(_mqtt_prefs.wifi_password, old3.wifi_password, sizeof(_mqtt_prefs.wifi_password));
+            _mqtt_prefs.wifi_power_save = old3.wifi_power_save;
+            memcpy(_mqtt_prefs.timezone_string, old3.timezone_string, sizeof(_mqtt_prefs.timezone_string));
+            _mqtt_prefs.timezone_offset = old3.timezone_offset;
+
+            // Copy slot fields for indices 0-2 from old layout
+            for (int i = 0; i < 3; i++) {
+              memcpy(_mqtt_prefs.mqtt_slot_preset[i], old3.mqtt_slot_preset[i], sizeof(_mqtt_prefs.mqtt_slot_preset[i]));
+              memcpy(_mqtt_prefs.mqtt_slot_host[i], old3.mqtt_slot_host[i], sizeof(_mqtt_prefs.mqtt_slot_host[i]));
+              _mqtt_prefs.mqtt_slot_port[i] = old3.mqtt_slot_port[i];
+              memcpy(_mqtt_prefs.mqtt_slot_username[i], old3.mqtt_slot_username[i], sizeof(_mqtt_prefs.mqtt_slot_username[i]));
+              memcpy(_mqtt_prefs.mqtt_slot_password[i], old3.mqtt_slot_password[i], sizeof(_mqtt_prefs.mqtt_slot_password[i]));
+              memcpy(_mqtt_prefs.mqtt_slot_token[i], old3.mqtt_slot_token[i], sizeof(_mqtt_prefs.mqtt_slot_token[i]));
+              memcpy(_mqtt_prefs.mqtt_slot_topic[i], old3.mqtt_slot_topic[i], sizeof(_mqtt_prefs.mqtt_slot_topic[i]));
+            }
+            // Slots 3-5 keep defaults ("none") from setMQTTPrefsDefaults()
+
+            // Copy shared auth fields
+            memcpy(_mqtt_prefs.mqtt_owner_public_key, old3.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
+            memcpy(_mqtt_prefs.mqtt_email, old3.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
+
+            // Save migrated prefs in the versioned format
+            saveMQTTPrefs(fs);
+          }
+        } else if (file_size > 0) {
+          // Headerless 6-slot layout as shipped on mqtt-bridge-implementation-flex
+          // (the deployed fleet). Same field order as the compact struct but with the
+          // vestigial `_legacy_*` block mid-struct and no observer tail — so read it
+          // into Legacy6SlotMQTTPrefs and field-copy across, dropping `_legacy_*`.
+          Legacy6SlotMQTTPrefs old6;
+          memset(&old6, 0, sizeof(old6));
+          size_t bytes_to_read = file_size < sizeof(old6) ? file_size : sizeof(old6);
+          size_t bytes_read = file.read((uint8_t *)&old6, bytes_to_read);
+          file.close();
+
+          if (bytes_read > 0) {
+            MESH_DEBUG_PRINTLN("MQTT: Migrating headerless 6-slot prefs to versioned layout");
+
+            memcpy(_mqtt_prefs.mqtt_origin, old6.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
+            memcpy(_mqtt_prefs.mqtt_iata, old6.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
+            _mqtt_prefs.mqtt_status_enabled = old6.mqtt_status_enabled;
+            _mqtt_prefs.mqtt_packets_enabled = old6.mqtt_packets_enabled;
+            _mqtt_prefs.mqtt_raw_enabled = old6.mqtt_raw_enabled;
+            _mqtt_prefs.mqtt_tx_enabled = old6.mqtt_tx_enabled;
+            _mqtt_prefs.mqtt_status_interval = old6.mqtt_status_interval;
+            memcpy(_mqtt_prefs.wifi_ssid, old6.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
+            memcpy(_mqtt_prefs.wifi_password, old6.wifi_password, sizeof(_mqtt_prefs.wifi_password));
+            _mqtt_prefs.wifi_power_save = old6.wifi_power_save;
+            memcpy(_mqtt_prefs.timezone_string, old6.timezone_string, sizeof(_mqtt_prefs.timezone_string));
+            _mqtt_prefs.timezone_offset = old6.timezone_offset;
+            memcpy(_mqtt_prefs.mqtt_slot_preset, old6.mqtt_slot_preset, sizeof(_mqtt_prefs.mqtt_slot_preset));
+            memcpy(_mqtt_prefs.mqtt_slot_host, old6.mqtt_slot_host, sizeof(_mqtt_prefs.mqtt_slot_host));
+            memcpy(_mqtt_prefs.mqtt_slot_port, old6.mqtt_slot_port, sizeof(_mqtt_prefs.mqtt_slot_port));
+            memcpy(_mqtt_prefs.mqtt_slot_username, old6.mqtt_slot_username, sizeof(_mqtt_prefs.mqtt_slot_username));
+            memcpy(_mqtt_prefs.mqtt_slot_password, old6.mqtt_slot_password, sizeof(_mqtt_prefs.mqtt_slot_password));
+            memcpy(_mqtt_prefs.mqtt_owner_public_key, old6.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
+            memcpy(_mqtt_prefs.mqtt_email, old6.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
+            // `_legacy_*` fields are intentionally dropped here.
+            memcpy(_mqtt_prefs.mqtt_slot_token, old6.mqtt_slot_token, sizeof(_mqtt_prefs.mqtt_slot_token));
+            memcpy(_mqtt_prefs.mqtt_slot_topic, old6.mqtt_slot_topic, sizeof(_mqtt_prefs.mqtt_slot_topic));
+            memcpy(_mqtt_prefs.mqtt_slot_audience, old6.mqtt_slot_audience, sizeof(_mqtt_prefs.mqtt_slot_audience));
+            _mqtt_prefs.mqtt_rx_enabled = old6.mqtt_rx_enabled;
+            memcpy(_mqtt_prefs.mqtt_ntp_server, old6.mqtt_ntp_server, sizeof(_mqtt_prefs.mqtt_ntp_server));
+            // Observer tail (snmp/watchdog/alert) keeps defaults; if this device is
+            // also upgrading across the NodePrefs split, loadPrefsInt captured those
+            // values from /com_prefs and they are applied below.
+
+            saveMQTTPrefs(fs);
+          }
+        } else {
+          file.close();
           setMQTTPrefsDefaults(&_mqtt_prefs);
-        } else if (full_struct) {
-          has_observer_fields = true;
         }
-      } else {
-        file.close();
-        setMQTTPrefsDefaults(&_mqtt_prefs);
       }
     }
   } else {
@@ -549,6 +620,12 @@ void CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
   File file = fs->open("/mqtt_prefs", "w", true);
 #endif
   if (file) {
+    // Versioned format: 8-byte header followed by the raw MQTTPrefs payload.
+    MQTTPrefsHeader hdr;
+    memcpy(hdr.magic, MQTT_PREFS_MAGIC, sizeof(hdr.magic));
+    hdr.version = MQTT_PREFS_VERSION;
+    hdr.payload_len = (uint16_t)sizeof(_mqtt_prefs);
+    file.write((uint8_t *)&hdr, sizeof(hdr));
     file.write((uint8_t *)&_mqtt_prefs, sizeof(_mqtt_prefs));
     file.close();
   }
