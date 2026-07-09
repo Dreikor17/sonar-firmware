@@ -242,6 +242,17 @@ struct Legacy6SlotMQTTPrefs {
   char mqtt_ntp_server[64];
 };
 
+// The legacy layouts above describe files already written to the deployed fleet's
+// flash, so their sizes are frozen forever — loadMQTTPrefs() tells the eras apart
+// by file size and reads each file as a raw struct dump. These asserts pin the
+// layouts on every target toolchain; if one fires, the compiler (or an edit to a
+// legacy struct or MAX_MQTT_SLOTS) has changed a layout and fleet files would be
+// read at wrong offsets.
+static_assert(sizeof(MQTTPrefsHeader) == 8, "versioned /mqtt_prefs header must stay 8 bytes");
+static_assert(sizeof(OldMQTTPrefs) == 472, "frozen pre-slot /mqtt_prefs layout changed");
+static_assert(sizeof(ThreeSlotMQTTPrefs) == 1464, "frozen 3-slot /mqtt_prefs layout changed");
+static_assert(sizeof(Legacy6SlotMQTTPrefs) == 2904, "frozen deployed-fleet /mqtt_prefs layout changed");
+
 // Observer settings captured from the trailing block of an old-format /com_prefs
 // (fork firmware that predates the NodePrefs -> MQTTPrefs split). loadPrefsInt()
 // fills this in when it detects the old file layout; loadMQTTPrefs() then applies
@@ -373,6 +384,10 @@ class CommonCLI {
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs _mqtt_prefs;
   LegacyObserverTail _legacy_tail;
+  // /mqtt_prefs carries a version newer than this firmware understands (a downgrade).
+  // The in-memory prefs run on defaults and saveMQTTPrefs() must not overwrite the
+  // file, or the first `set` command would destroy the newer config.
+  bool _mqtt_prefs_hold = false;
 #endif
   bool _com_prefs_needs_upgrade = false;  // old-format /com_prefs detected; rewrite once after load
 
