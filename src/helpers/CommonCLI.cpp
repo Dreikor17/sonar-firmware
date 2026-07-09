@@ -39,6 +39,16 @@ static bool isValidName(const char *n) {
   return true;
 }
 
+// Old fork firmware persisted the (since removed) NodePrefs MQTT fields to /com_prefs
+// as a zero-filled gap between owner_info (which ends at offset 290) and a trailing
+// observer block (rx_boosted_gain, flood_max_*, snmp/watchdog/alert settings).
+// The gap size depended on MAX_MQTT_SLOTS at the time: 306 bytes of non-slot fields
+// plus 186 bytes per slot (preset 24 + host 64 + port 2 + username 32 + password 64).
+// loadPrefsInt() uses the file size to tell the eras apart and recover the tail.
+static const size_t LEGACY_MQTT_GAP_6SLOT = 306 + 6 * 186;  // 1422
+static const size_t LEGACY_MQTT_GAP_3SLOT = 306 + 3 * 186;  // 864
+static const size_t LEGACY_OBS_TAIL_MAX = 124;  // rx_boosted(1) + flood(2) + snmp(25) + watchdog(1) + alert block(95)
+
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   bool is_fresh_install = false;
@@ -73,6 +83,15 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   // the shorter /mqtt_prefs file won't contain it, so it keeps the default value (1 = on)
   // set by setMQTTPrefsDefaults(). No explicit migration needed.
 #endif
+
+  if (_com_prefs_needs_upgrade) {
+    // Old-format /com_prefs (legacy MQTT gap + trailing observer block) was detected:
+    // rewrite the prefs files in the current layout, one time. This persists the
+    // recovered rx_boosted_gain/flood_max_* values and (on MQTT builds) the observer
+    // settings that loadMQTTPrefs carried over into /mqtt_prefs.
+    savePrefs(fs);
+    _com_prefs_needs_upgrade = false;
+  }
 }
 
 void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
@@ -127,18 +146,116 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     file.read((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
     file.read((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
     // MQTT/observer settings are no longer stored in /com_prefs — they live in
-    // /mqtt_prefs (loaded by loadMQTTPrefs). The legacy zero-gap and trailing
-    // snmp/alert block that older firmware wrote here are gone; on upgrade those
-    // bytes are simply not read, so rx_boosted_gain/flood_max_* (which followed the
-    // gap) reset once and self-heal on the next save.
-    if (file.available() >= (int)sizeof(_prefs->rx_boosted_gain)) {
-      file.read((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));
-    }
-    if (file.available() >= (int)sizeof(_prefs->flood_max_unscoped)) {
-      file.read((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped));
-    }
-    if (file.available() >= (int)sizeof(_prefs->flood_max_advert)) {
-      file.read((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));
+    // /mqtt_prefs (loaded by loadMQTTPrefs). Old fork firmware wrote a zero-filled
+    // MQTT gap here followed by a trailing observer block; detect that layout by the
+    // extra length, skip the gap, and recover the tail so those settings survive
+    // the upgrade (the file is rewritten in the new layout by loadPrefs afterwards).
+    size_t extra = file.available();
+    if (extra > 3) {
+      _com_prefs_needs_upgrade = true;
+      size_t gap = 0;
+      if (extra > LEGACY_MQTT_GAP_6SLOT && extra <= LEGACY_MQTT_GAP_6SLOT + LEGACY_OBS_TAIL_MAX) {
+        gap = LEGACY_MQTT_GAP_6SLOT;
+      } else if (extra > LEGACY_MQTT_GAP_3SLOT && extra <= LEGACY_MQTT_GAP_3SLOT + LEGACY_OBS_TAIL_MAX) {
+        gap = LEGACY_MQTT_GAP_3SLOT;
+      }
+      // Unrecognized legacy sizes (e.g. pre-slot-era files) leave gap == 0: the tail
+      // is not read and everything past owner_info degrades to defaults.
+      if (gap > 0) {
+        uint8_t skip_buf[64];
+        size_t remaining = gap;
+        while (remaining > 0) {
+          size_t n = remaining > sizeof(skip_buf) ? sizeof(skip_buf) : remaining;
+          file.read(skip_buf, n);
+          remaining -= n;
+        }
+        file.read((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));
+        // Tail layout: flood_max_unscoped, flood_max_advert, then the snmp fields —
+        // except legacy flex-branch files where snmp starts right after
+        // rx_boosted_gain (no flood_max_*). Same heuristic the old firmware used:
+        // snmp_enabled is 0/1 and the first community char is printable (> 64).
+        uint8_t b1 = 0, b2 = 0;
+        bool have_flood_bytes = file.available() >= 2;
+        if (have_flood_bytes) {
+          file.read(&b1, 1);
+          file.read(&b2, 1);
+        }
+#ifdef WITH_MQTT_BRIDGE
+        // Pre-fill with the same defaults applyMQTTDefaults() uses, so fields a
+        // shorter (older) tail doesn't contain degrade to defaults when applied.
+        memset(&_legacy_tail, 0, sizeof(_legacy_tail));
+        strncpy(_legacy_tail.snmp_community, "public", sizeof(_legacy_tail.snmp_community) - 1);
+        _legacy_tail.radio_watchdog_minutes = 5;
+        _legacy_tail.alert_wifi_minutes = 30;
+        _legacy_tail.alert_mqtt_minutes = 240;
+        _legacy_tail.alert_min_interval_min = 60;
+#endif
+        if (have_flood_bytes && b1 <= 1 && b2 > 64) {
+          // Legacy variant: no flood_max_* — b1/b2 are snmp_enabled + community[0]
+#ifdef WITH_MQTT_BRIDGE
+          _legacy_tail.snmp_enabled = b1;
+          _legacy_tail.snmp_community[0] = (char) b2;
+          if (file.available() >= (int)(sizeof(_legacy_tail.snmp_community) - 1)) {
+            file.read((uint8_t *)&_legacy_tail.snmp_community[1], sizeof(_legacy_tail.snmp_community) - 1);
+          }
+#endif
+        } else if (have_flood_bytes) {
+          _prefs->flood_max_unscoped = b1;
+          _prefs->flood_max_advert = b2;
+#ifdef WITH_MQTT_BRIDGE
+          if (file.available() >= (int)sizeof(_legacy_tail.snmp_enabled)) {
+            file.read((uint8_t *)&_legacy_tail.snmp_enabled, sizeof(_legacy_tail.snmp_enabled));
+          }
+          if (file.available() >= (int)sizeof(_legacy_tail.snmp_community)) {
+            file.read((uint8_t *)&_legacy_tail.snmp_community, sizeof(_legacy_tail.snmp_community));
+          }
+#endif
+        }
+#ifdef WITH_MQTT_BRIDGE
+        if (file.available() >= (int)sizeof(_legacy_tail.radio_watchdog_minutes)) {
+          file.read((uint8_t *)&_legacy_tail.radio_watchdog_minutes, sizeof(_legacy_tail.radio_watchdog_minutes));
+        }
+        if (file.available() >= (int)sizeof(_legacy_tail.alert_enabled)) {
+          file.read((uint8_t *)&_legacy_tail.alert_enabled, sizeof(_legacy_tail.alert_enabled));
+        }
+        if (file.available() >= (int)sizeof(_legacy_tail.alert_psk_hex)) {
+          file.read((uint8_t *)&_legacy_tail.alert_psk_hex, sizeof(_legacy_tail.alert_psk_hex));
+        }
+        if (file.available() >= (int)sizeof(_legacy_tail.alert_wifi_minutes)) {
+          file.read((uint8_t *)&_legacy_tail.alert_wifi_minutes, sizeof(_legacy_tail.alert_wifi_minutes));
+        }
+        if (file.available() >= (int)sizeof(_legacy_tail.alert_mqtt_minutes)) {
+          file.read((uint8_t *)&_legacy_tail.alert_mqtt_minutes, sizeof(_legacy_tail.alert_mqtt_minutes));
+        }
+        if (file.available() >= (int)sizeof(_legacy_tail.alert_min_interval_min)) {
+          file.read((uint8_t *)&_legacy_tail.alert_min_interval_min, sizeof(_legacy_tail.alert_min_interval_min));
+        }
+        if (file.available() >= (int)sizeof(_legacy_tail.alert_hashtag)) {
+          file.read((uint8_t *)&_legacy_tail.alert_hashtag, sizeof(_legacy_tail.alert_hashtag));
+        }
+        if (file.available() >= (int)sizeof(_legacy_tail.alert_region)) {
+          file.read((uint8_t *)&_legacy_tail.alert_region, sizeof(_legacy_tail.alert_region));
+        }
+        _legacy_tail.snmp_enabled = constrain(_legacy_tail.snmp_enabled, 0, 1);
+        _legacy_tail.radio_watchdog_minutes = constrain(_legacy_tail.radio_watchdog_minutes, 0, 120);
+        _legacy_tail.alert_enabled = constrain(_legacy_tail.alert_enabled, 0, 1);
+        _legacy_tail.snmp_community[sizeof(_legacy_tail.snmp_community) - 1] = '\0';
+        _legacy_tail.alert_psk_hex[sizeof(_legacy_tail.alert_psk_hex) - 1] = '\0';
+        _legacy_tail.alert_hashtag[sizeof(_legacy_tail.alert_hashtag) - 1] = '\0';
+        _legacy_tail.alert_region[sizeof(_legacy_tail.alert_region) - 1] = '\0';
+        _legacy_tail.valid = true;
+#endif
+      }
+    } else {
+      if (file.available() >= (int)sizeof(_prefs->rx_boosted_gain)) {
+        file.read((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_max_unscoped)) {
+        file.read((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped));
+      }
+      if (file.available() >= (int)sizeof(_prefs->flood_max_advert)) {
+        file.read((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));
+      }
     }
 
     // sanitise bad pref values
@@ -253,6 +370,11 @@ static void setMQTTPrefsDefaults(MQTTPrefs* prefs) {
 void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
   // Initialize with defaults first
   setMQTTPrefsDefaults(&_mqtt_prefs);
+
+  // Whether the loaded /mqtt_prefs already contained the observer fields (snmp/
+  // watchdog/alert) appended in Phase 2 — if not, they may be carried over from an
+  // old-format /com_prefs trailing block below.
+  bool has_observer_fields = false;
 
   bool file_existed = fs->exists("/mqtt_prefs");
   if (file_existed) {
@@ -369,12 +491,20 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
           saveMQTTPrefs(fs);
         }
       } else if (file_size > 0) {
-        // 6-slot format: read directly
-        size_t bytes_to_read = file_size < sizeof(_mqtt_prefs) ? file_size : sizeof(_mqtt_prefs);
+        // 6-slot format: read directly. The observer fields (snmp/watchdog/alert)
+        // count as present only when the file holds the full struct; shorter (older)
+        // files are read only up to the observer boundary, so trailing struct
+        // padding in an old-firmware file can't bleed into the new fields.
+        bool full_struct = file_size >= sizeof(_mqtt_prefs);
+        size_t obs_boundary = offsetof(MQTTPrefs, snmp_enabled);
+        size_t bytes_to_read = full_struct ? sizeof(_mqtt_prefs)
+                             : (file_size < obs_boundary ? file_size : obs_boundary);
         size_t bytes_read = file.read((uint8_t *)&_mqtt_prefs, bytes_to_read);
         file.close();
         if (bytes_read != bytes_to_read) {
           setMQTTPrefsDefaults(&_mqtt_prefs);
+        } else if (full_struct) {
+          has_observer_fields = true;
         }
       } else {
         file.close();
@@ -382,10 +512,31 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
       }
     }
   } else {
-    // No /mqtt_prefs file — defaults already set
-    // (Legacy /com_prefs migration removed: the old offset-based approach was fragile
-    // and the pre-MQTT firmware never wrote MQTT fields to /com_prefs anyway.)
+    // No /mqtt_prefs file — defaults already set. (MQTT slot/WiFi settings from
+    // pre-/mqtt_prefs-split fork firmware are NOT recovered from /com_prefs — that
+    // offset-based migration was fragile and was removed; those users re-enter
+    // their MQTT config. The observer trailing block IS recovered, below.)
   }
+
+  // One-time upgrade path: if loadPrefsInt captured the trailing observer block of
+  // an old-format /com_prefs and this /mqtt_prefs predates the appended observer
+  // fields (or doesn't exist), carry the settings over so SNMP, radio-watchdog and
+  // fault-alert config survive the firmware upgrade. loadPrefs() persists both
+  // files in the new layout right after this.
+  if (_legacy_tail.valid && !has_observer_fields) {
+    _mqtt_prefs.snmp_enabled = _legacy_tail.snmp_enabled;
+    memcpy(_mqtt_prefs.snmp_community, _legacy_tail.snmp_community, sizeof(_mqtt_prefs.snmp_community));
+    _mqtt_prefs.radio_watchdog_minutes = _legacy_tail.radio_watchdog_minutes;
+    _mqtt_prefs.alert_enabled = _legacy_tail.alert_enabled;
+    memcpy(_mqtt_prefs.alert_psk_hex, _legacy_tail.alert_psk_hex, sizeof(_mqtt_prefs.alert_psk_hex));
+    _mqtt_prefs.alert_wifi_minutes = _legacy_tail.alert_wifi_minutes;
+    _mqtt_prefs.alert_mqtt_minutes = _legacy_tail.alert_mqtt_minutes;
+    _mqtt_prefs.alert_min_interval_min = _legacy_tail.alert_min_interval_min;
+    memcpy(_mqtt_prefs.alert_hashtag, _legacy_tail.alert_hashtag, sizeof(_mqtt_prefs.alert_hashtag));
+    memcpy(_mqtt_prefs.alert_region, _legacy_tail.alert_region, sizeof(_mqtt_prefs.alert_region));
+    MESH_DEBUG_PRINTLN("MQTT: Migrated observer settings from legacy /com_prefs trailing block");
+  }
+  _legacy_tail.valid = false;
 }
 
 void CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {

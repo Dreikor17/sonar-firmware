@@ -149,8 +149,9 @@ struct MQTTPrefs {
   char mqtt_ntp_server[64];      // Custom NTP server; empty = pool.ntp.org
 
   // --- Observer non-MQTT settings, moved out of NodePrefs (Phase 2). Appended at
-  // the end so existing /mqtt_prefs files (which lack them) still load; values are
-  // migrated one-time from the old /com_prefs trailing block on first boot. ---
+  // the end so existing /mqtt_prefs files (which lack them) still load. On first
+  // boot after upgrade, loadPrefsInt() captures the old /com_prefs trailing block
+  // into LegacyObserverTail and loadMQTTPrefs() copies the values here. ---
   uint8_t snmp_enabled;            // boolean
   char snmp_community[24];         // community string (default "public")
   uint8_t radio_watchdog_minutes;  // 0=disabled, 1-120 minutes (observer-only radio recovery)
@@ -194,6 +195,25 @@ struct ThreeSlotMQTTPrefs {
   char _legacy_mqtt_password[64];
   char mqtt_slot_token[3][48];
   char mqtt_slot_topic[3][96];
+};
+
+// Observer settings captured from the trailing block of an old-format /com_prefs
+// (fork firmware that predates the NodePrefs -> MQTTPrefs split). loadPrefsInt()
+// fills this in when it detects the old file layout; loadMQTTPrefs() then applies
+// the values one-time if the loaded /mqtt_prefs predates the appended observer
+// fields, so SNMP/watchdog/alert config survives the firmware upgrade.
+struct LegacyObserverTail {
+  bool valid = false;
+  uint8_t snmp_enabled;
+  char snmp_community[24];
+  uint8_t radio_watchdog_minutes;
+  uint8_t alert_enabled;
+  char alert_psk_hex[33];
+  uint16_t alert_wifi_minutes;
+  uint16_t alert_mqtt_minutes;
+  uint16_t alert_min_interval_min;
+  char alert_hashtag[24];
+  char alert_region[31];
 };
 #endif
 
@@ -307,7 +327,9 @@ class CommonCLI {
   char tmp[PRV_KEY_SIZE*2 + 4];
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs _mqtt_prefs;
+  LegacyObserverTail _legacy_tail;
 #endif
+  bool _com_prefs_needs_upgrade = false;  // old-format /com_prefs detected; rewrite once after load
 
   mesh::RTCClock* getRTCClock() { return _rtc; }
   void savePrefs();
