@@ -18,7 +18,6 @@ protected:
 
   void idle() override;
   void startRecv() override;
-  int16_t performChannelScan();
   float packetScoreInt(float snr, int sf, int packet_len);
   virtual bool isReceivingPacket() =0;
   virtual void doResetAGC();
@@ -55,6 +54,7 @@ public:
   virtual uint8_t getSpreadingFactor() const { return LORA_SF; }
   static uint16_t preambleLengthForSF(uint8_t sf) { return sf <= 8 ? 32 : 16; }
   void updatePreamble(uint8_t sf) { _preamble_sf = sf; _radio->setPreambleLength(preambleLengthForSF(sf)); }
+  virtual int16_t performChannelScan();
 
   int getNoiseFloor() const override { return _noise_floor; }
   void triggerNoiseFloorCalibrate(int threshold) override;

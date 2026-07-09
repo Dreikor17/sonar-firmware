@@ -49,6 +49,12 @@ static const size_t LEGACY_MQTT_GAP_6SLOT = 306 + 6 * 186;  // 1422
 static const size_t LEGACY_MQTT_GAP_3SLOT = 306 + 3 * 186;  // 864
 static const size_t LEGACY_OBS_TAIL_MAX = 124;  // rx_boosted(1) + flood(2) + snmp(25) + watchdog(1) + alert block(95)
 
+// Bytes savePrefs() writes after owner_info (offsets 290-294): rx_boosted_gain,
+// flood_max_unscoped, flood_max_advert, radio_fem_rxgain, cad_enabled. loadPrefsInt()
+// treats any larger remainder as a legacy MQTT-gap file — keep this in sync with the
+// trailing writes in savePrefs() whenever an upstream merge appends /com_prefs fields.
+static const size_t COM_PREFS_TAIL_BYTES = 5;
+
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   bool is_fresh_install = false;
@@ -154,11 +160,10 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
     // (upstream defaults: FEM RX gain on, CAD off) — overwritten below if present.
     _prefs->radio_fem_rxgain = 1;
     _prefs->cad_enabled = 0;
-    // New-format tail is 5 bytes (rx_boosted_gain, flood_max_unscoped/advert,
-    // radio_fem_rxgain, cad_enabled). A larger `extra` means an old fork file with
-    // the legacy MQTT gap; detect and recover it below.
+    // A remainder larger than the new-format tail means an old fork file with the
+    // legacy MQTT gap; detect and recover it below.
     size_t extra = file.available();
-    if (extra > 5) {
+    if (extra > COM_PREFS_TAIL_BYTES) {
       _com_prefs_needs_upgrade = true;
       size_t gap = 0;
       if (extra > LEGACY_MQTT_GAP_6SLOT && extra <= LEGACY_MQTT_GAP_6SLOT + LEGACY_OBS_TAIL_MAX) {
@@ -363,6 +368,7 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
     file.write((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
     // MQTT/observer settings are stored in /mqtt_prefs, not here. No zero-gap is
     // written anymore — /com_prefs holds only the (non-observer) fields below.
+    // These trailing writes are COM_PREFS_TAIL_BYTES; keep the two in sync.
     file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));      // 290
     file.write((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped)); // 291
     file.write((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));    // 292
@@ -395,6 +401,7 @@ static File openMqttPrefsRead(FILESYSTEM* fs) {
 void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
   // Initialize with defaults first
   setMQTTPrefsDefaults(&_mqtt_prefs);
+  _mqtt_prefs_hold = false;
 
   // Whether the loaded /mqtt_prefs already contained the observer fields (snmp/
   // watchdog/alert) appended in Phase 2 — if not, they may be carried over from an
@@ -428,8 +435,10 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
             }
           } else {
             // Unknown (newer) version: don't risk misreading a layout we don't know.
-            // Keep defaults for this boot and leave the file untouched (no downgrade).
-            MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs version unsupported, using defaults");
+            // Keep defaults for this boot and hold the file so later savePrefs()
+            // calls can't overwrite the newer config (no downgrade).
+            _mqtt_prefs_hold = true;
+            MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs version unsupported, using defaults (file preserved)");
           }
         }
       }
@@ -628,6 +637,13 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
 }
 
 void CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
+  if (_mqtt_prefs_hold) {
+    // /mqtt_prefs was written by newer firmware; overwriting it here (v1 header +
+    // this boot's defaults) would destroy that config. Observer settings changed
+    // this boot are not persisted until current-or-older firmware is flashed.
+    MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs from newer firmware, not overwriting");
+    return;
+  }
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   fs->remove("/mqtt_prefs");
   File file = fs->open("/mqtt_prefs", FILE_O_WRITE);
