@@ -48,11 +48,14 @@ Found during the on-device duty-cycle load test (`set dutycycle 1`): queued
 retransmissions hold static-pool packets with no expiry, so heavy throttling parks the
 whole pool in the send queue. `Dispatcher::checkRecv()` then drops received packets
 before `logRx()` runs, capping MQTT capture at the TX rate (each TX frees one packet
-for one RX). This is inherent upstream behavior — the old fork's `next_tx` spacing had
-the same steady-state drain — but it defeats the observer's purpose. Mitigated on
-observer builds by `RxReservePacketManager` (`src/helpers/RxReservePacketManager.h`):
-retransmissions are shed once the free pool drops below a quarter of the pool, keeping
-RX capture at full rate. See MQTT_INTERNALS.md "Capture vs. duty-cycle throttling".
+for one RX). Parked repeats also absorb every budget refill, starving the node's own
+CLI responses — device-confirmed: a 1%-duty node on a busy mesh became
+un-administrable within ~2 minutes. This is inherent upstream behavior — the old
+fork's `next_tx` spacing had the same steady-state drain — but it defeats the
+observer's purpose. Mitigated on observer builds by `RxReservePacketManager`
+(`src/helpers/RxReservePacketManager.h`): priority-aware shedding below a pool
+reserve (own responses/ACKs stay queueable) plus 30 s expiry of stale queued
+outbound. See MQTT_INTERNALS.md "Capture vs. duty-cycle throttling".
 
 ## Phase 2 — CAD and FEM RX gain (NOT done; needs care + device testing)
 
