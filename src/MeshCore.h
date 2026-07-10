@@ -69,6 +69,12 @@ public:
   // dry_run is true the build is only reported, not flashed. Observer (ESP32+WiFi) builds only.
   virtual bool otaFromManifest(const char* current_ver, bool dry_run, char reply[]) { return false; }
 
+  // LoRa front-end-module LNA (RX gain) control. Only FEM-equipped boards override
+  // these; others report they can't control it. Driven by NodePrefs.radio_fem_rxgain.
+  virtual bool setLoRaFemLnaEnabled(bool enable) { return false; }
+  virtual bool canControlLoRaFemLna() const { return false; }
+  virtual bool isLoRaFemLnaEnabled() const { return false; }
+
   // Power management interface (boards with power management override these)
   virtual bool isExternalPowered() { return false; }
   virtual uint16_t getBootVoltage() { return 0; }

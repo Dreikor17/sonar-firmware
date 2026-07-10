@@ -375,8 +375,12 @@ private:
   void logMemoryStatus();
   void refreshOriginFromPrefs();
 
+  // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt_prefs.
+  // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).
+  MQTTPrefs* _obs = nullptr;
+
 public:
-  MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
+  MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
 
   void begin() override;
   void end() override;
@@ -439,8 +443,8 @@ public:
   const char* getSlotPresetName(int slot_index) const;
   static int getRuntimeSlotCount() { return RUNTIME_MQTT_SLOTS; }
   /** Resolved origin for MQTT JSON: node_name when mqtt_origin is empty, else mqtt_origin (with quote stripping). */
-  static void getEffectiveMqttOrigin(const NodePrefs* prefs, char* buf, size_t buf_size);
-  static const char* effectiveNtpPrimary(const NodePrefs* prefs);
+  static void getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* buf, size_t buf_size);
+  static const char* effectiveNtpPrimary(const MQTTPrefs* obs);
   /** Sync system clock via NTP. force=true bypasses the 5s post-sync rate limit.
    *  primary_only=true tests just the effective primary server (no fallback walk) so a
    *  mistyped hostname fails fast instead of blocking through the whole fallback list.
@@ -459,9 +463,9 @@ public:
    *  summary in reply; verbose=false fills reply with a compact "<server> ok|fail" list
    *  (for LoRa). Returns false if the bridge is not running. */
   bool ntpDiag(char* reply, size_t reply_size, bool verbose);
-  static void formatMqttStatusReply(char* buf, size_t bufsize, const NodePrefs* prefs);
+  static void formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPrefs* obs);
   /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */
-  static bool isConfigValid(const NodePrefs* prefs);
+  static bool isConfigValid(const MQTTPrefs* obs);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
   static uint8_t getLastWifiDisconnectReason();
   static unsigned long getLastWifiDisconnectTime();

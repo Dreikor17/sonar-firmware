@@ -24,12 +24,12 @@
 #endif
 
 // Effective MQTT origin: empty mqtt_origin follows node_name; otherwise mqtt_origin override (quotes stripped).
-static void applyEffectiveOrigin(const NodePrefs* prefs, char* dest, size_t dest_size) {
-  if (!prefs || !dest || dest_size == 0) return;
-  if (prefs->mqtt_origin[0] == '\0') {
-    strncpy(dest, prefs->node_name, dest_size - 1);
+static void applyEffectiveOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* dest, size_t dest_size) {
+  if (!np || !obs || !dest || dest_size == 0) return;
+  if (obs->mqtt_origin[0] == '\0') {
+    strncpy(dest, np->node_name, dest_size - 1);
   } else {
-    strncpy(dest, prefs->mqtt_origin, dest_size - 1);
+    strncpy(dest, obs->mqtt_origin, dest_size - 1);
   }
   dest[dest_size - 1] = '\0';
   StrHelper::stripSurroundingQuotes(dest, dest_size);
@@ -52,7 +52,7 @@ static bool ntpHostnameEquals(const char* a, const char* b) {
   return strcasecmp(a, b) == 0;
 }
 
-static void fillNtpServerList(const NodePrefs* prefs, const char* servers[], int& count) {
+static void fillNtpServerList(const MQTTPrefs* prefs, const char* servers[], int& count) {
   count = 0;
   if (prefs && prefs->mqtt_ntp_server[0] != '\0') {
     servers[count++] = prefs->mqtt_ntp_server;
@@ -72,31 +72,31 @@ static void fillNtpServerList(const NodePrefs* prefs, const char* servers[], int
   }
 }
 
-const char* MQTTBridge::effectiveNtpPrimary(const NodePrefs* prefs) {
-  if (prefs && prefs->mqtt_ntp_server[0] != '\0') {
-    return prefs->mqtt_ntp_server;
+const char* MQTTBridge::effectiveNtpPrimary(const MQTTPrefs* obs) {
+  if (obs && obs->mqtt_ntp_server[0] != '\0') {
+    return obs->mqtt_ntp_server;
   }
   return kNtpBuiltinFallbacks[0];
 }
 
 void MQTTBridge::refreshOriginFromPrefs() {
   if (!_prefs) return;
-  applyEffectiveOrigin(_prefs, _origin, sizeof(_origin));
+  applyEffectiveOrigin(_prefs, _obs, _origin, sizeof(_origin));
 }
 
-void MQTTBridge::getEffectiveMqttOrigin(const NodePrefs* prefs, char* buf, size_t buf_size) {
+void MQTTBridge::getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* buf, size_t buf_size) {
   if (!buf || buf_size == 0) return;
-  if (!prefs) {
+  if (!np || !obs) {
     buf[0] = '\0';
     return;
   }
-  applyEffectiveOrigin(prefs, buf, buf_size);
+  applyEffectiveOrigin(np, obs, buf, buf_size);
 }
 
 // Helper function to check if WiFi credentials are valid
-static bool isWiFiConfigValid(const NodePrefs* prefs) {
+static bool isWiFiConfigValid(const MQTTPrefs* obs) {
   // Check if WiFi SSID is configured (not empty)
-  if (strlen(prefs->wifi_ssid) == 0) {
+  if (!obs || strlen(obs->wifi_ssid) == 0) {
     return false;
   }
 
@@ -114,13 +114,13 @@ static bool customEndpointComplete(const char* host, uint16_t port) {
   return host[0] != '\0' && (port != 0 || strstr(host, "://") != nullptr);
 }
 
-bool MQTTBridge::isConfigValid(const NodePrefs* prefs) {
-  if (!prefs || !isWiFiConfigValid(prefs)) return false;
+bool MQTTBridge::isConfigValid(const MQTTPrefs* obs) {
+  if (!obs || !isWiFiConfigValid(obs)) return false;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    const char* preset_name = prefs->mqtt_slot_preset[i];
+    const char* preset_name = obs->mqtt_slot_preset[i];
     if (preset_name[0] == '\0' || strcmp(preset_name, MQTT_PRESET_NONE) == 0) continue;
     if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
-      if (customEndpointComplete(prefs->mqtt_slot_host[i], prefs->mqtt_slot_port[i])) return true;
+      if (customEndpointComplete(obs->mqtt_slot_host[i], obs->mqtt_slot_port[i])) return true;
     } else if (findMQTTPreset(preset_name) != nullptr) {
       return true;
     }
@@ -201,9 +201,9 @@ unsigned long MQTTBridge::getWifiConnectedAtMillis() {
   return s_wifi_connected_at;
 }
 
-void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const NodePrefs* prefs) {
+void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPrefs* obs) {
   if (buf == nullptr || bufsize == 0) return;
-  const char* msgs = (prefs->mqtt_status_enabled) ? "on" : "off";
+  const char* msgs = (obs && obs->mqtt_status_enabled) ? "on" : "off";
   if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) {
     snprintf(buf, bufsize, "> msgs: %s (bridge not running)", msgs);
     return;
@@ -391,11 +391,12 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
 // ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
-MQTTBridge::MQTTBridge(NodePrefs *prefs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
+MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity)
     : BridgeBase(prefs, mgr, rtc),
+      _obs(obs),
       _queue_count(0),
       _last_status_publish(0), _last_status_retry(0), _status_interval(300000),
-      _ntp_client(_ntp_udp, effectiveNtpPrimary(prefs), 0, 60000), _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
+      _ntp_client(_ntp_udp, effectiveNtpPrimary(obs), 0, 60000), _last_ntp_sync(0), _ntp_synced(false), _ntp_sync_pending(false), _slots_setup_done(false), _max_active_slots(RUNTIME_MQTT_SLOTS),
       _ntp_force_requested(false), _ntp_force_done(false), _ntp_force_result(false),
       _ntp_diag_requested(false), _ntp_diag_done(false), _ntp_diag_count(0),
       // Default to UTC; setRules() will be called from syncTimeWithNTP when a
@@ -546,14 +547,14 @@ void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("Max active slots: %d", _max_active_slots);
 
   // Check if WiFi credentials are configured first
-  if (!isWiFiConfigValid(_prefs)) {
+  if (!isWiFiConfigValid(_obs)) {
     MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - WiFi credentials not configured");
     return;
   }
 
   refreshOriginFromPrefs();
 
-  strncpy(_iata, _prefs->mqtt_iata, sizeof(_iata) - 1);
+  strncpy(_iata, _obs->mqtt_iata, sizeof(_iata) - 1);
   _iata[sizeof(_iata) - 1] = '\0';
 
   StrHelper::stripSurroundingQuotes(_iata, sizeof(_iata));
@@ -564,17 +565,17 @@ void MQTTBridge::begin() {
   }
 
   // Update enabled flags from preferences
-  _status_enabled = _prefs->mqtt_status_enabled;
-  _packets_enabled = _prefs->mqtt_packets_enabled;
-  _raw_enabled = _prefs->mqtt_raw_enabled;
-  _rx_enabled = _prefs->mqtt_rx_enabled;
-  _tx_mode = _prefs->mqtt_tx_enabled;  // 0=off, 1=all, 2=advert
+  _status_enabled = _obs->mqtt_status_enabled;
+  _packets_enabled = _obs->mqtt_packets_enabled;
+  _raw_enabled = _obs->mqtt_raw_enabled;
+  _rx_enabled = _obs->mqtt_rx_enabled;
+  _tx_mode = _obs->mqtt_tx_enabled;  // 0=off, 1=all, 2=advert
   // Set status interval to 5 minutes (300000 ms), or use preference if set and valid
-  if (_prefs->mqtt_status_interval >= 1000 && _prefs->mqtt_status_interval <= 3600000) {
-    _status_interval = _prefs->mqtt_status_interval;
+  if (_obs->mqtt_status_interval >= 1000 && _obs->mqtt_status_interval <= 3600000) {
+    _status_interval = _obs->mqtt_status_interval;
   } else {
     // Invalid or uninitialized value - fix it in preferences and use default
-    _prefs->mqtt_status_interval = 300000; // Fix the preference value
+    _obs->mqtt_status_interval = 300000; // Fix the preference value
     _status_interval = 300000; // 5 minutes default
   }
 
@@ -585,12 +586,12 @@ void MQTTBridge::begin() {
 
   // Apply slot presets from preferences
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    const char* preset_name = _prefs->mqtt_slot_preset[i];
+    const char* preset_name = _obs->mqtt_slot_preset[i];
     if (preset_name[0] != '\0' && strcmp(preset_name, MQTT_PRESET_NONE) != 0) {
       if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
         // Custom broker: copy host/port/username/password from prefs
         _slots[i].preset = nullptr;
-        strncpy(_slots[i].host, _prefs->mqtt_slot_host[i], sizeof(_slots[i].host) - 1);
+        strncpy(_slots[i].host, _obs->mqtt_slot_host[i], sizeof(_slots[i].host) - 1);
         _slots[i].host[sizeof(_slots[i].host) - 1] = '\0';
         if (strlen(_slots[i].host) == 0) {
           MQTT_DEBUG_PRINTLN("MQTT%d: custom preset has no server configured, disabling", i + 1);
@@ -598,12 +599,12 @@ void MQTTBridge::begin() {
           continue;
         }
         _slots[i].enabled = true;
-        _slots[i].port = _prefs->mqtt_slot_port[i];
-        strncpy(_slots[i].username, _prefs->mqtt_slot_username[i], sizeof(_slots[i].username) - 1);
+        _slots[i].port = _obs->mqtt_slot_port[i];
+        strncpy(_slots[i].username, _obs->mqtt_slot_username[i], sizeof(_slots[i].username) - 1);
         _slots[i].username[sizeof(_slots[i].username) - 1] = '\0';
-        strncpy(_slots[i].password, _prefs->mqtt_slot_password[i], sizeof(_slots[i].password) - 1);
+        strncpy(_slots[i].password, _obs->mqtt_slot_password[i], sizeof(_slots[i].password) - 1);
         _slots[i].password[sizeof(_slots[i].password) - 1] = '\0';
-        strncpy(_slots[i].audience, _prefs->mqtt_slot_audience[i], sizeof(_slots[i].audience) - 1);
+        strncpy(_slots[i].audience, _obs->mqtt_slot_audience[i], sizeof(_slots[i].audience) - 1);
         _slots[i].audience[sizeof(_slots[i].audience) - 1] = '\0';
       } else {
         const MQTTPresetDef* preset = findMQTTPreset(preset_name);
@@ -611,9 +612,9 @@ void MQTTBridge::begin() {
           _slots[i].enabled = true;
           _slots[i].preset = preset;
           if (mqttPresetNeedsSlotCredentials(preset)) {
-            strncpy(_slots[i].username, _prefs->mqtt_slot_username[i], sizeof(_slots[i].username) - 1);
+            strncpy(_slots[i].username, _obs->mqtt_slot_username[i], sizeof(_slots[i].username) - 1);
             _slots[i].username[sizeof(_slots[i].username) - 1] = '\0';
-            strncpy(_slots[i].password, _prefs->mqtt_slot_password[i], sizeof(_slots[i].password) - 1);
+            strncpy(_slots[i].password, _obs->mqtt_slot_password[i], sizeof(_slots[i].password) - 1);
             _slots[i].password[sizeof(_slots[i].password) - 1] = '\0';
           }
         } else {
@@ -709,7 +710,7 @@ void MQTTBridge::begin() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.setAutoConnect(true);
-  WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
+  WiFi.begin(_obs->wifi_ssid, _obs->wifi_password);
 
   // NOTE: Slot setup deferred until after NTP sync in loop()
   #endif
@@ -852,7 +853,7 @@ void MQTTBridge::initializeWiFiInTask() {
   // When already connected, the deferred slot setup still fires in mqttTaskLoop()
   // because _ntp_synced persists across end() (only _slots_setup_done is reset).
   if (WiFi.status() != WL_CONNECTED) {
-    WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
+    WiFi.begin(_obs->wifi_ssid, _obs->wifi_password);
   } else if (!_ntp_synced && !_ntp_sync_pending) {
     _ntp_sync_pending = true;  // already connected but never synced — kick NTP now
   }
@@ -983,8 +984,8 @@ void MQTTBridge::mqttTaskLoop() {
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
       if (_slot_reconfigure_pending[i]) {
         _slot_reconfigure_pending[i] = false;
-        MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for MQTT%d (preset: %s)", i + 1, _prefs->mqtt_slot_preset[i]);
-        applySlotPreset(i, _prefs->mqtt_slot_preset[i]);
+        MQTT_DEBUG_PRINTLN("Applying deferred reconfigure for MQTT%d (preset: %s)", i + 1, _obs->mqtt_slot_preset[i]);
+        applySlotPreset(i, _obs->mqtt_slot_preset[i]);
       }
     }
 
@@ -997,9 +998,9 @@ void MQTTBridge::mqttTaskLoop() {
 #ifdef WITH_SNMP
     // SNMP agent loop — process incoming UDP requests
     if (_snmp_agent) {
-      if (!_snmp_agent->isRunning() && WiFi.isConnected() && _prefs->snmp_enabled) {
-        _snmp_agent->begin(_prefs->snmp_community);
-        MQTT_DEBUG_PRINTLN("SNMP agent started on port 161 (community: %s)", _prefs->snmp_community);
+      if (!_snmp_agent->isRunning() && WiFi.isConnected() && _obs->snmp_enabled) {
+        _snmp_agent->begin(_obs->snmp_community);
+        MQTT_DEBUG_PRINTLN("SNMP agent started on port 161 (community: %s)", _obs->snmp_community);
       }
       if (_snmp_agent->isRunning()) {
         // Update MQTT stats from this core
@@ -1633,8 +1634,8 @@ bool MQTTBridge::createSlotAuthToken(int index) {
   // Prepare owner key
   const char* owner_key = nullptr;
   char owner_key_uppercase[65];
-  if (_prefs->mqtt_owner_public_key[0] != '\0') {
-    strncpy(owner_key_uppercase, _prefs->mqtt_owner_public_key, sizeof(owner_key_uppercase) - 1);
+  if (_obs->mqtt_owner_public_key[0] != '\0') {
+    strncpy(owner_key_uppercase, _obs->mqtt_owner_public_key, sizeof(owner_key_uppercase) - 1);
     owner_key_uppercase[sizeof(owner_key_uppercase) - 1] = '\0';
     for (int i = 0; owner_key_uppercase[i]; i++) {
       owner_key_uppercase[i] = toupper(owner_key_uppercase[i]);
@@ -1644,7 +1645,7 @@ bool MQTTBridge::createSlotAuthToken(int index) {
 
   char client_version[64];
   getClientVersion(client_version, sizeof(client_version));
-  const char* email = (_prefs->mqtt_email[0] != '\0') ? _prefs->mqtt_email : nullptr;
+  const char* email = (_obs->mqtt_email[0] != '\0') ? _obs->mqtt_email : nullptr;
 
   unsigned long current_time = time(nullptr);
   // Stagger token expiry per slot to avoid simultaneous renewal/reconnect
@@ -1719,7 +1720,7 @@ bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, bool 
 // ---------------------------------------------------------------------------
 bool MQTTBridge::substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size) {
   const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
-  const char* token = _prefs->mqtt_slot_token[slot_index];
+  const char* token = _obs->mqtt_slot_token[slot_index];
 
   size_t out = 0;
   const char* p = tmpl;
@@ -1769,7 +1770,7 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
     if (slot.preset->topic_style == MQTT_TOPIC_MESHRANK) {
       // MeshRank: packets only, uses per-slot token in topic path
       if (type != MSG_PACKETS) return false;
-      const char* token = _prefs->mqtt_slot_token[index];
+      const char* token = _obs->mqtt_slot_token[index];
       if (!token || token[0] == '\0') return false;
       snprintf(topic_buf, buf_size, "meshrank/uplink/%s/%s/packets", token, _device_id);
       return true;
@@ -1782,8 +1783,8 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
   }
 
   // Custom slots: use topic template if set, otherwise default meshcore format
-  if (_prefs->mqtt_slot_topic[index][0] != '\0') {
-    return substituteTopicTemplate(_prefs->mqtt_slot_topic[index], type, index, topic_buf, buf_size);
+  if (_obs->mqtt_slot_topic[index][0] != '\0') {
+    return substituteTopicTemplate(_obs->mqtt_slot_topic[index], type, index, topic_buf, buf_size);
   }
   // Default: meshcore format
   if (!isIATAValid()) return false;
@@ -1943,9 +1944,9 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
     slot.enabled = true;
     slot.preset = preset;
     if (mqttPresetNeedsSlotCredentials(preset)) {
-      strncpy(slot.username, _prefs->mqtt_slot_username[slot_index], sizeof(slot.username) - 1);
+      strncpy(slot.username, _obs->mqtt_slot_username[slot_index], sizeof(slot.username) - 1);
       slot.username[sizeof(slot.username) - 1] = '\0';
-      strncpy(slot.password, _prefs->mqtt_slot_password[slot_index], sizeof(slot.password) - 1);
+      strncpy(slot.password, _obs->mqtt_slot_password[slot_index], sizeof(slot.password) - 1);
       slot.password[sizeof(slot.password) - 1] = '\0';
     }
     if (_initialized) {
@@ -1979,7 +1980,7 @@ void MQTTBridge::setSlotCustomBroker(int slot_index, const char* host, uint16_t 
 
 void MQTTBridge::checkConfigurationMismatch() {
   // Warn if packets are enabled but both rx and tx are off — nothing will be published
-  if (_prefs->mqtt_packets_enabled && !_prefs->mqtt_rx_enabled && _prefs->mqtt_tx_enabled == 0) {
+  if (_obs->mqtt_packets_enabled && !_obs->mqtt_rx_enabled && _obs->mqtt_tx_enabled == 0) {
     unsigned long now = millis();
     if (_last_config_warning == 0 || (now - _last_config_warning > CONFIG_WARNING_INTERVAL)) {
       MQTT_DEBUG_PRINTLN("MQTT: Both mqtt.rx and mqtt.tx are off — no packets will be published. Run 'set mqtt.rx on' or 'set mqtt.tx on' to fix.");
@@ -2017,7 +2018,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
       _wifi_reconnect_backoff_attempt = 0;
       #ifdef ESP_PLATFORM
       wifi_ps_type_t ps_mode;
-      uint8_t ps_pref = _prefs->wifi_power_save;
+      uint8_t ps_pref = _obs->wifi_power_save;
       if (ps_pref == 1) {
         ps_mode = WIFI_PS_NONE;
       } else if (ps_pref == 2) {
@@ -2061,7 +2062,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
           _wifi_reconnect_backoff_attempt++;
         }
         WiFi.disconnect();
-        WiFi.begin(_prefs->wifi_ssid, _prefs->wifi_password);
+        WiFi.begin(_obs->wifi_ssid, _obs->wifi_password);
       }
     }
     _last_wifi_status = current_wifi_status;
@@ -2070,7 +2071,7 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
 }
 
 bool MQTTBridge::isReady() const {
-  return _initialized && isWiFiConfigValid(_prefs);
+  return _initialized && isWiFiConfigValid(_obs);
 }
 
 bool MQTTBridge::isIATAValid() const {
@@ -2088,7 +2089,7 @@ bool MQTTBridge::isSlotReady(int index, char* reason_buf, size_t reason_size) co
 
   if (slot.preset) {
     if (slot.preset->topic_style == MQTT_TOPIC_MESHRANK) {
-      if (_prefs->mqtt_slot_token[index][0] == '\0') {
+      if (_obs->mqtt_slot_token[index][0] == '\0') {
         if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt%d.token <your_token>", index + 1);
         return false;
       }
@@ -2099,18 +2100,18 @@ bool MQTTBridge::isSlotReady(int index, char* reason_buf, size_t reason_size) co
       }
     }
     if (mqttPresetNeedsSlotCredentials(slot.preset)) {
-      if (_prefs->mqtt_slot_username[index][0] == '\0') {
+      if (_obs->mqtt_slot_username[index][0] == '\0') {
         if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt%d.username <user>", index + 1);
         return false;
       }
-      if (_prefs->mqtt_slot_password[index][0] == '\0') {
+      if (_obs->mqtt_slot_password[index][0] == '\0') {
         if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt%d.password <pass>", index + 1);
         return false;
       }
     }
   } else {
     // Custom slot without a topic template uses meshcore format, needs IATA
-    if (_prefs->mqtt_slot_topic[index][0] == '\0' && !isIATAValid()) {
+    if (_obs->mqtt_slot_topic[index][0] == '\0' && !isIATAValid()) {
       if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt.iata <airport_code> or set mqtt%d.topic <template>", index + 1);
       return false;
     }
@@ -2161,7 +2162,7 @@ void MQTTBridge::loop() {
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (_slot_reconfigure_pending[i]) {
       _slot_reconfigure_pending[i] = false;
-      applySlotPreset(i, _prefs->mqtt_slot_preset[i]);
+      applySlotPreset(i, _obs->mqtt_slot_preset[i]);
     }
   }
 
@@ -2244,7 +2245,7 @@ void MQTTBridge::loop() {
 // ---------------------------------------------------------------------------
 
 void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
-  if (!_initialized || !_prefs->mqtt_packets_enabled || !_prefs->mqtt_rx_enabled) return;
+  if (!_initialized || !_obs->mqtt_packets_enabled || !_obs->mqtt_rx_enabled) return;
 
   // Check if we have any enabled slots to send to
   bool has_valid_slots = false;
@@ -2261,8 +2262,8 @@ void MQTTBridge::onPacketReceived(mesh::Packet *packet) {
 }
 
 void MQTTBridge::sendPacket(mesh::Packet *packet) {
-  uint8_t tx_mode = _prefs->mqtt_tx_enabled;  // Read live from prefs (no restart needed)
-  if (!_initialized || !_prefs->mqtt_packets_enabled || tx_mode == 0) return;
+  uint8_t tx_mode = _obs->mqtt_tx_enabled;  // Read live from prefs (no restart needed)
+  if (!_initialized || !_obs->mqtt_packets_enabled || tx_mode == 0) return;
 
   // Advert mode: only queue self-originated advert packets
   if (tx_mode == 2) {
@@ -2917,7 +2918,7 @@ void MQTTBridge::refreshNTP() {
   // Lightweight periodic refresh: just restart SNTP which runs async in the background.
   // No blocking DNS, no UDP sockets, no retry loops on the MQTT task loop.
   // The heavy syncTimeWithNTP() is only used for initial sync and WiFi reconnect recovery.
-  configTime(0, 0, effectiveNtpPrimary(_prefs));
+  configTime(0, 0, effectiveNtpPrimary(_obs));
   _last_ntp_sync = millis();
   MQTT_DEBUG_PRINTLN("NTP refresh triggered (async SNTP)");
 }
@@ -2946,10 +2947,10 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
   if (primary_only) {
     // Validation path (e.g. set mqtt.ntp): test only the configured primary so a
     // typo fails fast instead of walking the entire fallback list.
-    servers[0] = effectiveNtpPrimary(_prefs);
+    servers[0] = effectiveNtpPrimary(_obs);
     server_count = 1;
   } else {
-    fillNtpServerList(_prefs, servers, server_count);
+    fillNtpServerList(_obs, servers, server_count);
   }
 
   bool ntp_ok = false;
@@ -3048,15 +3049,15 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
     // Reuses the inline _timezone_storage via setRules() instead of
     // deleting/newing a Timezone, which was a per-change heap alloc pair.
     static char last_timezone[64] = "";
-    if (strcmp(_prefs->timezone_string, last_timezone) != 0) {
+    if (strcmp(_obs->timezone_string, last_timezone) != 0) {
       TimeChangeRule dst_rule, std_rule;
-      if (!timezoneRulesFromString(_prefs->timezone_string, dst_rule, std_rule)) {
+      if (!timezoneRulesFromString(_obs->timezone_string, dst_rule, std_rule)) {
         TimeChangeRule utc = {"UTC", Last, Sun, Mar, 0, 0};
         dst_rule = utc;
         std_rule = utc;
       }
       _timezone_storage.setRules(dst_rule, std_rule);
-      strncpy(last_timezone, _prefs->timezone_string, sizeof(last_timezone) - 1);
+      strncpy(last_timezone, _obs->timezone_string, sizeof(last_timezone) - 1);
       last_timezone[sizeof(last_timezone) - 1] = '\0';
     }
 
@@ -3096,7 +3097,7 @@ bool MQTTBridge::requestForcedNtpSync(uint32_t timeout_ms) {
 void MQTTBridge::runNtpDiagProbe() {
   const char* servers[kMaxNtpServers];
   int count = 0;
-  fillNtpServerList(_prefs, servers, count);
+  fillNtpServerList(_obs, servers, count);
 
   _ntp_client.begin();
   for (int i = 0; i < count; i++) {

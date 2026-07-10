@@ -14,6 +14,7 @@ protected:
   unsigned long last_recv_millis;
   unsigned long last_radio_interrupt_millis;  // updated on any ISR event, even CRC errors
   uint8_t _preamble_sf;
+  bool _cad_enabled;
 
   void idle() override;
   void startRecv() override;
@@ -26,6 +27,7 @@ public:
     n_recv = n_sent = n_recv_errors = 0;
     last_recv_millis = 0;
     last_radio_interrupt_millis = 0;
+    _cad_enabled = false;
   }
 
   void begin() override;
@@ -52,9 +54,11 @@ public:
   virtual uint8_t getSpreadingFactor() const { return LORA_SF; }
   static uint16_t preambleLengthForSF(uint8_t sf) { return sf <= 8 ? 32 : 16; }
   void updatePreamble(uint8_t sf) { _preamble_sf = sf; _radio->setPreambleLength(preambleLengthForSF(sf)); }
+  virtual int16_t performChannelScan();
 
   int getNoiseFloor() const override { return _noise_floor; }
   void triggerNoiseFloorCalibrate(int threshold) override;
+  void setCADEnabled(bool enable) override { _cad_enabled = enable; }
   void resetAGC() override;
 
   void loop() override;

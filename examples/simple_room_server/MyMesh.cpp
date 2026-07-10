@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/RxReservePacketManager.h>
 
 #define REPLY_DELAY_MILLIS          1500
 #define PUSH_NOTIFY_DELAY_MILLIS    2000
@@ -634,7 +635,7 @@ void MyMesh::onAckRecv(mesh::Packet *packet, uint32_t ack_crc) {
 
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
-    : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
+    : mesh::Mesh(radio, ms, rng, rtc, *createObserverPacketManager(32), tables),
       region_map(key_store), temp_map(key_store),
       _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
       telemetry(MAX_PACKET_PAYLOAD - 4)
@@ -672,6 +673,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.flood_max_unscoped = 64;
   _prefs.flood_max_advert = 8;
   _prefs.interference_threshold = 0; // disabled
+  _prefs.radio_fem_rxgain = 1;       // LoRa FEM RX gain on by default (FEM boards)
+  _prefs.cad_enabled = 0;            // hardware CAD before TX (off by default; 'set cad on')
 #ifdef ROOM_PASSWORD
   StrHelper::strncpy(_prefs.guest_password, ROOM_PASSWORD, sizeof(_prefs.guest_password));
 #endif
@@ -681,15 +684,8 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
 
-  // Alert channel defaults (same as repeater; off by default and unconfigured).
-  // Operator must pick `set alert.psk` or `set alert.hashtag` before alerts fire.
-  _prefs.alert_enabled = 0;
-  _prefs.alert_psk_hex[0] = '\0';
-  _prefs.alert_hashtag[0] = '\0';
-  _prefs.alert_region[0] = '\0';
-  _prefs.alert_wifi_minutes = 30;
-  _prefs.alert_mqtt_minutes = 240;
-  _prefs.alert_min_interval_min = 60;
+  // Observer defaults (alert.*, etc.) moved to applyMQTTDefaults() — they live
+  // in /mqtt_prefs now, not NodePrefs.
 
   // bridge defaults (same as repeater)
   _prefs.bridge_enabled = 1;    // enabled
@@ -698,12 +694,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.bridge_baud = 115200;  // baud rate
   _prefs.bridge_channel = 1;    // channel 1
 
-  // MQTT slot/IATA/timezone defaults come from /mqtt_prefs via loadPrefs (see MQTTDefaults.h)
-  _prefs.mqtt_origin[0] = '\0';
-
-  // WiFi defaults (user-configured via CLI; placeholders until set)
-  StrHelper::strncpy(_prefs.wifi_ssid, "ssid_here", sizeof(_prefs.wifi_ssid));
-  StrHelper::strncpy(_prefs.wifi_password, "password_here", sizeof(_prefs.wifi_password));
+  // MQTT/WiFi/timezone defaults live in /mqtt_prefs now (see applyMQTTDefaults).
 
   next_post_idx = 0;
   next_client_idx = 0;
@@ -745,6 +736,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
+  board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);   // LoRa FEM LNA (FEM boards only)
 
   updateAdvertTimer();
   updateFloodAdvertTimer();
@@ -757,7 +749,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #ifdef WITH_MQTT_BRIDGE
   if (_prefs.bridge_enabled) {
     // Defer construction to avoid static init crashes on ESP32 classic
-    bridge = new MQTTBridge(&_prefs, _mgr, getRTCClock(), &self_id);
+    bridge = new MQTTBridge(&_prefs, _cli.getObserverPrefs(), _mgr, getRTCClock(), &self_id);
     if (bridge) {
       // Set device public key for MQTT topics
       char device_id[65];
@@ -787,8 +779,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // Passing `this` as the callbacks lets the reporter resolve a TransportKey
   // scope (alert.region override, falling back to default_scope) so alert
   // floods ride the same scope as adverts/channel messages.
-  _alerter.begin(&_prefs, this, this);
-#if defined(WITH_MQTT_BRIDGE)
+#ifdef WITH_MQTT_BRIDGE
+  _alerter.begin(&_prefs, _cli.getObserverPrefs(), this, this);
   _alerter.setBridge(bridge);
 #endif
 }
@@ -806,12 +798,15 @@ void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint3
 
 bool MyMesh::resolveAlertScope(TransportKey& dest) {
   // Same resolution policy as simple_repeater: alert.region > default_scope.
-  if (_prefs.alert_region[0]) {
-    auto r = region_map.findByNamePrefix(_prefs.alert_region);
+#ifdef WITH_MQTT_BRIDGE
+  const char* alert_region = _cli.getObserverPrefs()->alert_region;
+  if (alert_region[0]) {
+    auto r = region_map.findByNamePrefix(alert_region);
     if (r && region_map.getTransportKeysFor(*r, &dest, 1) > 0 && !dest.isNull()) {
       return true;
     }
   }
+#endif
   if (!default_scope.isNull()) {
     dest = default_scope;
     return true;
@@ -1131,5 +1126,7 @@ void MyMesh::loop() {
   uptime_millis += now - last_millis;
   last_millis = now;
 
+#ifdef WITH_MQTT_BRIDGE
   _alerter.onLoop(now);
+#endif
 }

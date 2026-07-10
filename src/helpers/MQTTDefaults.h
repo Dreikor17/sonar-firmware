@@ -93,6 +93,13 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
     prefs->timezone_string[sizeof(prefs->timezone_string) - 1] = '\0';
   }
   prefs->timezone_offset = MQTT_DEFAULT_TIMEZONE_OFFSET;
+
+  // Observer non-MQTT defaults (moved out of NodePrefs/MyMesh ctor in Phase 2).
+  strncpy(prefs->snmp_community, "public", sizeof(prefs->snmp_community) - 1);
+  prefs->radio_watchdog_minutes = 5;
+  prefs->alert_wifi_minutes = 30;
+  prefs->alert_mqtt_minutes = 240;
+  prefs->alert_min_interval_min = 60;
 }
 
 #endif // WITH_MQTT_BRIDGE
