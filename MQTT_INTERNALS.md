@@ -46,11 +46,16 @@ RX processing needs a free packet from the static pool before `logRx()` (and thu
 MQTT uplink) can run — `Dispatcher::checkRecv()` silently discards received data when
 the pool is empty. Because the outbound queue holds pool packets with no expiry,
 duty-cycle throttling can park the entire pool waiting on TX budget, capping capture at
-the TX rate. Observer builds therefore use `RxReservePacketManager` (fork-owned,
-`src/helpers/RxReservePacketManager.h`), which refuses to queue retransmissions once
-the free pool drops below a reserve (a quarter of the pool) — the node sheds repeat
-load it has no TX budget for, and capture continues at full rate. Non-observer builds
-keep the upstream pool behavior.
+the TX rate — and the parked repeats absorb every budget refill, starving the node's
+own CLI responses and making it un-administrable over the mesh. Observer builds
+therefore use `RxReservePacketManager` (fork-owned,
+`src/helpers/RxReservePacketManager.h`): below the RX reserve (a quarter of the pool)
+it sheds only low-priority outbound (multi-hop flood repeats, adverts, trace), keeping
+the node's own responses/ACKs queueable; below a smaller emergency floor it sheds
+everything to keep capture alive. Queued packets still untransmitted 30 s past their
+scheduled time are expired at dequeue, so under throttle the queue holds only fresh
+traffic and admin responses reach the trickle of TX budget. Non-observer builds keep
+the upstream pool behavior.
 
 ### `/mqtt_prefs` file format
 
