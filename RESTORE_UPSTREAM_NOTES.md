@@ -42,6 +42,18 @@ This touches core TX timing. Confirm on hardware:
   verify `next_tx_time` spacing under load).
 - The observer radio watchdog still recovers a stuck radio (`radio_watchdog_minutes`).
 
+### Known interaction: throttling starves MQTT capture (mitigated)
+
+Found during the on-device duty-cycle load test (`set dutycycle 1`): queued
+retransmissions hold static-pool packets with no expiry, so heavy throttling parks the
+whole pool in the send queue. `Dispatcher::checkRecv()` then drops received packets
+before `logRx()` runs, capping MQTT capture at the TX rate (each TX frees one packet
+for one RX). This is inherent upstream behavior — the old fork's `next_tx` spacing had
+the same steady-state drain — but it defeats the observer's purpose. Mitigated on
+observer builds by `RxReservePacketManager` (`src/helpers/RxReservePacketManager.h`):
+retransmissions are shed once the free pool drops below a quarter of the pool, keeping
+RX capture at full rate. See MQTT_INTERNALS.md "Capture vs. duty-cycle throttling".
+
 ## Phase 2 — CAD and FEM RX gain (NOT done; needs care + device testing)
 
 Still missing at HEAD, also dropped by `22eb9b87`, still present upstream:

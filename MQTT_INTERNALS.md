@@ -35,9 +35,22 @@ The observer feature is kept out of upstream-tracked files through three mechani
 
 Remaining integration points in upstream files:
 - `examples/simple_repeater/MyMesh.{h,cpp}`, `examples/simple_room_server/MyMesh.{h,cpp}` -
-  bridge/alerter/SNMP wiring and packet-feed hooks, guarded by `#ifdef WITH_MQTT_BRIDGE`
+  bridge/alerter/SNMP wiring and packet-feed hooks, guarded by `#ifdef WITH_MQTT_BRIDGE`;
+  plus the `createObserverPacketManager()` call in each constructor (see below)
 - `src/helpers/CommonCLI.{h,cpp}` - the three CLI hooks, `MQTTPrefs` load/save/migration
 - `src/Dispatcher.{h,cpp}` - radio watchdog block, guarded by `#ifdef WITH_MQTT_BRIDGE`
+
+### Capture vs. duty-cycle throttling
+
+RX processing needs a free packet from the static pool before `logRx()` (and thus the
+MQTT uplink) can run — `Dispatcher::checkRecv()` silently discards received data when
+the pool is empty. Because the outbound queue holds pool packets with no expiry,
+duty-cycle throttling can park the entire pool waiting on TX budget, capping capture at
+the TX rate. Observer builds therefore use `RxReservePacketManager` (fork-owned,
+`src/helpers/RxReservePacketManager.h`), which refuses to queue retransmissions once
+the free pool drops below a reserve (a quarter of the pool) — the node sheds repeat
+load it has no TX budget for, and capture continues at full rate. Non-observer builds
+keep the upstream pool behavior.
 
 ### `/mqtt_prefs` file format
 
