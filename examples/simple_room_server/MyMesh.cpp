@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/RxReservePacketManager.h>
 
 #define REPLY_DELAY_MILLIS          1500
 #define PUSH_NOTIFY_DELAY_MILLIS    2000
@@ -634,7 +635,7 @@ void MyMesh::onAckRecv(mesh::Packet *packet, uint32_t ack_crc) {
 
 MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondClock &ms, mesh::RNG &rng,
                mesh::RTCClock &rtc, mesh::MeshTables &tables)
-    : mesh::Mesh(radio, ms, rng, rtc, *new StaticPoolPacketManager(32), tables),
+    : mesh::Mesh(radio, ms, rng, rtc, *createObserverPacketManager(32), tables),
       region_map(key_store), temp_map(key_store),
       _cli(board, rtc, sensors, region_map, acl, &_prefs, this),
       telemetry(MAX_PACKET_PAYLOAD - 4)
