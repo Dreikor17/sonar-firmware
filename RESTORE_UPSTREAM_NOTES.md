@@ -36,11 +36,23 @@ mechanism that keeps EU 868 MHz nodes under the legally-mandated duty cycle.
 
 ### Must be validated on-device before merge
 
-This touches core TX timing. Confirm on hardware:
-- Normal traffic still flows (repeater forwards, observer uplinks).
-- Sustained TX is throttled to the configured duty cycle (watch `get` airtime/queue stats;
-  verify `next_tx_time` spacing under load).
-- The observer radio watchdog still recovers a stuck radio (`radio_watchdog_minutes`).
+This touches core TX timing. Confirm on hardware — **all device-confirmed 2026-07-09/10
+on a Heltec V4.2 (busy live mesh + off-frequency bench):**
+- ✅ Normal traffic still flows (repeater forwards, observer uplinks).
+- ✅ Sustained TX is throttled to the configured duty cycle: at `set dutycycle 1` on a
+  busy mesh, TX pinned to ~1% while MQTT capture continued at full rate (after the
+  `RxReservePacketManager` fixes below). Remote admin remains usable under throttle
+  with the priority-shed + stale-expiry policy.
+- ✅ CAD enabled under load: TX, capture, and CLI all normal.
+- ✅ The observer radio watchdog fires and recovers non-destructively: with
+  `radio.watchdog 1` on a silent frequency, `err_flags` bit 8 set, radio remained in
+  RX state through repeated recovery cycles, and packets were still received after.
+  Note: firings are invisible on release builds (no MESH_DEBUG) — check
+  `stats-radio-diag` `err_flags`; the watchdog arms only after first radio activity
+  (`last_active > 0`), so a radio wedged from boot is deliberately not covered.
+
+Remaining before undraft: passive soak at fleet-default `airtime_factor` (duty
+convergence, flat heap, adverts still advertised).
 
 ### Known interaction: throttling starves MQTT capture (mitigated)
 
