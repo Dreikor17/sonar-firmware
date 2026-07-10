@@ -127,6 +127,17 @@ public:
     PsychicMqttClient &setAutoReconnect(bool reconnect = true);
 
     /**
+     * @brief Sets the retransmit timeout for unacknowledged QoS 1/2 messages.
+     * esp-mqtt resends an unacked PUBLISH (DUP flag set) every time this
+     * timeout elapses, so a value shorter than the broker's ack latency
+     * produces byte-identical duplicates on the wire.
+     *
+     * @param timeoutMs Retransmit timeout in milliseconds. esp-mqtt's default is 1000.
+     * @return A reference to the PsychicMqttClient instance.
+     */
+    PsychicMqttClient &setMessageRetransmitTimeout(int timeoutMs);
+
+    /**
      * @brief Sets the client ID for the MQTT connection.
      *
      * @param clientId The client ID. Defaults to ESP32_%CHIPID% where
