@@ -105,7 +105,7 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 25;
+static const int MQTT_PRESET_COUNT = 26;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
