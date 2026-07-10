@@ -124,7 +124,7 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "chimesh",       "wss://mqtt.chimesh.org:443",              "mqtt.chimesh.org",                ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "meshat.se",     "wss://meshcore-mqtt.meshat.se:443",       "meshcore-mqtt.meshat.se",         ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "eastidahomesh", "wss://broker.eastidahomesh.net:443",      nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_NONE,     MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
-    { "coloradomesh",  "wss://mqtt.meshcore.coloradomesh.org:1883","mqtt.meshcore.coloradomesh.org", ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "coloradomesh",  "wss://mqtt.meshcore.coloradomesh.org:443","mqtt.meshcore.coloradomesh.org", ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "dutchmeshcore-1", "wss://collector1.dutchmeshcore.nl:443/mqtt", "collector1.dutchmeshcore.nl",     GTS_ROOT_R4,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "dutchmeshcore-2", "wss://collector2.dutchmeshcore.nl:443/mqtt", "collector2.dutchmeshcore.nl",     GTS_ROOT_R4,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "meshcore-ca-1",   "wss://mqtt1.meshcore.ca:443/mqtt",          "mqtt1.meshcore.ca",               ISRG_ROOT_X1, MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
