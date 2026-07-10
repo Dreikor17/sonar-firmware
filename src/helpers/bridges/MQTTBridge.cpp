@@ -3323,6 +3323,15 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
   client->setKeepAlive(75);
 #endif
 
+  // QoS 1 retransmit timeout for unacked PUBLISHes (status messages). esp-mqtt's
+  // 1000 ms default resends a byte-identical duplicate every second whenever the
+  // broker's PUBACK takes >1s — on a congested or recovering uplink this floods
+  // subscribers with exact copies of one /status message (observed 6 copies ~1s
+  // apart after an ISP outage; brokers may drop the session as spam). 15s allows
+  // one retry before the outbox entry expires (esp-mqtt outbox expiry is 30s),
+  // preserving at-least-once delivery while capping duplicates at one.
+  client->setMessageRetransmitTimeout(15000);
+
   // Buffer sizing: 896 is the minimum safe size for JWT clients (CONNECT + 768-byte JWT).
   // On PSRAM boards, use a uniform size to reduce fragmentation from mixed allocations.
   // On non-PSRAM boards, use smaller buffers for non-JWT slots to reduce heap usage and

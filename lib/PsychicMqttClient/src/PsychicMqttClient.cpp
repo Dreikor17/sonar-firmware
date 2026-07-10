@@ -59,6 +59,17 @@ PsychicMqttClient &PsychicMqttClient::setAutoReconnect(bool reconnect)
     return *this;
 }
 
+PsychicMqttClient &PsychicMqttClient::setMessageRetransmitTimeout(int timeoutMs)
+{
+#if ESP_IDF_VERSION_MAJOR == 5
+    _mqtt_cfg.session.message_retransmit_timeout = timeoutMs;
+#else
+    _mqtt_cfg.message_retransmit_timeout = timeoutMs;
+#endif
+    _config_dirty = true;
+    return *this;
+}
+
 PsychicMqttClient &PsychicMqttClient::setClientId(const char *clientId)
 {
 #if ESP_IDF_VERSION_MAJOR == 5
