@@ -430,10 +430,6 @@ public:
 
   static unsigned long getWifiConnectedAtMillis();
 
-  // Copies the current global/unique-local IPv6 address (string) into buf.
-  // Returns false (and writes an empty string) when no global IPv6 is assigned.
-  static bool getGlobalIPv6(char* buf, size_t len);
-
   /**
    * Per-slot outage accessors used by AlertReporter to detect prolonged
    * MQTT broker outages. Indices are 0..RUNTIME_MQTT_SLOTS-1.
