@@ -1119,8 +1119,18 @@ void MQTTBridge::initSlotClients() {
     slot.client->onConnect([this, index](bool sessionPresent) {
       MQTT_DEBUG_PRINTLN("MQTT%d connected", index + 1);
       _slots[index].connected = true;
-      _slots[index].reconnect_backoff = 0;
-      _slots[index].max_backoff_failures = 0;
+      // NOTE: reconnect_backoff / max_backoff_failures are NOT reset here.
+      // A CONNACK alone doesn't prove the link is healthy — a broker that
+      // accepts and then drops within seconds would reset the ladder every
+      // cycle and retry at the 10 s rung forever, and each retry is a full
+      // TLS session alloc/free (~40 KB of internal-heap churn, a known
+      // fragmentation driver). The ladder is instead cleared by
+      // maintainSlotConnection() once the connection has stayed up for
+      // BACKOFF_STABLE_RESET_MS, so flapping endpoints keep their earned
+      // backoff level. The breaker itself does clear now: while connected
+      // the diag/status must not claim the slot gave up, and the next
+      // disconnect should be governed by the (still-elevated) ladder.
+      _slots[index].connected_at_ms = millis();
       _slots[index].circuit_breaker_tripped = false;
       _slots[index].last_tls_err = 0;
       _slots[index].last_tls_stack_err = 0;
@@ -1140,6 +1150,7 @@ void MQTTBridge::initSlotClients() {
         _slots[index].current_outage_started_ms = millis();
       }
       _slots[index].connected = false;
+      _slots[index].connected_at_ms = 0;  // stability clock only runs while connected
       updateCachedConnectionStatus();
     });
     slot.client->onError([this, index](esp_mqtt_error_codes error) {
@@ -1453,7 +1464,20 @@ void MQTTBridge::maintainSlotConnections() {
 void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted) {
   MQTTSlot& slot = _slots[index];
 
-  if (slot.connected) {
+  // Forgive past failures only after the connection has proven stable.
+  // 2 minutes covers at least one keepalive round-trip (keepalive is 75 s),
+  // so a link that can't survive a single keepalive period never resets the
+  // ladder. Flapping endpoints therefore stay at their earned backoff rung
+  // (worst case the 300 s rung / 30-minute breaker probes) instead of
+  // hammering full TLS handshakes at the 10 s rung — see the onConnect
+  // handler in initSlotClients() for why this doesn't happen on CONNACK.
+  static const unsigned long BACKOFF_STABLE_RESET_MS = 120000UL;
+  if (slot.connected &&
+      (slot.reconnect_backoff != 0 || slot.max_backoff_failures != 0) &&
+      slot.connected_at_ms != 0 &&
+      (now_millis - slot.connected_at_ms) >= BACKOFF_STABLE_RESET_MS) {
+    MQTT_DEBUG_PRINTLN("MQTT%d stable for %lus - clearing reconnect backoff (was level %d)",
+        index + 1, (now_millis - slot.connected_at_ms) / 1000UL, slot.reconnect_backoff);
     slot.reconnect_backoff = 0;
     slot.max_backoff_failures = 0;
   }
