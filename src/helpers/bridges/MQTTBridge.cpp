@@ -250,6 +250,45 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
   snprintf(buf + pos, bufsize - pos, ", q:%d", q);
 }
 
+// On-demand publish-health + heap snapshot for the `get mqtt.stats` CLI command.
+// Same data as the (MQTT_MEMORY_DEBUG-only) periodic logMemoryStatus() line, but
+// returned as a reply instead of logged. Per-slot "sN=ok/err": ok = cumulative
+// accepted publishes, err = cumulative failures (socket error / network timeout).
+// Outbox should read ~0 (QoS0 publishes synchronously); a rising err isolates a
+// broker whose uplink is dropping writes.
+void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
+  if (buf == nullptr || bufsize == 0) return;
+  if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) {
+    snprintf(buf, bufsize, "> (bridge not running)");
+    return;
+  }
+  MQTTBridge* b = s_mqtt_bridge_instance;
+
+  int q = 0;
+#ifdef ESP_PLATFORM
+  if (b->_packet_queue_handle != nullptr) {
+    q = (int)uxQueueMessagesWaiting(b->_packet_queue_handle);
+  }
+#else
+  q = b->_queue_count;
+#endif
+
+  size_t outbox_total = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (b->_slots[i].client) outbox_total += b->_slots[i].client->getOutboxSize();
+  }
+
+  int pos = snprintf(buf, bufsize, "> Free=%d Max=%d q:%d/%d Outbox=%u |",
+                     (int)ESP.getFreeHeap(), (int)ESP.getMaxAllocHeap(),
+                     q, MAX_QUEUE_SIZE, (unsigned)outbox_total);
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS && pos < (int)bufsize - 1; i++) {
+    if (!b->_slots[i].enabled || !b->_slots[i].client) continue;
+    pos += snprintf(buf + pos, bufsize - pos, " s%d=%lu/%lu", i + 1,
+                    b->_slots[i].client->getPublishOk(),
+                    b->_slots[i].client->getPublishErr());
+  }
+}
+
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
 unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
 
@@ -899,14 +938,17 @@ void MQTTBridge::mqttTaskLoop() {
 
     unsigned long now = millis();
 
-    // Periodic heap + outbox snapshot (compiles to nothing unless MQTT_DEBUG is set).
-    // Outbox= is the value to watch: it should sit near 0 on a healthy uplink and
-    // plateau at the configured cap (not climb) during a stall.
+    // Periodic heap + publish-health snapshot. Gated behind MQTT_MEMORY_DEBUG (a
+    // dedicated diagnostics flag, NOT enabled on production or plain MQTT_DEBUG builds)
+    // so it stays off by default — the same data is available on demand via the
+    // `get mqtt.stats` CLI command (formatMqttStatsReply / logMemoryStatus()).
+    #ifdef MQTT_MEMORY_DEBUG
     static unsigned long last_mem_log = 0;
     if (now - last_mem_log >= 30000) {
       last_mem_log = now;
       logMemoryStatus();
     }
+    #endif
 
     bool wifi_just_connected = handleWiFiConnection(now);
     if (wifi_just_connected) {
