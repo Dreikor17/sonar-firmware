@@ -1486,15 +1486,19 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   bool slot_uses_jwt = (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) ||
                        (!slot.preset && slot.audience[0] != '\0');
   if (slot_uses_jwt) {
+    // Renew (and below, reconnect) this many seconds before the token's exp
+    // claim. Scaled to the slot's token lifetime — see tokenRenewalBufferSecs
+    // for why a flat 60 s lost the renewal race against brokers that enforce
+    // exp on live sessions (waev's 55-minute tokens).
+    const unsigned long renewal_buffer = tokenRenewalBufferSecs(slotTokenLifetime(index));
     bool token_needs_renewal = false;
     if (!time_synced) {
       token_needs_renewal = (slot.token_expires_at == 0);
     } else {
-      const unsigned long RENEWAL_BUFFER = 60;
       token_needs_renewal = (slot.token_expires_at == 0) ||
                            !(slot.token_expires_at >= 1000000000) ||
                            (current_time >= slot.token_expires_at) ||
-                           (current_time >= (slot.token_expires_at - RENEWAL_BUFFER));
+                           (current_time >= (slot.token_expires_at - renewal_buffer));
     }
 
     // Throttle renewal attempts to once per minute
@@ -1509,12 +1513,16 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
       if (createSlotAuthToken(index)) {
         MQTT_DEBUG_PRINTLN("MQTT%d token renewed", index + 1);
 
-        const unsigned long DISCONNECT_THRESHOLD = 60;
+        // Bounce the connection while WE control the timing whenever the old
+        // token is inside the renewal buffer — waiting for the broker to
+        // enforce exp mid-session means a FIN plus a trip through the backoff
+        // ladder instead of one clean reconnect. Same buffer as the renewal
+        // trigger above, so a renewal implies a proactive reconnect.
         bool old_token_expired_or_imminent = !time_synced ||
                                             (old_token_expires_at == 0) ||
                                             (current_time >= old_token_expires_at) ||
                                             (time_synced && old_token_expires_at >= 1000000000 &&
-                                             current_time >= (old_token_expires_at - DISCONNECT_THRESHOLD));
+                                             current_time >= (old_token_expires_at - renewal_buffer));
 
         if (old_token_expired_or_imminent || !slot.client->connected()) {
           // Disconnect + reconnect with fresh credentials, reusing existing client
@@ -1632,6 +1640,43 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   }
 }
 
+// Effective JWT lifetime for a slot: the preset's token_lifetime (or the 24 h
+// default for custom/audience slots), minus the per-slot expiry stagger that
+// keeps multiple JWT slots from renewing/reconnecting simultaneously. This is
+// the exact value createSlotAuthToken() puts in the token's exp claim, so the
+// renewal scheduling in maintainSlotConnection() can be derived from it.
+unsigned long MQTTBridge::slotTokenLifetime(int index) const {
+  const MQTTSlot& slot = _slots[index];
+  unsigned long base_lifetime = 86400; // default 24h
+  if (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT && slot.preset->token_lifetime > 0) {
+    base_lifetime = slot.preset->token_lifetime;
+  }
+  // Stagger token expiry per slot to avoid simultaneous renewal/reconnect.
+  // Use 5% of lifetime per slot, capped at 300s, so short-lived tokens aren't over-reduced.
+  unsigned long stagger = index * min((unsigned long)300, base_lifetime / 20);
+  return base_lifetime - stagger;
+}
+
+// How early (seconds before the token's exp claim) to renew the token AND
+// proactively bounce the connection with fresh credentials. exp and the
+// renewal schedule are locked together (both derive from slotTokenLifetime),
+// so this buffer is the ONLY margin between "device re-authenticates" and
+// "broker enforces exp and FIN-closes the session mid-stream" — shortening a
+// preset's token_lifetime moves both times together and cannot widen it.
+// The old flat 60 s lost that race whenever the device clock ran slow, or a
+// single renewal attempt failed (the 60 s renewal throttle then ate the whole
+// margin) — observed on the waev preset, whose 55-minute tokens are the only
+// ones short enough for brokers to enforce exp against a live session.
+// lifetime/10 with a 60 s floor and 300 s cap: 24 h tokens renew 5 min early
+// (unchanged in practice), waev renews ~5 min early with ~5 throttled retry
+// windows, and degenerate short lifetimes still renew inside their validity.
+unsigned long MQTTBridge::tokenRenewalBufferSecs(unsigned long lifetime_secs) {
+  unsigned long buffer = lifetime_secs / 10;
+  if (buffer < 60) buffer = 60;
+  if (buffer > 300) buffer = 300;
+  return buffer;
+}
+
 bool MQTTBridge::createSlotAuthToken(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
@@ -1639,10 +1684,8 @@ bool MQTTBridge::createSlotAuthToken(int index) {
 
   // Determine JWT audience: preset takes priority, then custom slot audience field
   const char* audience = nullptr;
-  unsigned long base_lifetime = 86400; // default 24h
   if (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT) {
     audience = slot.preset->jwt_audience;
-    if (slot.preset->token_lifetime > 0) base_lifetime = slot.preset->token_lifetime;
   } else if (slot.audience[0] != '\0') {
     audience = slot.audience;
   }
@@ -1672,10 +1715,7 @@ bool MQTTBridge::createSlotAuthToken(int index) {
   const char* email = (_obs->mqtt_email[0] != '\0') ? _obs->mqtt_email : nullptr;
 
   unsigned long current_time = time(nullptr);
-  // Stagger token expiry per slot to avoid simultaneous renewal/reconnect
-  // Use 5% of lifetime per slot, capped at 300s, so short-lived tokens aren't over-reduced
-  unsigned long stagger = index * min((unsigned long)300, base_lifetime / 20);
-  unsigned long expires_in = base_lifetime - stagger;
+  unsigned long expires_in = slotTokenLifetime(index);  // preset/default lifetime minus per-slot stagger
   bool time_synced = (current_time >= 1000000000);
 
   if (JWTHelper::createAuthToken(

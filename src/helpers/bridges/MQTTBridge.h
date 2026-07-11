@@ -340,6 +340,8 @@ private:
   void maintainSlotConnections();      // Maintain all slot connections (token renewal, reconnect)
   void maintainSlotConnection(int index, unsigned long now_millis, unsigned long current_time, bool time_synced, bool& reconnect_attempted, bool& teardown_attempted);
   bool createSlotAuthToken(int index); // Create/renew JWT token for a slot
+  unsigned long slotTokenLifetime(int index) const; // effective JWT lifetime (preset/default minus slot stagger), seconds
+  static unsigned long tokenRenewalBufferSecs(unsigned long lifetime_secs); // how early to renew+reconnect before exp
   bool publishToSlot(int index, const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
   bool publishToAllSlots(const char* topic, const char* payload, bool retained = false, uint8_t qos = 0);
   void publishStatusToSlot(int index);

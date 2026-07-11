@@ -115,6 +115,11 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "nz-analyzer",   "wss://meshcore-mqtt-1.baird.io:443",      "meshcore-mqtt-1.baird.io",        GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "meshmapper",    "wss://mqtt.meshmapper.net:443/mqtt",       "mqtt.meshmapper.net",              ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "meshrank",      "mqtts://meshrank.net:8883",               nullptr,                           ISRG_ROOT_X1,  MQTT_AUTH_NONE,     MQTT_TOPIC_MESHRANK,  0,       false,  0,       nullptr,     nullptr     },
+    // waev token_lifetime is 3300 (55 min) on purpose: the broker's real JWT TTL is
+    // 60 min, and claiming less keeps fresh tokens accepted even with ~5 min of fast
+    // device-clock skew (and off any exp-iat<=3600 boundary strictness). Do NOT
+    // "fix" this to 3600 — the renewal race is handled separately by
+    // tokenRenewalBufferSecs() in MQTTBridge, which renews another 5 min earlier.
     { "waev",          "wss://mqtt.waev.app:443/mqtt",            "mqtt.waev.app",                   GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE, 3300,     false,  55,      nullptr,     nullptr     },
     { "meshomatic",    "wss://us-east.meshomatic.net:443/mqtt",   "us-east.meshomatic.net",          ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "cascadiamesh",  "wss://mqtt-v1.cascadiamesh.org:443/mqtt", "mqtt-v1.cascadiamesh.org",        ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
