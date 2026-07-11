@@ -898,6 +898,16 @@ void MQTTBridge::mqttTaskLoop() {
     #endif
 
     unsigned long now = millis();
+
+    // Periodic heap + outbox snapshot (compiles to nothing unless MQTT_DEBUG is set).
+    // Outbox= is the value to watch: it should sit near 0 on a healthy uplink and
+    // plateau at the configured cap (not climb) during a stall.
+    static unsigned long last_mem_log = 0;
+    if (now - last_mem_log >= 30000) {
+      last_mem_log = now;
+      logMemoryStatus();
+    }
+
     bool wifi_just_connected = handleWiFiConnection(now);
     if (wifi_just_connected) {
       // WiFi recovered — reset last_reconnect_attempt for disconnected slots so they
@@ -1742,13 +1752,16 @@ bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload
     return false;
   }
 
-  // QoS 0 for the high-rate packet/raw publish paths: no PUBACK, no outbox store,
-  // no per-message heap alloc — critical for non-PSRAM fragmentation. QoS 1 is used
-  // only for low-rate retained status messages where delivery matters.
+  // QoS 0 for the high-rate packet/raw publish paths: no PUBACK, so delivery is
+  // best-effort. These still enter the esp-mqtt outbox (store=true, needed so packet
+  // topics keep flowing), but the client bounds that outbox via setOutboxLimit() to
+  // stop QoS0 frames accumulating on internal heap during a stalled uplink — over the
+  // cap, publish() returns -2 and the queue retry/drop path below handles it. QoS 1 is
+  // used only for low-rate retained status messages where delivery matters.
   //
   // esp_mqtt_client_enqueue return convention: QoS 0 returns msg_id == 0 on success
   // (no tracking since there's no PUBACK); QoS 1/2 return a positive msg_id. Negative
-  // values (-1 generic failure, -2 outbox full) are the only actual failures.
+  // values (-1 generic failure, -2 outbox full / over cap) are the only actual failures.
   int result = slot.client->publish(topic, qos, retained, payload, strlen(payload), true);
   if (result < 0) {
     // QoS0 packet/raw publishes are best-effort and may be retried from the
@@ -3408,6 +3421,22 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
 
   client->setBufferSize(MQTT_CLIENT_BUFFER_SIZE);
 
+  // Bound the esp-mqtt outbox for high-rate QoS0 packet/raw publishes. Those go in
+  // with store=true (so packet topics keep flowing) but the outbox has no size limit
+  // of its own — it frees entries only on send-ack or ~30s expiry, so a stalled uplink
+  // lets QoS0 frames accumulate on internal heap without bound. Above this cap the
+  // client drops the new QoS0 message (returns -2), and processPacketQueue's existing
+  // retry/drop path applies backpressure. Non-PSRAM is the fragmentation-sensitive case
+  // (outbox lives on internal heap), so it gets the tighter cap. Under healthy operation
+  // the outbox drains to ~0 in ms, so this only bites during a stall. Note: esp-mqtt's
+  // own outbox.limit config is not used — its enqueue path does not reliably enforce it
+  // for QoS0, and this app-level guard fires before enqueue regardless of IDF version.
+#if defined(BOARD_HAS_PSRAM)
+  client->setOutboxLimit(16384);
+#else
+  client->setOutboxLimit(8192);
+#endif
+
   // Access ESP-IDF config to optimize additional settings
   esp_mqtt_client_config_t* config = client->getMqttConfig();
   if (config) {
@@ -3425,8 +3454,30 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
 }
 
 void MQTTBridge::logMemoryStatus() {
-  MQTT_DEBUG_PRINTLN("Memory: Free=%d, Max=%d, Queue=%d/%d",
-                     ESP.getFreeHeap(), ESP.getMaxAllocHeap(), _queue_count, MAX_QUEUE_SIZE);
+  // The esp-mqtt outbox is the structure that grew unbounded before the cap. The cap
+  // (setOutboxLimit) is enforced PER CLIENT, so log it per slot — a summed total hides
+  // whether any single slot has blown past its cap. Each entry is size/limit; drops is
+  // the cumulative count of QoS0 messages rejected at the cap (backpressure firing).
+  // Under a healthy uplink size sits near 0; under a stall/saturation it should plateau
+  // at limit (not climb) and drops should increase.
+  char outbox_detail[160];
+  size_t pos = 0;
+  size_t outbox_total = 0;
+  outbox_detail[0] = '\0';
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].client) {
+      size_t sz = _slots[i].client->getOutboxSize();
+      outbox_total += sz;
+      pos += snprintf(outbox_detail + pos, sizeof(outbox_detail) - pos, "%ss%d=%u/%u(d%lu)",
+                      pos ? " " : "", i, (unsigned)sz,
+                      (unsigned)_slots[i].client->getOutboxLimit(),
+                      _slots[i].client->getOutboxDrops());
+      if (pos >= sizeof(outbox_detail)) break;
+    }
+  }
+  MQTT_DEBUG_PRINTLN("Memory: Free=%d, Max=%d, Queue=%d/%d, Outbox=%u [%s]",
+                     ESP.getFreeHeap(), ESP.getMaxAllocHeap(), _queue_count, MAX_QUEUE_SIZE,
+                     (unsigned)outbox_total, outbox_detail);
 }
 
 // ---------------------------------------------------------------------------

@@ -410,6 +410,42 @@ public:
      */
     esp_mqtt_client_config_t *getMqttConfig();
 
+    /**
+     * @brief Caps the size of the esp-mqtt outbox for async QoS 0 publishes.
+     *
+     * QoS 0 async publishes are forced into the esp-mqtt outbox (store=true) so
+     * packet topics keep flowing, but the outbox has no size bound of its own —
+     * it only frees entries on send-ack or time-based expiry. On a stalled uplink
+     * the entries accumulate on internal heap without limit. When the current
+     * outbox size is at/over this cap, publish() drops the new QoS 0 message
+     * (returns -2) instead of enqueuing it, applying backpressure. 0 disables the
+     * cap. QoS 1/2 publishes are never gated by this.
+     *
+     * @param bytes Maximum outbox size in bytes, or 0 to disable.
+     * @return A reference to the PsychicMqttClient instance.
+     */
+    PsychicMqttClient &setOutboxLimit(size_t bytes);
+
+    /**
+     * @brief Returns the current esp-mqtt outbox size in bytes (0 if the client
+     * is not initialized). Useful for diagnostics/backpressure monitoring.
+     *
+     * @return Current outbox size in bytes.
+     */
+    size_t getOutboxSize();
+
+    /**
+     * @brief Returns the configured outbox cap in bytes (0 = disabled). Lets
+     * callers confirm the cap is actually applied to this client.
+     */
+    size_t getOutboxLimit();
+
+    /**
+     * @brief Returns the cumulative count of QoS0 messages dropped because the
+     * outbox was at/over the cap. Monotonic; useful for backpressure diagnostics.
+     */
+    unsigned long getOutboxDrops();
+
 private:
     esp_mqtt_client_handle_t _client = nullptr;
     esp_mqtt_client_config_t _mqtt_cfg;
@@ -417,6 +453,12 @@ private:
     bool _connected = false;
     bool _stopMqttClient = false;
     bool _config_dirty = true;
+
+    // Runtime cap on the esp-mqtt outbox for QoS 0 async publishes (bytes).
+    // 0 = disabled. Enforced in publish(); not an esp-mqtt config field.
+    size_t _outbox_limit = 0;
+    // Cumulative count of QoS0 publishes dropped because the outbox hit the cap.
+    unsigned long _outbox_drops = 0;
 
     // Multipart message reassembly. _buffer is lazily allocated at connect() time
     // to match the configured buffer size, then reused for the client's lifetime.
