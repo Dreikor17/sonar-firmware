@@ -468,6 +468,9 @@ public:
    *  (for LoRa). Returns false if the bridge is not running. */
   bool ntpDiag(char* reply, size_t reply_size, bool verbose);
   static void formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPrefs* obs);
+  /** On-demand publish-health + heap snapshot for `get mqtt.stats` (per-slot ok/err,
+   *  outbox size, free/max heap, queue depth). */
+  static void formatMqttStatsReply(char* buf, size_t bufsize);
   /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */
   static bool isConfigValid(const MQTTPrefs* obs);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
