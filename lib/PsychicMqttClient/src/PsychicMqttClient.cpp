@@ -48,6 +48,17 @@ PsychicMqttClient &PsychicMqttClient::setKeepAlive(int keepAlive)
     return *this;
 }
 
+PsychicMqttClient &PsychicMqttClient::setNetworkTimeout(int timeoutMs)
+{
+#if ESP_IDF_VERSION_MAJOR == 5
+    _mqtt_cfg.network.timeout_ms = timeoutMs;
+#else
+    _mqtt_cfg.network_timeout_ms = timeoutMs;
+#endif
+    _config_dirty = true;
+    return *this;
+}
+
 PsychicMqttClient &PsychicMqttClient::setAutoReconnect(bool reconnect)
 {
 #if ESP_IDF_VERSION_MAJOR == 5
@@ -554,12 +565,19 @@ int PsychicMqttClient::publish(const char *topic, int qos, bool retain, const ch
 
         ESP_LOGV(TAG, "Enqueuing message to topic %s with QoS %d", topic, qos);
         bool store_in_outbox = true;
-        return esp_mqtt_client_enqueue(_client, topic, payload, length, qos, retain, store_in_outbox);
+        int result = esp_mqtt_client_enqueue(_client, topic, payload, length, qos, retain, store_in_outbox);
+        if (result < 0) _publish_err++; else _publish_ok++;
+        return result;
     }
     else
     {
         ESP_LOGV(TAG, "Publishing message to topic %s with QoS %d", topic, qos);
-        return esp_mqtt_client_publish(_client, topic, payload, length, qos, retain);
+        // Synchronous write (used for QoS0 packet publishes). A negative result is a real
+        // send failure (socket error / network_timeout on a stalled link), tracked here so
+        // callers can surface delivery health without per-message logging.
+        int result = esp_mqtt_client_publish(_client, topic, payload, length, qos, retain);
+        if (result < 0) _publish_err++; else _publish_ok++;
+        return result;
     }
 }
 
@@ -599,6 +617,16 @@ size_t PsychicMqttClient::getOutboxLimit()
 unsigned long PsychicMqttClient::getOutboxDrops()
 {
     return _outbox_drops;
+}
+
+unsigned long PsychicMqttClient::getPublishOk()
+{
+    return _publish_ok;
+}
+
+unsigned long PsychicMqttClient::getPublishErr()
+{
+    return _publish_err;
 }
 
 void PsychicMqttClient::_onMqttEventStatic(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)

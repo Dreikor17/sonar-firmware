@@ -127,6 +127,18 @@ public:
     PsychicMqttClient &setAutoReconnect(bool reconnect = true);
 
     /**
+     * @brief Sets the network operation timeout in milliseconds. esp-mqtt aborts a
+     * network read/write (including a synchronous publish's socket write) if it does
+     * not complete within this window. A lower value bounds how long a synchronous
+     * QoS0 publish can block on a stalled/half-open socket before failing and letting
+     * the slot flip to disconnected. esp-mqtt's default is 10000.
+     *
+     * @param timeoutMs Network timeout in milliseconds.
+     * @return A reference to the PsychicMqttClient instance.
+     */
+    PsychicMqttClient &setNetworkTimeout(int timeoutMs);
+
+    /**
      * @brief Sets the retransmit timeout for unacknowledged QoS 1/2 messages.
      * esp-mqtt resends an unacked PUBLISH (DUP flag set) every time this
      * timeout elapses, so a value shorter than the broker's ack latency
@@ -446,6 +458,19 @@ public:
      */
     unsigned long getOutboxDrops();
 
+    /**
+     * @brief Cumulative count of publishes that were accepted (enqueued or written
+     * successfully). Monotonic. Pair with getPublishErr() for delivery-health stats.
+     */
+    unsigned long getPublishOk();
+
+    /**
+     * @brief Cumulative count of publishes that failed (negative return from the
+     * synchronous write or async enqueue — socket error / network timeout). Monotonic.
+     * A rising value indicates the uplink is dropping publishes.
+     */
+    unsigned long getPublishErr();
+
 private:
     esp_mqtt_client_handle_t _client = nullptr;
     esp_mqtt_client_config_t _mqtt_cfg;
@@ -459,6 +484,9 @@ private:
     size_t _outbox_limit = 0;
     // Cumulative count of QoS0 publishes dropped because the outbox hit the cap.
     unsigned long _outbox_drops = 0;
+    // Cumulative publish accept/fail counts (any QoS, sync or async path).
+    unsigned long _publish_ok = 0;
+    unsigned long _publish_err = 0;
 
     // Multipart message reassembly. _buffer is lazily allocated at connect() time
     // to match the configured buffer size, then reused for the client's lifetime.

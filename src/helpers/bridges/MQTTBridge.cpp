@@ -1752,17 +1752,23 @@ bool MQTTBridge::publishToSlot(int index, const char* topic, const char* payload
     return false;
   }
 
-  // QoS 0 for the high-rate packet/raw publish paths: no PUBACK, so delivery is
-  // best-effort. These still enter the esp-mqtt outbox (store=true, needed so packet
-  // topics keep flowing), but the client bounds that outbox via setOutboxLimit() to
-  // stop QoS0 frames accumulating on internal heap during a stalled uplink — over the
-  // cap, publish() returns -2 and the queue retry/drop path below handles it. QoS 1 is
-  // used only for low-rate retained status messages where delivery matters.
+  // Publish path by QoS:
+  //  - QoS 0 (high-rate packets/raw): SYNCHRONOUS (async=false → esp_mqtt_client_publish),
+  //    which writes straight to the socket. The async/outbox path drains only one queued
+  //    item per esp-mqtt task loop (~1 msg/s/conn, gated by the 1s poll_read), so under
+  //    even light packet load the outbox pins at its cap and drops ~20-30%. A synchronous
+  //    write bypasses that drain ceiling entirely and does not store in the outbox. It can
+  //    block the (Core-0, prio-1) MQTT task on a stalled socket, but only up to
+  //    network_timeout_ms (lowered in optimizeMqttClientConfig); mesh RX (Core 1) and the
+  //    WiFi/TCP stack (higher-prio system tasks) are unaffected, and a failed write flips
+  //    the slot to disconnected so subsequent packets skip it.
+  //  - QoS 1 (low-rate retained status): async, so it keeps the durable outbox + retransmit.
   //
-  // esp_mqtt_client_enqueue return convention: QoS 0 returns msg_id == 0 on success
-  // (no tracking since there's no PUBACK); QoS 1/2 return a positive msg_id. Negative
-  // values (-1 generic failure, -2 outbox full / over cap) are the only actual failures.
-  int result = slot.client->publish(topic, qos, retained, payload, strlen(payload), true);
+  // Return convention: QoS 0 sync publish returns msg_id == 0 on success (no PUBACK
+  // tracking). Negative values (-1 write/failure) are the only actual failures; the queue
+  // retry/drop path below handles them.
+  bool async = (qos > 0);
+  int result = slot.client->publish(topic, qos, retained, payload, strlen(payload), async);
   if (result < 0) {
     // QoS0 packet/raw publishes are best-effort and may be retried from the
     // bridge queue; avoid logging transient first-attempt failures here.
@@ -3421,16 +3427,17 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
 
   client->setBufferSize(MQTT_CLIENT_BUFFER_SIZE);
 
-  // Bound the esp-mqtt outbox for high-rate QoS0 packet/raw publishes. Those go in
-  // with store=true (so packet topics keep flowing) but the outbox has no size limit
-  // of its own — it frees entries only on send-ack or ~30s expiry, so a stalled uplink
-  // lets QoS0 frames accumulate on internal heap without bound. Above this cap the
-  // client drops the new QoS0 message (returns -2), and processPacketQueue's existing
-  // retry/drop path applies backpressure. Non-PSRAM is the fragmentation-sensitive case
-  // (outbox lives on internal heap), so it gets the tighter cap. Under healthy operation
-  // the outbox drains to ~0 in ms, so this only bites during a stall. Note: esp-mqtt's
-  // own outbox.limit config is not used — its enqueue path does not reliably enforce it
-  // for QoS0, and this app-level guard fires before enqueue regardless of IDF version.
+  // Bound how long a synchronous QoS0 publish (see publishToSlot) can block the MQTT
+  // task on a stalled/half-open socket before esp-mqtt aborts the write. Default is 10s;
+  // 2.5s lets a first stall resolve fast (write fails → slot flips to disconnected →
+  // subsequent packets skip it) without holding up publishing to the other slots. Mesh
+  // RX (Core 1) and the WiFi/TCP stack are unaffected by this block regardless.
+  client->setNetworkTimeout(2500);
+
+  // Dormant safety net: cap the esp-mqtt outbox for any residual async QoS0 path. QoS0
+  // packets now publish synchronously (store=false, no outbox), so this normally never
+  // engages, but it bounds internal-heap growth if a QoS0 message ever takes the async
+  // path. Non-PSRAM (outbox on internal heap) gets the tighter cap.
 #if defined(BOARD_HAS_PSRAM)
   client->setOutboxLimit(16384);
 #else
@@ -3454,30 +3461,31 @@ void MQTTBridge::optimizeMqttClientConfig(PsychicMqttClient* client, bool needs_
 }
 
 void MQTTBridge::logMemoryStatus() {
-  // The esp-mqtt outbox is the structure that grew unbounded before the cap. The cap
-  // (setOutboxLimit) is enforced PER CLIENT, so log it per slot — a summed total hides
-  // whether any single slot has blown past its cap. Each entry is size/limit; drops is
-  // the cumulative count of QoS0 messages rejected at the cap (backpressure firing).
-  // Under a healthy uplink size sits near 0; under a stall/saturation it should plateau
-  // at limit (not climb) and drops should increase.
-  char outbox_detail[160];
+  // QoS0 packets now publish synchronously, so the outbox stays ~0 and is only a sanity
+  // check (a non-zero total would mean the QoS1 status path is backing up or the dormant
+  // async cap engaged). The live signal is per-slot publish health: ok = cumulative
+  // accepted writes, err = cumulative failures (socket error / network_timeout on a
+  // stalled link). A rising err on a slot means that broker's uplink is dropping packets;
+  // ok climbing with err flat is healthy delivery.
+  char pub_detail[200];
   size_t pos = 0;
   size_t outbox_total = 0;
-  outbox_detail[0] = '\0';
+  pub_detail[0] = '\0';
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (_slots[i].client) {
-      size_t sz = _slots[i].client->getOutboxSize();
-      outbox_total += sz;
-      pos += snprintf(outbox_detail + pos, sizeof(outbox_detail) - pos, "%ss%d=%u/%u(d%lu)",
-                      pos ? " " : "", i, (unsigned)sz,
-                      (unsigned)_slots[i].client->getOutboxLimit(),
-                      _slots[i].client->getOutboxDrops());
-      if (pos >= sizeof(outbox_detail)) break;
+      outbox_total += _slots[i].client->getOutboxSize();
+      if (_slots[i].enabled) {
+        pos += snprintf(pub_detail + pos, sizeof(pub_detail) - pos, "%ss%d=%lu/%lu",
+                        pos ? " " : "", i + 1,
+                        _slots[i].client->getPublishOk(),
+                        _slots[i].client->getPublishErr());
+        if (pos >= sizeof(pub_detail)) break;
+      }
     }
   }
-  MQTT_DEBUG_PRINTLN("Memory: Free=%d, Max=%d, Queue=%d/%d, Outbox=%u [%s]",
+  MQTT_DEBUG_PRINTLN("Memory: Free=%d, Max=%d, Queue=%d/%d, Outbox=%u | pub(ok/err) %s",
                      ESP.getFreeHeap(), ESP.getMaxAllocHeap(), _queue_count, MAX_QUEUE_SIZE,
-                     (unsigned)outbox_total, outbox_detail);
+                     (unsigned)outbox_total, pub_detail);
 }
 
 // ---------------------------------------------------------------------------
