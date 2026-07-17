@@ -255,7 +255,8 @@ canvas{width:100%;height:56px;display:block}
     <div class="card">
       <h2>Advanced</h2>
       <div class="row">
-        <div class="f"><label>Airtime factor</label><input type="number" data-k="af" step="0.1" min="0"></div>
+        <div class="f"><label>Airtime factor</label><input type="number" data-k="af" step="0.1" min="0">
+          <div class="hint" id="af-dc"></div></div>
         <div class="f"><label>RX delay base</label><input type="number" data-k="rxdelay" step="0.1" min="0" max="20"></div>
       </div>
       <div class="f"><label>TX delay factor</label><input type="number" data-k="txdelay" step="0.1" min="0" max="2" style="max-width:120px"></div>
@@ -263,12 +264,29 @@ canvas{width:100%;height:56px;display:block}
         <span class="tgl"><input type="checkbox" data-k="cad"><u></u></span></div>
       <div class="sw"><span><b>RX boosted gain</b><i>SX126x receivers only</i></span>
         <span class="tgl"><input type="checkbox" data-k="radio.rxgain"><u></u></span></div>
+      <div class="sw"><span><b>Repeat</b><i>Forward mesh traffic. Off = listen-only (still observes and publishes).</i></span>
+        <span class="tgl"><input type="checkbox" data-k="repeat"><u></u></span></div>
       <div class="row" style="margin-top:6px">
         <div class="f"><label>Local advert (min)</label><input type="number" data-k="advert.interval" min="0" max="240">
           <div class="hint">0 = off</div></div>
         <div class="f"><label>Flood advert (hrs)</label><input type="number" data-k="flood.advert.interval" min="0" max="168">
           <div class="hint">0 = off, else 3&ndash;168</div></div>
       </div>
+    </div>
+    <div class="card">
+      <h2>Flooding &amp; loops</h2>
+      <div class="note">Hop limits for flood traffic this node forwards. Lower values contain noisy neighbours; too low takes parts of the mesh out of reach.</div>
+      <div class="row">
+        <div class="f"><label>Max flood hops</label><input type="number" data-k="flood.max" min="0" max="64">
+          <div class="hint">0&ndash;64. Default 64.</div></div>
+        <div class="f"><label>Max advert hops</label><input type="number" data-k="flood.max.advert" min="0" max="64">
+          <div class="hint">0&ndash;64. Default 8.</div></div>
+      </div>
+      <div class="f"><label>Max unscoped flood hops</label><input type="number" data-k="flood.max.unscoped" min="0" max="64" style="max-width:120px">
+        <div class="hint">Applies to packets with no region scope. 0&ndash;64.</div></div>
+      <div class="f" style="margin-top:6px"><label>Loop detection</label>
+        <select data-k="loop.detect"><option value="off">Off</option><option value="minimal">Minimal</option><option value="moderate">Moderate</option><option value="strict">Strict</option></select>
+        <div class="hint">Drops flood packets that already carry this node's hash. Stricter = fewer repeats tolerated before dropping.</div></div>
     </div>
   </div>
 
@@ -284,17 +302,19 @@ canvas{width:100%;height:56px;display:block}
     </div>
     <div class="card">
       <h2>Publishing</h2>
-      <div class="sw"><span><b>Status messages</b><i>Periodic node status</i></span>
+      <div class="note">This node only ever <b>uploads</b> to MQTT — nothing from a broker is injected into the mesh.</div>
+      <div class="sw"><span><b>Node status</b><i>Periodic health/stats to the status topic</i></span>
         <span class="tgl"><input type="checkbox" data-k="mqtt.status"><u></u></span></div>
-      <div class="sw"><span><b>Packet metadata</b><i>Decoded packet summaries</i></span>
+      <div class="sw"><span><b>Publish packets</b><i>Master switch for all packet traffic below</i></span>
         <span class="tgl"><input type="checkbox" data-k="mqtt.packets"><u></u></span></div>
-      <div class="sw"><span><b>Raw packets</b><i>Full undecoded frames</i></span>
+      <div class="sw"><span><b>Add raw frames</b><i>Also send the full hex frame to the raw topic</i></span>
         <span class="tgl"><input type="checkbox" data-k="mqtt.raw"><u></u></span></div>
-      <div class="sw"><span><b>RX from MQTT</b><i>Accept downlink packets</i></span>
+      <div class="sw"><span><b>Received packets</b><i>Report packets heard over the air</i></span>
         <span class="tgl"><input type="checkbox" data-k="mqtt.rx"><u></u></span></div>
       <div class="row" style="margin-top:6px">
-        <div class="f"><label>TX to MQTT</label>
-          <select data-k="mqtt.tx"><option value="off">Off</option><option value="on">On</option><option value="advert">Adverts only</option></select></div>
+        <div class="f"><label>Transmitted packets</label>
+          <select data-k="mqtt.tx"><option value="off">Off</option><option value="on">All TX</option><option value="advert">Own adverts only</option></select>
+          <div class="hint">Report packets this node sends.</div></div>
         <div class="f"><label>Status interval (min)</label><input type="number" data-k="mqtt.interval" min="1" max="60"></div>
       </div>
     </div>
@@ -469,6 +489,11 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
     case"tx":return String(r.tx);case"af":return String(r.af);
     case"rxdelay":return String(r.rxdelay);case"txdelay":return String(r.txdelay);
     case"cad":return r.cad?"on":"off";case"radio.rxgain":return r.rxgain?"on":"off";
+    case"repeat":return r.repeat?"on":"off";
+    case"flood.max":return String(r.flood_max);
+    case"flood.max.advert":return String(r.flood_max_advert);
+    case"flood.max.unscoped":return String(r.flood_max_unscoped);
+    case"loop.detect":return r.loop_detect;
     case"advert.interval":return String(r.advert_interval);
     case"flood.advert.interval":return String(r.flood_advert_interval);
     case"wifi.ssid":return w.ssid;case"wifi.pwd":return w.pwd;case"wifi.powersave":return w.powersave;
@@ -504,7 +529,7 @@ function loadConfig(){
       var lab=el.closest(".f");var ch=lab&&lab.querySelector(".chip");if(ch)ch.remove();
     });
     $$("[data-rg]").forEach(function(el){el.value=String(c.radio[el.dataset.rg]);el.classList.remove("dirty")});
-    st.orig.radio=radioCombo();
+    st.orig.radio=radioCombo();afHint();
     for(var i=1;i<=st.nslots;i++){refreshSlotFields($("#app-slots"),i);refreshSlotFields($("#wz-slots"),i)}
     updateSaveBar();
   });
@@ -512,7 +537,16 @@ function loadConfig(){
 function markDirty(k,v,el){
   if(v===st.orig[k]){delete st.dirty[k]}else{st.dirty[k]=v}
   if(el)el.classList.toggle("dirty",k in st.dirty);
+  if(k==="af")afHint();
   updateSaveBar();
+}
+// The CLI's `dutycycle` is not its own pref — it just writes airtime_factor as
+// 100/(dc)-1. Showing the equivalent duty cycle beside `af` gives the number
+// operators actually reason about without a second field fighting over one pref.
+function afHint(){
+  var e=$("#af-dc");if(!e)return;
+  var af=parseFloat($('[data-k="af"]').value);
+  e.textContent=isFinite(af)&&af>=0?"≈ "+(Math.round(1000/(af+1))/10)+"% duty cycle":"";
 }
 document.addEventListener("input",function(ev){
   var el=ev.target;

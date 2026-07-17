@@ -26,7 +26,8 @@ static const char SECRET_SENTINEL[] = "********";
 static const char* const ALLOWED_SET_KEYS[] = {
   // NodePrefs (radio / node)
   "name", "lat", "lon", "radio", "tx", "af", "rxdelay", "txdelay",
-  "cad", "radio.rxgain", "advert.interval", "flood.advert.interval",
+  "cad", "radio.rxgain", "repeat", "advert.interval", "flood.advert.interval",
+  "flood.max", "flood.max.advert", "flood.max.unscoped", "loop.detect",
   // MQTTPrefs (WiFi / MQTT / misc observer)
   "wifi.ssid", "wifi.pwd", "wifi.powersave",
   "mqtt.origin", "mqtt.iata", "mqtt.status", "mqtt.packets", "mqtt.raw",
@@ -471,6 +472,12 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     radio["txdelay"] = _prefs->tx_delay_factor;
     radio["cad"] = (bool)_prefs->cad_enabled;
     radio["rxgain"] = (bool)_prefs->rx_boosted_gain;
+    radio["repeat"] = !(bool)_prefs->disable_fwd;   // CLI `repeat on` == disable_fwd 0
+    radio["flood_max"] = _prefs->flood_max;
+    radio["flood_max_advert"] = _prefs->flood_max_advert;
+    radio["flood_max_unscoped"] = _prefs->flood_max_unscoped;
+    static const char* const LOOP_MODES[] = { "off", "minimal", "moderate", "strict" };
+    radio["loop_detect"] = LOOP_MODES[_prefs->loop_detect <= LOOP_DETECT_STRICT ? _prefs->loop_detect : 0];
     radio["name"] = (const char*)_prefs->node_name;
     radio["lat"] = _prefs->node_lat;
     radio["lon"] = _prefs->node_lon;
