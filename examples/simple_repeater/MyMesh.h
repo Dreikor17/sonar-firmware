@@ -152,6 +152,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
   uint8_t neighbor_discover_count;
   bool neighbor_discover_active;
+  bool neighbor_table_refresh_active;
   unsigned long neighbor_discover_until;
   unsigned long next_neighbors_publish;
   char self_scopes_buf[96];

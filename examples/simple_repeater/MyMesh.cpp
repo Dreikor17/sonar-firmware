@@ -1035,6 +1035,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 #if defined(WITH_MQTT_NEIGHBORS)
   neighbor_discover_count = 0;
   neighbor_discover_active = false;
+  neighbor_table_refresh_active = false;
   neighbor_discover_until = 0;
   next_neighbors_publish = 0;
   self_scopes_buf[0] = 0;
@@ -1530,15 +1531,40 @@ void MyMesh::loop() {
 #endif
 
 #if defined(WITH_MQTT_NEIGHBORS)
+  bool periodic_neighbors_enabled = _cli.getObserverPrefs()->mqtt_neighbors_enabled;
   if (neighbor_discover_active) {
     loopNeighborDiscover();
-  } else if (_cli.getObserverPrefs()->mqtt_neighbors_enabled && bridge && bridge->isRunning()) {
-    if (next_neighbors_publish == 0 ||
-        (next_neighbors_publish != 0 && millisHasNowPassed(next_neighbors_publish))) {
+  } else if (neighbor_table_refresh_active) {
+    if (!periodic_neighbors_enabled) {
+      // Turning periodic publishing off cancels a refresh that has not yet
+      // reached the scope-query/publish phase. Re-enabling starts fresh.
+      neighbor_table_refresh_active = false;
+      pending_discover_tag = 0;
+      next_neighbors_publish = 0;
+    } else if (pending_discover_tag == 0 || millisHasNowPassed(pending_discover_until)) {
+      // The zero-hop discover.neighbors response window is complete. Freeze the
+      // refreshed table into the scope-query overlay, then publish when those
+      // per-neighbor requests finish.
+      pending_discover_tag = 0;
+      neighbor_table_refresh_active = false;
       char tmp_reply[80];
       if (startNeighborDiscover(tmp_reply)) {
-        MESH_DEBUG_PRINTLN("%s", tmp_reply);
+        MESH_DEBUG_PRINTLN("MQTT periodic %s", tmp_reply);
+      } else {
+        // Avoid retrying a failed refresh on every loop iteration.
+        next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
+        MESH_DEBUG_PRINTLN("MQTT periodic neighbor scope discovery failed: %s", tmp_reply);
       }
+    }
+  } else if (periodic_neighbors_enabled && bridge && bridge->isRunning()) {
+    if (next_neighbors_publish == 0 ||
+        (next_neighbors_publish != 0 && millisHasNowPassed(next_neighbors_publish))) {
+      // Refresh the zero-hop neighbor cache first (the same operation as the
+      // discover.neighbors CLI command). Scope queries begin after its 60-second
+      // collection window instead of publishing a stale cached table.
+      sendNodeDiscoverReq();
+      neighbor_table_refresh_active = true;
+      MESH_DEBUG_PRINTLN("MQTT periodic neighbor table refresh started");
     }
   }
 #endif

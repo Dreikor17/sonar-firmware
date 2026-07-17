@@ -1127,6 +1127,8 @@ Requires WiFi connected and the MQTT bridge running.
 
 **Note:** Requires PSRAM. Publishes to `meshcore/{IATA}/{device}/neighbors` (retained, QoS 1). Use `discover.scopes` for a one-shot publish.
 
+Automatic publishes run in two stages: first the repeater performs the same 60-second zero-hop refresh as `discover.neighbors`, then it queries the refreshed neighbors for scopes and publishes after those queries complete.
+
 ---
 
 #### View or change the speed of the bridge (RS-232 only)
