@@ -7,6 +7,7 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <Timezone.h>
+#include <atomic>
 #include "helpers/JWTHelper.h"
 #include "helpers/MQTTPresets.h"
 
@@ -264,7 +265,9 @@ private:
   #if defined(WITH_MQTT_NEIGHBORS)
   char* _neighbors_json_buffer;
   size_t _neighbors_publish_len;
-  bool _neighbors_publish_pending;
+  // Release/acquire handoff from the Arduino loop (Core 1) to the MQTT task
+  // (Core 0). A second snapshot is dropped while the current one is publishing.
+  std::atomic<bool> _neighbors_publish_pending;
   #endif
   #if defined(BOARD_HAS_PSRAM)
   char* _publish_json_buffer;

@@ -1123,7 +1123,7 @@ Requires WiFi connected and the MQTT bridge running.
 - `set mqtt.neighbors.interval <hours>`
 
 **Parameters:**
-- `hours`: Interval between automatic `discover.scopes` runs (minimum **12**, default **24**)
+- `hours`: Interval between automatic `discover.scopes` runs (**12-336**, default **24**)
 
 **Note:** Requires PSRAM. Publishes to `meshcore/{IATA}/{device}/neighbors` (retained, QoS 1). Use `discover.scopes` for a one-shot publish.
 

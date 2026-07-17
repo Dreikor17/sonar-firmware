@@ -161,8 +161,18 @@ struct MQTTPrefs {
   // tail so a shorter /mqtt_prefs payload from earlier firmware still loads with
   // these defaulting off (see applyMQTTDefaults); keeps the format at VERSION 1.
   uint8_t mqtt_neighbors_enabled;    // Periodic neighbors/scopes MQTT publish (PSRAM boards only)
-  uint32_t mqtt_neighbors_interval;  // Neighbors publish interval (ms), default 24h, min 12h
+  uint32_t mqtt_neighbors_interval;  // Neighbors publish interval (ms), default 24h, range 12-336h
 };
+
+// Neighbor discovery is scheduled with the wrap-safe millis() helpers, whose
+// signed-delta comparison requires intervals below INT32_MAX milliseconds.
+// Two weeks stays comfortably inside that range.
+static const uint32_t MQTT_NEIGHBORS_MIN_INTERVAL_HOURS = 12;
+static const uint32_t MQTT_NEIGHBORS_MAX_INTERVAL_HOURS = 336;
+static const uint32_t MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS = 24;
+static const uint32_t MQTT_NEIGHBORS_MIN_INTERVAL_MS = MQTT_NEIGHBORS_MIN_INTERVAL_HOURS * 3600000UL;
+static const uint32_t MQTT_NEIGHBORS_MAX_INTERVAL_MS = MQTT_NEIGHBORS_MAX_INTERVAL_HOURS * 3600000UL;
+static const uint32_t MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS = MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS * 3600000UL;
 
 // /mqtt_prefs is written with an 8-byte header so the format is self-describing.
 // Files with no header are legacy (versionless) and detected by size in loadMQTTPrefs.

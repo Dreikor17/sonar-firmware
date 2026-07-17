@@ -247,22 +247,23 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       strcpy(reply, "Error: interval must be between 1-60 minutes");
     }
 #if defined(BOARD_HAS_PSRAM) && defined(MAX_NEIGHBOURS) && MAX_NEIGHBOURS > 0
-  } else if (memcmp(config, "mqtt.neighbors ", 14) == 0) {
-    _mqtt_prefs.mqtt_neighbors_enabled = memcmp(&config[14], "on", 2) == 0;
+  } else if (memcmp(config, "mqtt.neighbors ", 15) == 0) {
+    _mqtt_prefs.mqtt_neighbors_enabled = memcmp(&config[15], "on", 2) == 0;
     savePrefs();
     strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.neighbors.interval ", 24) == 0) {
     uint32_t hours = _atoi(&config[24]);
-    if (hours >= 12 && hours <= 8760) {
+    if (hours >= MQTT_NEIGHBORS_MIN_INTERVAL_HOURS &&
+        hours <= MQTT_NEIGHBORS_MAX_INTERVAL_HOURS) {
       _mqtt_prefs.mqtt_neighbors_interval = hours * 3600000UL;
       savePrefs();
       sprintf(reply, "OK - neighbors interval set to %u hours (%lu ms)", hours,
               (unsigned long)_mqtt_prefs.mqtt_neighbors_interval);
     } else {
-      strcpy(reply, "Error: neighbors interval must be between 12-8760 hours");
+      strcpy(reply, "Error: neighbors interval must be between 12-336 hours");
     }
 #elif defined(WITH_MQTT_BRIDGE)
-  } else if (memcmp(config, "mqtt.neighbors ", 14) == 0 ||
+  } else if (memcmp(config, "mqtt.neighbors ", 15) == 0 ||
              memcmp(config, "mqtt.neighbors.interval ", 24) == 0) {
     strcpy(reply, "Err - not supported (requires PSRAM)");
 #endif

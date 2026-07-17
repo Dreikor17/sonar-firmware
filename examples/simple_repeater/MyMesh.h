@@ -160,7 +160,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   bool startNeighborDiscover(char* reply);
   void loopNeighborDiscover();
   void finishNeighborDiscover();
-  void handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
+  bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
   void getLocalScopes(char* buf, size_t len);
   static const int NEIGHBOR_DISCOVER_PEER_BASE = 1000;
   static const unsigned long NEIGHBOR_DISCOVER_TIMEOUT_MS = 30000;

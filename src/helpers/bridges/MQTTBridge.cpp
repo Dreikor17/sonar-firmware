@@ -1034,13 +1034,13 @@ void MQTTBridge::mqttTaskLoop() {
     processPacketQueue();
 
 #if defined(WITH_MQTT_NEIGHBORS)
-    if (_neighbors_publish_pending) {
-      _neighbors_publish_pending = false;
+    if (_neighbors_publish_pending.load(std::memory_order_acquire)) {
       if (publishNeighbors()) {
         MQTT_DEBUG_PRINTLN("Neighbors published");
       } else {
         MQTT_DEBUG_PRINTLN("Neighbors publish failed");
       }
+      _neighbors_publish_pending.store(false, std::memory_order_release);
     }
 #endif
 
@@ -2749,13 +2749,14 @@ bool MQTTBridge::publishStatus() {
 #if defined(WITH_MQTT_NEIGHBORS)
 void MQTTBridge::requestPublishNeighbors(const char* json, size_t len) {
   if (!_neighbors_json_buffer || !json || len == 0) return;
+  if (_neighbors_publish_pending.load(std::memory_order_acquire)) return;
   if (len >= NEIGHBORS_JSON_BUFFER_SIZE) {
     len = NEIGHBORS_JSON_BUFFER_SIZE - 1;
   }
   memcpy(_neighbors_json_buffer, json, len);
   _neighbors_json_buffer[len] = '\0';
   _neighbors_publish_len = len;
-  _neighbors_publish_pending = true;
+  _neighbors_publish_pending.store(true, std::memory_order_release);
 }
 
 bool MQTTBridge::publishNeighbors() {

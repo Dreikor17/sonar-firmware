@@ -238,6 +238,8 @@ int MQTTMessageBuilder::buildNeighborsMessage(
   char* buffer,
   size_t buffer_size
 ) {
+  if (!buffer || buffer_size == 0) return 0;
+
   doc.clear();
   JsonObject root = doc.to<JsonObject>();
 
@@ -249,6 +251,8 @@ int MQTTMessageBuilder::buildNeighborsMessage(
   self["scopes"] = self_scopes ? self_scopes : "";
 
   JsonArray arr = root.createNestedArray("neighbors");
+  if (measureJson(root) >= buffer_size) return 0;
+
   for (int i = 0; i < neighbor_count; i++) {
     JsonObject nb = arr.createNestedObject();
     nb["pubkey"] = neighbors[i].pubkey_hex;
@@ -256,6 +260,14 @@ int MQTTMessageBuilder::buildNeighborsMessage(
     nb["heard_secs_ago"] = neighbors[i].heard_secs_ago;
     nb["scopes"] = neighbors[i].scopes ? neighbors[i].scopes : "";
     nb["status"] = neighbors[i].status;
+
+    // Callers order neighbors from most to least useful (newest, then
+    // strongest). Stop as soon as the next entry would fill the fixed publish
+    // buffer, keeping document growth bounded and dropping the remaining tail.
+    if (measureJson(root) >= buffer_size) {
+      arr.remove(arr.size() - 1);
+      break;
+    }
   }
 
   size_t len = serializeJson(root, buffer, buffer_size);

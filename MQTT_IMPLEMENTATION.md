@@ -416,7 +416,7 @@ These settings apply across all MQTT slots:
   - `off` - Disable TX packet uplinking
 - `set mqtt.interval <minutes>` - Set status publish interval (1-60 minutes)
 - `set mqtt.neighbors on|off` - Enable/disable periodic neighbors/scopes publish (PSRAM builds only)
-- `set mqtt.neighbors.interval <hours>` - Set neighbors publish interval (12-8760 hours, default 24)
+- `set mqtt.neighbors.interval <hours>` - Set neighbors publish interval (12-336 hours, default 24)
 - `set mqtt.ntp <hostname>` - Set custom NTP server (validated with immediate sync); `none` reverts to default
 - `set mqtt.owner <64-hex-char-public-key>` - Set owner public key
 - `set mqtt.email <email>` - Set owner email address

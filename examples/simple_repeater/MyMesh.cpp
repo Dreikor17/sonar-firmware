@@ -670,13 +670,17 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
   if (neighbor_discover_active) {
     for (int i = 0; i < neighbor_discover_count && n < MAX_CLIENTS; i++) {
       auto& nb = neighbours[neighbor_discover[i].neighbour_idx];
+      // ACL clients already have a matching peer entry and shared secret. Adding
+      // a second overlay entry would decrypt first and intercept their normal
+      // CLI/request traffic for the duration of discovery.
+      if (acl.getClient(nb.id.pub_key, PUB_KEY_SIZE) != nullptr) continue;
       if (nb.heard_timestamp > 0 && nb.id.isHashMatch(hash)) {
         matching_peer_indexes[n++] = NEIGHBOR_DISCOVER_PEER_BASE + i;
       }
     }
   }
 #endif
-  for (int i = 0; i < acl.getNumClients(); i++) {
+  for (int i = 0; i < acl.getNumClients() && n < MAX_CLIENTS; i++) {
     if (acl.getClientByIdx(i)->id.isHashMatch(hash)) {
       matching_peer_indexes[n++] = i; // store the INDEXES of matching contacts (for subsequent 'peer' methods)
     }
@@ -740,6 +744,20 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     return;
   }
   ClientInfo* client = acl.getClientByIdx(i);
+
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Neighbors that are already ACL clients are intentionally not added to the
+  // temporary peer overlay above. Consume only a matching discovery response
+  // here, then leave every other payload on the normal ACL path.
+  if (neighbor_discover_active && type == PAYLOAD_TYPE_RESPONSE) {
+    for (int oi = 0; oi < neighbor_discover_count; oi++) {
+      auto& nb = neighbours[neighbor_discover[oi].neighbour_idx];
+      if (client->id.matches(nb.id) && handleNeighborDiscoverResponse(oi, data, len)) {
+        return;
+      }
+    }
+  }
+#endif
 
   if (type == PAYLOAD_TYPE_REQ) { // request (from a Known admin client!)
     uint32_t timestamp;
@@ -1574,14 +1592,14 @@ bool MyMesh::sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag) {
   return true;
 }
 
-void MyMesh::handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len) {
-  if (overlay_idx < 0 || overlay_idx >= neighbor_discover_count) return;
+bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len) {
+  if (overlay_idx < 0 || overlay_idx >= neighbor_discover_count) return false;
   NeighborDiscoverEntry& entry = neighbor_discover[overlay_idx];
-  if (entry.status != ND_PENDING || len < 8) return;
+  if (entry.status != ND_PENDING || len < 8) return false;
 
   uint32_t tag;
   memcpy(&tag, data, 4);
-  if (tag != entry.tag) return;
+  if (tag != entry.tag) return false;
 
   size_t scope_len = len - 8;
   if (scope_len >= sizeof(entry.scopes)) {
@@ -1590,6 +1608,19 @@ void MyMesh::handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data
   memcpy(entry.scopes, &data[8], scope_len);
   entry.scopes[scope_len] = 0;
   entry.status = ND_RESPONDED;
+  return true;
+}
+
+static bool neighborPublishEntryComesBefore(
+    const MQTTMessageBuilder::NeighborsMessageEntry& lhs,
+    const MQTTMessageBuilder::NeighborsMessageEntry& rhs) {
+  if (lhs.heard_secs_ago != rhs.heard_secs_ago) {
+    return lhs.heard_secs_ago < rhs.heard_secs_ago;  // newer first
+  }
+  if (lhs.snr != rhs.snr) {
+    return lhs.snr > rhs.snr;  // stronger first when equally recent
+  }
+  return strcmp(lhs.pubkey_hex, rhs.pubkey_hex) < 0;
 }
 
 void MyMesh::finishNeighborDiscover() {
@@ -1621,6 +1652,19 @@ void MyMesh::finishNeighborDiscover() {
       case ND_SEND_FAILED: entries[i].status = "send_failed"; break;
       default: entries[i].status = "timeout"; break;
     }
+  }
+
+  // The JSON builder drops entries from the tail when the fixed MQTT buffer is
+  // full, so order the useful/recent neighbors first. Insertion sort is small,
+  // allocation-free, and sufficient for MAX_NEIGHBOURS (currently at most 50).
+  for (int i = 1; i < neighbor_discover_count; i++) {
+    MQTTMessageBuilder::NeighborsMessageEntry entry = entries[i];
+    int j = i;
+    while (j > 0 && neighborPublishEntryComesBefore(entry, entries[j - 1])) {
+      entries[j] = entries[j - 1];
+      j--;
+    }
+    entries[j] = entry;
   }
 
 #if defined(ESP_PLATFORM)
