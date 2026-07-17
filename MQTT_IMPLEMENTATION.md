@@ -296,7 +296,7 @@ set mqtt3.preset meshrank
 set mqtt3.token FE1B34242C5938C39225310081FD6718
 ```
 
-The token is generated on the MeshRank website and is tied to your account. MeshRank receives the same message types as any other preset (`status`, `packets`, `raw`, `neighbors`), each under `meshrank/uplink/{token}/{device_id}/`, subject to the usual `mqtt.status`/`mqtt.raw`/`mqtt.neighbors` toggles.
+The token is generated on the MeshRank website and is tied to your account. MeshRank receives the same message types as any other preset (`status`, `packets`, `raw`, `neighbors`), each under `meshrank/uplink/{token}/{device_id}/`, subject to the usual `mqtt.status`/`mqtt.raw`/`mqtt.neighbors` toggles. Its broker does not accept the retain flag, so those publishes go out unretained.
 
 #### Example: Configure MeshMapper on Slot 3
 ```bash
@@ -500,7 +500,7 @@ The CLI commands are organized into two levels:
 The bridge publishes to four main topics with the following structure:
 
 ### Status Topic: `meshcore/{IATA}/{DEVICE_PUBLIC_KEY}/status`
-Device connection status and metadata (retained messages).
+Device connection status and metadata, QoS 1. Retained, except on presets whose broker rejects the retain flag (`meshrank`, `waev`).
 
 ### Packets Topic: `meshcore/{IATA}/{DEVICE_PUBLIC_KEY}/packets`
 Full packet data with RF characteristics and metadata.

@@ -2080,7 +2080,11 @@ void MQTTBridge::publishStatusToSlot(int index) {
   );
 
   if (len > 0) {
-    int result = slot.client->publish(status_topic, 1, true, json_buffer, strlen(json_buffer));
+    // Honor the preset's retain policy, as the packets/neighbors paths do —
+    // brokers that set allow_retain=false (meshrank, waev) reject retained
+    // publishes. Custom slots keep the long-standing retained status behavior.
+    bool use_retain = slot.preset ? slot.preset->allow_retain : true;
+    int result = slot.client->publish(status_topic, 1, use_retain, json_buffer, strlen(json_buffer));
     if (result <= 0) {
       MQTT_DEBUG_PRINTLN("MQTT%d status publish failed", index + 1);
     }
