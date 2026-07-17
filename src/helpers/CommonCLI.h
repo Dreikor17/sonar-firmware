@@ -343,6 +343,18 @@ public:
     return false;
   };
 
+  // Browser-based config portal (ESP32 WITH_MQTT_BRIDGE builds override).
+  // force_ap=true requests the SoftAP setup portal even when WiFi is configured.
+  // Returns true if handled (reply filled either way when true).
+  virtual bool startWebConfig(bool force_ap, char* reply) {
+    (void)force_ap; (void)reply;
+    return false;
+  };
+  virtual bool stopWebConfig(char* reply) {
+    (void)reply;
+    return false;
+  };
+
   // Probe all configured NTP servers for connectivity (verbose=serial console gets a
   // detailed table; otherwise reply gets a compact "<server> ok|fail" list).
   virtual bool runMqttNtpDiag(char* reply, size_t reply_size, bool verbose) {

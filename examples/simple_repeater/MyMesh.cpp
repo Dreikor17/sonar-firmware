@@ -1068,6 +1068,16 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _alerter.setBridge(bridge);
 #endif
 
+#if defined(WITH_WEBCONFIG) && !defined(WEBCONFIG_NO_AUTO_AP)
+  // First-boot setup portal: raised only when no WiFi has ever been configured,
+  // so an OTA onto a deployed (configured) node can never open an AP.
+  if (_cli.getObserverPrefs()->wifi_ssid[0] == 0) {
+    char wc_reply[160];
+    startWebConfig(false, wc_reply);
+    Serial.println(wc_reply);
+  }
+#endif
+
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
 
@@ -1304,6 +1314,106 @@ void MyMesh::clearStats() {
   ((SimpleMeshTables *)getTables())->resetStats();
 }
 
+#ifdef WITH_WEBCONFIG
+bool MyMesh::startWebConfig(bool force_ap, char* reply) {
+  if (_webconfig && (_webconfig->isRunning() || _webconfig->isStopping())) {
+    strcpy(reply, _webconfig->isStopping() ? "Err: webconfig still stopping, retry shortly"
+                                           : "Err: webconfig already running");
+    return true;
+  }
+  if (!_webconfig) {
+    _webconfig = new WebConfigServer(&_prefs, _cli.getObserverPrefs(), this,
+                                     self_id.pub_key, getFirmwareVer(), getRole(),
+                                     _cli.getBoard()->getManufacturerName());
+  }
+  if (force_ap) {
+    // The setup AP owns WiFi outright; refuse while the bridge holds the STA.
+    if (bridge && bridge->isRunning()) {
+      strcpy(reply, "Err: MQTT bridge is running - 'set bridge off' first");
+      return true;
+    }
+    _webconfig->startSetupMode(reply);
+  } else if (_cli.getObserverPrefs()->wifi_ssid[0] == 0) {
+    _webconfig->startSetupMode(reply);   // unconfigured: same portal as first boot
+  } else {
+    _webconfig->startLanMode(reply);     // reports "WiFi not connected" if down
+  }
+  return true;
+}
+
+bool MyMesh::stopWebConfig(char* reply) {
+  if (!_webconfig || !_webconfig->isRunning()) {
+    strcpy(reply, "Err: webconfig not running");
+    return true;
+  }
+  _webconfig->requestStop();
+  strcpy(reply, "OK - webconfig stopping");
+  return true;
+}
+
+void MyMesh::onConfigBatchEnd() {
+  _wc_batch_active = false;
+  if (_wc_restart_pending) {
+    // A full restart re-applies every slot config; drop the per-slot requests.
+    _wc_restart_pending = false;
+    _wc_slot_restart_mask = 0;
+    restartBridge();
+  } else if (_wc_slot_restart_mask) {
+    uint8_t mask = _wc_slot_restart_mask;
+    _wc_slot_restart_mask = 0;
+    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      if (mask & (1u << i)) restartBridgeSlot(i);
+    }
+  }
+}
+
+// Stats snapshot for GET /api/stats. Runs on the loop task (from tick());
+// same sources as the REQ_TYPE_GET_STATUS reply and `get mqtt.stats`.
+void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
+  char ip[20] = "";
+  int wifi_rssi = 0;
+  if (WiFi.status() == WL_CONNECTED) {
+    strncpy(ip, WiFi.localIP().toString().c_str(), sizeof(ip) - 1);
+    wifi_rssi = WiFi.RSSI();
+  } else if (_webconfig && _webconfig->mode() == WebConfigServer::MODE_SETUP) {
+    strncpy(ip, WiFi.softAPIP().toString().c_str(), sizeof(ip) - 1);
+  }
+  int pos = snprintf(buf, buf_size,
+      "{\"uptime_s\":%lu,\"batt_mv\":%u,"
+      "\"heap_free\":%lu,\"heap_min\":%lu,\"heap_max_alloc\":%lu,"
+      "\"noise\":%d,\"rssi\":%d,\"snr\":%.1f,"
+      "\"airtime_s\":%lu,\"rx_airtime_s\":%lu,"
+      "\"recv\":%lu,\"sent\":%lu,\"rx_err\":%lu,"
+      "\"sent_flood\":%lu,\"sent_direct\":%lu,\"recv_flood\":%lu,\"recv_direct\":%lu,"
+      "\"tx_queue\":%d,\"wifi_rssi\":%d,\"ip\":\"%s\",\"mqtt_queue\":%d,\"slots\":[",
+      (unsigned long)(uptime_millis / 1000), (unsigned)board.getBattMilliVolts(),
+      (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
+      (unsigned long)ESP.getMaxAllocHeap(),
+      (int)_radio->getNoiseFloor(), (int)radio_driver.getLastRSSI(),
+      radio_driver.getLastSNR(),
+      (unsigned long)(getTotalAirTime() / 1000), (unsigned long)(getReceiveAirTime() / 1000),
+      (unsigned long)radio_driver.getPacketsRecv(), (unsigned long)radio_driver.getPacketsSent(),
+      (unsigned long)radio_driver.getPacketsRecvErrors(),
+      (unsigned long)getNumSentFlood(), (unsigned long)getNumSentDirect(),
+      (unsigned long)getNumRecvFlood(), (unsigned long)getNumRecvDirect(),
+      (int)_mgr->getOutboundCount(0xFFFFFFFF), wifi_rssi, ip,
+      bridge ? bridge->getQueueSize() : 0);
+  if (pos < 0 || pos >= (int)buf_size - 3) return;  // truncated; snprintf terminated it
+  bool first = true;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    MQTTBridge::SlotStatusSnapshot s;
+    if (!MQTTBridge::getSlotStatusSnapshot(i, &s)) continue;
+    int n = snprintf(buf + pos, buf_size - pos,
+                     "%s{\"n\":%d,\"name\":\"%s\",\"state\":\"%s\",\"ok\":%lu,\"err\":%lu}",
+                     first ? "" : ",", i + 1, s.name, s.state, s.publish_ok, s.publish_err);
+    if (n < 0 || n >= (int)(buf_size - pos)) break;
+    pos += n;
+    first = false;
+  }
+  snprintf(buf + pos, buf_size - pos, "]}");
+}
+#endif
+
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply) {
   if (region_load_active) {
     if (StrHelper::isBlank(command)) {  // empty/blank line, signal to terminate 'load' operation
@@ -1443,6 +1553,16 @@ void MyMesh::loop() {
     if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
       Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
       setBridgeState(true);
+    }
+  }
+#endif
+
+#ifdef WITH_WEBCONFIG
+  if (_webconfig) {
+    _webconfig->tick(millis());
+    if (!_webconfig->isRunning() && !_webconfig->isStopping()) {
+      delete _webconfig;   // teardown finished (or start failed): reclaim the heap
+      _webconfig = NULL;
     }
   }
 #endif

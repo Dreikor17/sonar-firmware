@@ -28,6 +28,7 @@
 #ifdef WITH_MQTT_BRIDGE
 #include "helpers/bridges/MQTTBridge.h"
 #define WITH_BRIDGE
+#include "helpers/esp32/WebConfigServer.h"   // defines WITH_WEBCONFIG on ESP32
 #endif
 
 /* ------------------------------ Config -------------------------------- */
@@ -94,7 +95,11 @@ struct PostInfo {
   char text[MAX_POST_TEXT_LEN+1];
 };
 
-class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
+class MyMesh : public mesh::Mesh, public CommonCLICallbacks
+#ifdef WITH_WEBCONFIG
+    , public WebConfigServer::Callbacks
+#endif
+{
   FILESYSTEM* _fs;
   uint32_t last_millis;
   uint64_t uptime_millis;
@@ -128,6 +133,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #endif
 #ifdef WITH_MQTT_BRIDGE
   AlertReporter _alerter;
+#endif
+#ifdef WITH_WEBCONFIG
+  WebConfigServer* _webconfig = NULL;  // heap-allocated while running, freed on stop
+  bool _wc_batch_active = false;       // coalesce bridge restarts during a config batch
+  bool _wc_restart_pending = false;
+  uint8_t _wc_slot_restart_mask = 0;
 #endif
 
   void addPost(ClientInfo* client, const char* postData);
@@ -282,6 +293,12 @@ public:
 
   void restartBridge() override {
     if (!bridge || !bridge->isRunning()) return;
+#ifdef WITH_WEBCONFIG
+    if (_wc_batch_active) {   // coalesced: applied once in onConfigBatchEnd()
+      _wc_restart_pending = true;
+      return;
+    }
+#endif
     bridge->end();
     char device_id[65];
     mesh::LocalIdentity self_id = getSelfId();
@@ -299,6 +316,12 @@ public:
   void restartBridgeSlot(int slot) override {
 #ifdef WITH_MQTT_BRIDGE
     if (!bridge || !bridge->isRunning()) return;
+#ifdef WITH_WEBCONFIG
+    if (_wc_batch_active && slot >= 0 && slot < 8) {
+      _wc_slot_restart_mask |= (uint8_t)(1u << slot);
+      return;
+    }
+#endif
     bridge->setSlotPreset(slot, _cli.getObserverPrefs()->mqtt_slot_preset[slot]);
 #else
     (void)slot;
@@ -323,5 +346,26 @@ public:
     if (!bridge || !bridge->isRunning()) return false;
     return bridge->ntpDiag(reply, reply_size, verbose);
   }
+#endif
+
+#ifdef WITH_WEBCONFIG
+  // CommonCLICallbacks: `start webconfig [ap]` / `stop webconfig`
+  bool startWebConfig(bool force_ap, char* reply) override;
+  bool stopWebConfig(char* reply) override;
+
+  // WebConfigServer::Callbacks - all invoked from tick() on the loop task
+  void execCommand(char* cmd, char* reply) override {
+    handleCommand(0, cmd, reply);
+  }
+  void rebootNow() override {
+    _cli.getBoard()->reboot();
+  }
+  void onConfigBatchStart() override {
+    _wc_batch_active = true;
+    _wc_restart_pending = false;
+    _wc_slot_restart_mask = 0;
+  }
+  void onConfigBatchEnd() override;
+  void buildStatsJson(char* buf, size_t buf_size) override;
 #endif
 };

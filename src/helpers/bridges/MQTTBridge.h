@@ -471,6 +471,17 @@ public:
   /** On-demand publish-health + heap snapshot for `get mqtt.stats` (per-slot ok/err,
    *  outbox size, free/max heap, queue depth). */
   static void formatMqttStatsReply(char* buf, size_t bufsize);
+  /** Structured per-slot snapshot for the webconfig stats endpoint. Same state
+   *  logic as formatMqttStatusReply, same cross-task read semantics. Returns
+   *  false when the bridge is not running, the index is out of range, or the
+   *  slot is unconfigured (skip it). */
+  struct SlotStatusSnapshot {
+    const char* name;    // preset name or "custom"
+    const char* state;   // "inactive" | "wait" | "ok" | "fail" | "disc"
+    unsigned long publish_ok;
+    unsigned long publish_err;
+  };
+  static bool getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out);
   /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */
   static bool isConfigValid(const MQTTPrefs* obs);
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);

@@ -289,6 +289,37 @@ void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
   }
 }
 
+// Structured per-slot status for the webconfig stats endpoint. Same state
+// derivation as formatMqttStatusReply above. Returns false for out-of-range,
+// unconfigured, or bridge-not-running slots.
+bool MQTTBridge::getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out) {
+  if (out == nullptr || slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return false;
+  if (s_mqtt_bridge_instance == nullptr || !s_mqtt_bridge_instance->_initialized) return false;
+  MQTTBridge* b = s_mqtt_bridge_instance;
+  const MQTTSlot& slot = b->_slots[slot_index];
+
+  if (!slot.enabled && slot.preset) {
+    out->name = slot.preset->name;
+    out->state = "inactive";
+  } else if (!slot.enabled) {
+    return false;  // unconfigured slot
+  } else {
+    out->name = slot.preset ? slot.preset->name : "custom";
+    if (!b->isSlotReady(slot_index)) {
+      out->state = "wait";
+    } else if (slot.connected) {
+      out->state = "ok";
+    } else if (slot.circuit_breaker_tripped) {
+      out->state = "fail";
+    } else {
+      out->state = "disc";
+    }
+  }
+  out->publish_ok = slot.client ? slot.client->getPublishOk() : 0;
+  out->publish_err = slot.client ? slot.client->getPublishErr() : 0;
+  return true;
+}
+
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
 unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
 

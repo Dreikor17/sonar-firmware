@@ -979,6 +979,21 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
     strcpy(reply, "ERR: online OTA not supported on this build");
 #endif
     return true;
+  } else if (memcmp(command, "start webconfig", 15) == 0 && (command[15] == 0 || command[15] == ' ')) {
+    // Web config portal: `start webconfig` binds to the LAN IP (or raises the
+    // setup AP when WiFi is unconfigured); `start webconfig ap` forces the AP.
+    bool force_ap = (command[15] == ' ' && strcmp(&command[16], "ap") == 0);
+    if (command[15] == ' ' && !force_ap) {
+      strcpy(reply, "ERR: usage start webconfig [ap]");
+    } else if (!_callbacks->startWebConfig(force_ap, reply)) {
+      strcpy(reply, "ERR: webconfig not supported on this build");
+    }
+    return true;
+  } else if (strcmp(command, "stop webconfig") == 0) {
+    if (!_callbacks->stopWebConfig(reply)) {
+      strcpy(reply, "ERR: webconfig not supported on this build");
+    }
+    return true;
   } else if (memcmp(command, "alert test", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
     // Send a one-off test alert on the configured alert channel.
     const char* extra = command[10] == ' ' ? &command[11] : "";

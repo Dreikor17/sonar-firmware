@@ -18,6 +18,7 @@ compile_commands.json
 venv/
 # Script-generated cert bundles (see scripts/generate_cert_bundle.py)
 src/certs/x509_crt_bundle.bin
+src/helpers/esp32/WebConfigHtml.h
 ssl_certs/cacert.pem
 platformio.local.ini
 .cursor/*
