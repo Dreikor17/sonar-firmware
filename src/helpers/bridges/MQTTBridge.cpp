@@ -201,6 +201,19 @@ unsigned long MQTTBridge::getWifiConnectedAtMillis() {
   return s_wifi_connected_at;
 }
 
+#if defined(WITH_MQTT_NEIGHBORS)
+// Compact "3h12m" / "12m" / "45s" for CLI replies that share a 160-byte buffer.
+static void formatDuration(char* buf, size_t bufsize, uint32_t secs) {
+  if (secs >= 3600) {
+    snprintf(buf, bufsize, "%uh%um", (unsigned)(secs / 3600), (unsigned)((secs % 3600) / 60));
+  } else if (secs >= 60) {
+    snprintf(buf, bufsize, "%um", (unsigned)(secs / 60));
+  } else {
+    snprintf(buf, bufsize, "%us", (unsigned)secs);
+  }
+}
+#endif
+
 void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPrefs* obs) {
   if (buf == nullptr || bufsize == 0) return;
   const char* msgs = (obs && obs->mqtt_status_enabled) ? "on" : "off";
@@ -246,8 +259,40 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
       state = "disc";
     }
     pos += snprintf(buf + pos, bufsize - pos, ", %d: %s (%s)", i + 1, name, state);
+    // snprintf returns the untruncated length, so clamp before reusing pos as an
+    // offset: an overflowing pos would walk past buf and underflow bufsize - pos.
+    if (pos >= (int)bufsize) { pos = (int)bufsize - 1; break; }
   }
-  snprintf(buf + pos, bufsize - pos, ", q:%d", q);
+  if (pos < (int)bufsize - 1) {
+    pos += snprintf(buf + pos, bufsize - pos, ", q:%d", q);
+    if (pos >= (int)bufsize) pos = (int)bufsize - 1;
+  }
+
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Periodic neighbors: time to next publish + how the last one went.
+  if (obs && obs->mqtt_neighbors_enabled && pos < (int)bufsize - 1) {
+    char when[16];
+    switch (b->_neighbors_phase.load(std::memory_order_relaxed)) {
+      case NBR_ACTIVE:
+        strcpy(when, "active");
+        break;
+      case NBR_DUE:
+        strcpy(when, "due");
+        break;
+      default:
+        formatDuration(when, sizeof(when),
+                       b->_neighbors_secs_until_next.load(std::memory_order_relaxed));
+        break;
+    }
+    const char* last;
+    switch (b->_neighbors_last_result.load(std::memory_order_relaxed)) {
+      case NBR_RESULT_OK:   last = "ok"; break;
+      case NBR_RESULT_FAIL: last = "failed"; break;
+      default:              last = "none"; break;
+    }
+    snprintf(buf + pos, bufsize - pos, ", nbr: %s/%s", when, last);
+  }
+#endif
 }
 
 // On-demand publish-health + heap snapshot for the `get mqtt.stats` CLI command.
@@ -533,6 +578,9 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   _neighbors_json_buffer = (char*)psram_malloc(NEIGHBORS_JSON_BUFFER_SIZE);
   _neighbors_publish_pending = false;
   _neighbors_publish_len = 0;
+  _neighbors_last_result = NBR_RESULT_NONE;
+  _neighbors_phase = NBR_SCHEDULED;
+  _neighbors_secs_until_next = 0;
   #endif
   #else
   memset(_last_raw_data, 0, sizeof(_last_raw_data));
@@ -1059,7 +1107,10 @@ void MQTTBridge::mqttTaskLoop() {
 
 #if defined(WITH_MQTT_NEIGHBORS)
     if (_neighbors_publish_pending.load(std::memory_order_acquire)) {
-      if (publishNeighbors()) {
+      bool ok = publishNeighbors();
+      _neighbors_last_result.store(ok ? NBR_RESULT_OK : NBR_RESULT_FAIL,
+                                   std::memory_order_relaxed);
+      if (ok) {
         MQTT_DEBUG_PRINTLN("Neighbors published");
       } else {
         MQTT_DEBUG_PRINTLN("Neighbors publish failed");
@@ -1864,11 +1915,17 @@ bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, bool 
 // Topic building - resolves the correct topic for a given slot and message type.
 // Presets use hardcoded topic logic; custom slots support user-defined templates.
 // ---------------------------------------------------------------------------
+const char* MQTTBridge::messageTypeSuffix(MQTTMessageType type) {
+  switch (type) {
+    case MSG_STATUS:  return "status";
+    case MSG_PACKETS: return "packets";
+    case MSG_RAW:     return "raw";
+    default:          return "neighbors";
+  }
+}
+
 bool MQTTBridge::substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size) {
-  const char* type_str = (type == MSG_STATUS) ? "status"
-    : (type == MSG_PACKETS) ? "packets"
-    : (type == MSG_RAW) ? "raw"
-    : "neighbors";
+  const char* type_str = messageTypeSuffix(type);
   const char* token = _obs->mqtt_slot_token[slot_index];
 
   size_t out = 0;
@@ -1917,20 +1974,18 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
   // Preset slots: use hardcoded topic logic
   if (slot.preset) {
     if (slot.preset->topic_style == MQTT_TOPIC_MESHRANK) {
-      // MeshRank: packets only, uses per-slot token in topic path
-      if (type != MSG_PACKETS) return false;
+      // MeshRank uses a per-slot token in its topic path. Publish every message
+      // type using the same suffixes as the standard MeshCore topic layout.
       const char* token = _obs->mqtt_slot_token[index];
       if (!token || token[0] == '\0') return false;
-      snprintf(topic_buf, buf_size, "meshrank/uplink/%s/%s/packets", token, _device_id);
+      snprintf(topic_buf, buf_size, "meshrank/uplink/%s/%s/%s", token, _device_id,
+               messageTypeSuffix(type));
       return true;
     }
     // MQTT_TOPIC_MESHCORE (default for all other presets)
     if (!isIATAValid()) return false;
-    const char* type_str = (type == MSG_STATUS) ? "status"
-      : (type == MSG_PACKETS) ? "packets"
-      : (type == MSG_RAW) ? "raw"
-      : "neighbors";
-    snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id, type_str);
+    snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id,
+             messageTypeSuffix(type));
     return true;
   }
 
@@ -1940,11 +1995,8 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
   }
   // Default: meshcore format
   if (!isIATAValid()) return false;
-  const char* type_str = (type == MSG_STATUS) ? "status"
-    : (type == MSG_PACKETS) ? "packets"
-    : (type == MSG_RAW) ? "raw"
-    : "neighbors";
-  snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id, type_str);
+  snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id,
+           messageTypeSuffix(type));
   return true;
 }
 
@@ -1958,7 +2010,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
   // Build per-slot topic (handles IATA check for meshcore, token check for meshrank)
   char status_topic[128];
   if (!buildTopicForSlot(index, MSG_STATUS, status_topic, sizeof(status_topic))) {
-    return;  // Slot doesn't support status (e.g., meshrank) or missing required config
+    return;  // Slot is missing required topic configuration
   }
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
@@ -2755,8 +2807,8 @@ bool MQTTBridge::publishStatus() {
         }
       }
     }
-    // If no connected slot accepts status topics (e.g. meshrank is packets-only),
-    // treat as success to avoid infinite retry loops
+    // If no connected slot accepts status topics, treat as success to avoid
+    // infinite retry loops.
     if (published || !any_slot_wants_status) {
       if (published) MQTT_DEBUG_PRINTLN("Status published");
       return true;
@@ -2767,6 +2819,11 @@ bool MQTTBridge::publishStatus() {
 }
 
 #if defined(WITH_MQTT_NEIGHBORS)
+void MQTTBridge::setNeighborsSchedule(NeighborsPhase phase, uint32_t secs_until_next) {
+  _neighbors_phase.store((uint8_t)phase, std::memory_order_relaxed);
+  _neighbors_secs_until_next.store(secs_until_next, std::memory_order_relaxed);
+}
+
 void MQTTBridge::requestPublishNeighbors(const char* json, size_t len) {
   if (!_neighbors_json_buffer || !json || len == 0) return;
   if (_neighbors_publish_pending.load(std::memory_order_acquire)) return;

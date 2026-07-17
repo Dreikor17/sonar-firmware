@@ -1036,6 +1036,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   neighbor_discover_count = 0;
   neighbor_discover_active = false;
   neighbor_table_refresh_active = false;
+  neighbor_table_refresh_periodic = false;
   neighbor_discover_until = 0;
   next_neighbors_publish = 0;
   self_scopes_buf[0] = 0;
@@ -1451,6 +1452,25 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
     while (*sub == ' ') sub++;
     if (*sub != 0) {
       strcpy(reply, "Err - discover.scopes has no options");
+    } else if (pending_discover_tag != 0 &&
+               !millisHasNowPassed(pending_discover_until) &&
+               !neighbor_discover_active) {
+      // Reuse an in-flight zero-hop discovery rather than querying the old
+      // neighbor table. An explicit command takes ownership of a periodic
+      // refresh so `mqtt.neighbors off` cannot cancel this one-shot request.
+      // Validate up front so queuing cannot report OK for a request that is
+      // certain to fail once the discovery window closes.
+      if (!neighborDiscoverReady(reply)) {
+        // reply already set
+      } else {
+        neighbor_table_refresh_active = true;
+        neighbor_table_refresh_periodic = false;
+        long remaining_ms = (long)(pending_discover_until - futureMillis(0));
+        unsigned remaining_secs = remaining_ms > 0
+          ? (unsigned)(((unsigned long)remaining_ms + 999UL) / 1000UL) : 0;
+        sprintf(reply, "OK - scopes queued (%us discovery remaining)", remaining_secs);
+        MESH_DEBUG_PRINTLN("Neighbor scopes queued behind active discovery (%us remaining)", remaining_secs);
+      }
     } else if (!startNeighborDiscover(reply)) {
       // reply already set
     }
@@ -1535,25 +1555,33 @@ void MyMesh::loop() {
   if (neighbor_discover_active) {
     loopNeighborDiscover();
   } else if (neighbor_table_refresh_active) {
-    if (!periodic_neighbors_enabled) {
+    if (neighbor_table_refresh_periodic && !periodic_neighbors_enabled) {
       // Turning periodic publishing off cancels a refresh that has not yet
       // reached the scope-query/publish phase. Re-enabling starts fresh.
+      // pending_discover_tag is left alone: this refresh may have joined a
+      // discover.neighbors the user started, and clearing the tag would drop
+      // its remaining responses. An unused tag expires on its own.
       neighbor_table_refresh_active = false;
-      pending_discover_tag = 0;
+      neighbor_table_refresh_periodic = false;
       next_neighbors_publish = 0;
     } else if (pending_discover_tag == 0 || millisHasNowPassed(pending_discover_until)) {
       // The zero-hop discover.neighbors response window is complete. Freeze the
       // refreshed table into the scope-query overlay, then publish when those
       // per-neighbor requests finish.
+      bool was_periodic = neighbor_table_refresh_periodic;
       pending_discover_tag = 0;
       neighbor_table_refresh_active = false;
+      neighbor_table_refresh_periodic = false;
       char tmp_reply[80];
+      const char* origin_str = was_periodic ? "periodic" : "manual";
       if (startNeighborDiscover(tmp_reply)) {
-        MESH_DEBUG_PRINTLN("MQTT periodic %s", tmp_reply);
+        MESH_DEBUG_PRINTLN("MQTT %s %s", origin_str, tmp_reply);
       } else {
-        // Avoid retrying a failed refresh on every loop iteration.
-        next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
-        MESH_DEBUG_PRINTLN("MQTT periodic neighbor scope discovery failed: %s", tmp_reply);
+        if (periodic_neighbors_enabled) {
+          // Avoid retrying a failed refresh on every loop iteration.
+          next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
+        }
+        MESH_DEBUG_PRINTLN("MQTT %s neighbor scope discovery failed: %s", origin_str, tmp_reply);
       }
     }
   } else if (periodic_neighbors_enabled && bridge && bridge->isRunning()) {
@@ -1562,9 +1590,29 @@ void MyMesh::loop() {
       // Refresh the zero-hop neighbor cache first (the same operation as the
       // discover.neighbors CLI command). Scope queries begin after its 60-second
       // collection window instead of publishing a stale cached table.
-      sendNodeDiscoverReq();
+      if (pending_discover_tag == 0 || millisHasNowPassed(pending_discover_until)) {
+        pending_discover_tag = 0;
+        sendNodeDiscoverReq();
+        MESH_DEBUG_PRINTLN("MQTT periodic neighbor table refresh started");
+      } else {
+        MESH_DEBUG_PRINTLN("MQTT periodic refresh joined active neighbor discovery");
+      }
       neighbor_table_refresh_active = true;
-      MESH_DEBUG_PRINTLN("MQTT periodic neighbor table refresh started");
+      neighbor_table_refresh_periodic = true;
+    }
+  }
+
+  // Report the periodic-neighbors schedule for `get mqtt.status`. The timer lives
+  // here, so the wrap-safe millis math stays on this side of the handoff.
+  if (bridge) {
+    if (neighbor_discover_active || neighbor_table_refresh_active) {
+      bridge->setNeighborsSchedule(MQTTBridge::NBR_ACTIVE, 0);
+    } else if (next_neighbors_publish == 0 || millisHasNowPassed(next_neighbors_publish)) {
+      bridge->setNeighborsSchedule(MQTTBridge::NBR_DUE, 0);
+    } else {
+      long remaining_ms = (long)(next_neighbors_publish - futureMillis(0));
+      uint32_t remaining_secs = remaining_ms > 0 ? (uint32_t)(remaining_ms / 1000) : 0;
+      bridge->setNeighborsSchedule(MQTTBridge::NBR_SCHEDULED, remaining_secs);
     }
   }
 #endif
@@ -1755,11 +1803,7 @@ void MyMesh::loopNeighborDiscover() {
   finishNeighborDiscover();
 }
 
-bool MyMesh::startNeighborDiscover(char* reply) {
-  if (neighbor_discover_active) {
-    strcpy(reply, "Err - neighbor discover already active");
-    return false;
-  }
+bool MyMesh::neighborDiscoverReady(char* reply) {
 #if defined(ESP_PLATFORM)
   if (!psramFound()) {
     strcpy(reply, "Err - PSRAM not available");
@@ -1769,6 +1813,17 @@ bool MyMesh::startNeighborDiscover(char* reply) {
   if (!bridge || !bridge->isRunning()) {
     strcpy(reply, "Err - MQTT bridge not running");
     return false;
+  }
+  return true;
+}
+
+bool MyMesh::startNeighborDiscover(char* reply) {
+  if (neighbor_discover_active) {
+    strcpy(reply, "Err - neighbor discover already active");
+    return false;
+  }
+  if (!neighborDiscoverReady(reply)) {
+    return false;  // reply already set
   }
 
   getLocalScopes(self_scopes_buf, sizeof(self_scopes_buf));

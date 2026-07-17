@@ -153,11 +153,13 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t neighbor_discover_count;
   bool neighbor_discover_active;
   bool neighbor_table_refresh_active;
+  bool neighbor_table_refresh_periodic;
   unsigned long neighbor_discover_until;
   unsigned long next_neighbors_publish;
   char self_scopes_buf[96];
 
   bool sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag);
+  bool neighborDiscoverReady(char* reply);
   bool startNeighborDiscover(char* reply);
   void loopNeighborDiscover();
   void finishNeighborDiscover();

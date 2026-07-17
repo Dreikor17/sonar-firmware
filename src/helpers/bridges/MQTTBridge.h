@@ -268,6 +268,12 @@ private:
   // Release/acquire handoff from the Arduino loop (Core 1) to the MQTT task
   // (Core 0). A second snapshot is dropped while the current one is publishing.
   std::atomic<bool> _neighbors_publish_pending;
+  // Written by the MQTT task (Core 0), read by the CLI (Core 1).
+  enum NeighborsResult : uint8_t { NBR_RESULT_NONE, NBR_RESULT_OK, NBR_RESULT_FAIL };
+  std::atomic<uint8_t> _neighbors_last_result;
+  // Written by the mesh loop (Core 1), read by the CLI (Core 1).
+  std::atomic<uint8_t> _neighbors_phase;
+  std::atomic<uint32_t> _neighbors_secs_until_next;
   #endif
   #if defined(BOARD_HAS_PSRAM)
   char* _publish_json_buffer;
@@ -331,6 +337,7 @@ private:
 
   // Topic building
   enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW, MSG_NEIGHBORS };
+  static const char* messageTypeSuffix(MQTTMessageType type);
   bool buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size);
   bool substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size);
 
@@ -495,6 +502,16 @@ public:
   #if defined(WITH_MQTT_NEIGHBORS)
   void requestPublishNeighbors(const char* json, size_t len);
   static const size_t NEIGHBORS_JSON_BUFFER_SIZE = 10240;
+
+  // Periodic-neighbors schedule, reported by the mesh loop for `get mqtt.status`.
+  // The mesh owns the timer; the bridge only caches the summary, which keeps the
+  // wrap-safe millis math on the one side that already has those helpers.
+  enum NeighborsPhase : uint8_t {
+    NBR_SCHEDULED,  // waiting for the next publish; secs_until_next is valid
+    NBR_ACTIVE,     // zero-hop refresh or scope queries in flight
+    NBR_DUE,        // publish is due, waiting on the bridge/WiFi to come up
+  };
+  void setNeighborsSchedule(NeighborsPhase phase, uint32_t secs_until_next);
   #endif
   static const char* wifiReasonStr(uint8_t reason);
   static const char* tlsErrorStr(int32_t err);

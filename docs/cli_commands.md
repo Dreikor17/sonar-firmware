@@ -118,7 +118,9 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 **Usage:**
 - `discover.scopes`
 
-Queries cached zero-hop repeater neighbors for flood-allowed region scopes (`ANON_REQ_TYPE_REGIONS`), then publishes a retained JSON snapshot to `meshcore/{IATA}/{device}/neighbors`. Includes this node's own scopes in the `self` object.
+Queries cached zero-hop repeater neighbors for flood-allowed region scopes (`ANON_REQ_TYPE_REGIONS`), then publishes a JSON snapshot to each configured MQTT slot's `neighbors` topic. Includes this node's own scopes in the `self` object.
+
+If a zero-hop neighbor discovery is already collecting responses — from `discover.neighbors` or from the periodic `mqtt.neighbors` refresh — the scope queries are queued until its 60-second response window ends, so they run against the refreshed table rather than the stale cache. The reply reports the wait, e.g. `OK - scopes queued (47s discovery remaining)`. A queued request is not cancelled by `set mqtt.neighbors off`.
 
 **Note:** Requires `WITH_MQTT_BRIDGE`, `MAX_NEIGHBOURS`, and PSRAM (`BOARD_HAS_PSRAM`). Returns `Err - not supported (requires PSRAM)` on other builds.
 
@@ -1125,9 +1127,14 @@ Requires WiFi connected and the MQTT bridge running.
 **Parameters:**
 - `hours`: Interval between automatic `discover.scopes` runs (**12-336**, default **24**)
 
-**Note:** Requires PSRAM. Publishes to `meshcore/{IATA}/{device}/neighbors` (retained, QoS 1). Use `discover.scopes` for a one-shot publish.
+**Note:** Requires PSRAM. Publishes to each configured MQTT slot's `neighbors` topic at QoS 1 (retained only when that preset allows it). Use `discover.scopes` for a one-shot publish.
 
 Automatic publishes run in two stages: first the repeater performs the same 60-second zero-hop refresh as `discover.neighbors`, then it queries the refreshed neighbors for scopes and publishes after those queries complete.
+
+While enabled, `get mqtt.status` reports the schedule as a trailing `nbr: <next>/<last>` field, e.g. `nbr: 3h12m/ok`:
+
+- `<next>` — time until the next automatic publish (`3h12m`, `12m`, `45s`), or `active` while a refresh or scope query is in flight, or `due` when a publish is waiting on the bridge or WiFi to come up.
+- `<last>` — result of the most recent publish attempt: `ok`, `failed`, or `none` if none has been attempted since boot.
 
 ---
 
