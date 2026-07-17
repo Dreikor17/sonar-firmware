@@ -113,6 +113,17 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
+### Discover neighbor scopes and publish to MQTT (PSRAM observer builds)
+
+**Usage:**
+- `discover.scopes`
+
+Queries cached zero-hop repeater neighbors for flood-allowed region scopes (`ANON_REQ_TYPE_REGIONS`), then publishes a retained JSON snapshot to `meshcore/{IATA}/{device}/neighbors`. Includes this node's own scopes in the `self` object.
+
+**Note:** Requires `WITH_MQTT_BRIDGE`, `MAX_NEIGHBOURS`, and PSRAM (`BOARD_HAS_PSRAM`). Returns `Err - not supported (requires PSRAM)` on other builds.
+
+---
+
 ## Statistics
 
 ### Clear Stats
@@ -1100,6 +1111,21 @@ region save
 - **Over LoRa:** returns a compact `<server> ok|fail` list, one per line.
 
 Requires WiFi connected and the MQTT bridge running.
+
+---
+
+#### Periodic neighbors/scopes MQTT publish (PSRAM observer builds)
+
+**Usage:**
+- `get mqtt.neighbors`
+- `set mqtt.neighbors on|off`
+- `get mqtt.neighbors.interval`
+- `set mqtt.neighbors.interval <hours>`
+
+**Parameters:**
+- `hours`: Interval between automatic `discover.scopes` runs (**12-336**, default **24**)
+
+**Note:** Requires PSRAM. Publishes to `meshcore/{IATA}/{device}/neighbors` (retained, QoS 1). Use `discover.scopes` for a one-shot publish.
 
 ---
 

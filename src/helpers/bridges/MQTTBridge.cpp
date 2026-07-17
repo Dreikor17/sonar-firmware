@@ -529,6 +529,11 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   _last_raw_data       = (uint8_t*)psram_malloc(LAST_RAW_DATA_SIZE);
   _publish_json_buffer = (char*)psram_malloc(PUBLISH_JSON_BUFFER_SIZE);
   _status_json_buffer  = (char*)psram_malloc(STATUS_JSON_BUFFER_SIZE);
+  #if defined(WITH_MQTT_NEIGHBORS)
+  _neighbors_json_buffer = (char*)psram_malloc(NEIGHBORS_JSON_BUFFER_SIZE);
+  _neighbors_publish_pending = false;
+  _neighbors_publish_len = 0;
+  #endif
   #else
   memset(_last_raw_data, 0, sizeof(_last_raw_data));
   #endif
@@ -827,6 +832,11 @@ void MQTTBridge::end() {
   psram_free(_last_raw_data);       _last_raw_data = nullptr;
   psram_free(_publish_json_buffer); _publish_json_buffer = nullptr;
   psram_free(_status_json_buffer);  _status_json_buffer = nullptr;
+  #if defined(WITH_MQTT_NEIGHBORS)
+  psram_free(_neighbors_json_buffer); _neighbors_json_buffer = nullptr;
+  _neighbors_publish_pending = false;
+  _neighbors_publish_len = 0;
+  #endif
   #endif
   // JSON documents are now StaticJsonDocument inline members — no heap allocation to free.
 
@@ -1046,6 +1056,17 @@ void MQTTBridge::mqttTaskLoop() {
 
     // Process packet queue
     processPacketQueue();
+
+#if defined(WITH_MQTT_NEIGHBORS)
+    if (_neighbors_publish_pending.load(std::memory_order_acquire)) {
+      if (publishNeighbors()) {
+        MQTT_DEBUG_PRINTLN("Neighbors published");
+      } else {
+        MQTT_DEBUG_PRINTLN("Neighbors publish failed");
+      }
+      _neighbors_publish_pending.store(false, std::memory_order_release);
+    }
+#endif
 
 #ifdef WITH_SNMP
     // SNMP agent loop — process incoming UDP requests
@@ -1844,7 +1865,10 @@ bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, bool 
 // Presets use hardcoded topic logic; custom slots support user-defined templates.
 // ---------------------------------------------------------------------------
 bool MQTTBridge::substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size) {
-  const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
+  const char* type_str = (type == MSG_STATUS) ? "status"
+    : (type == MSG_PACKETS) ? "packets"
+    : (type == MSG_RAW) ? "raw"
+    : "neighbors";
   const char* token = _obs->mqtt_slot_token[slot_index];
 
   size_t out = 0;
@@ -1902,7 +1926,10 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
     }
     // MQTT_TOPIC_MESHCORE (default for all other presets)
     if (!isIATAValid()) return false;
-    const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
+    const char* type_str = (type == MSG_STATUS) ? "status"
+      : (type == MSG_PACKETS) ? "packets"
+      : (type == MSG_RAW) ? "raw"
+      : "neighbors";
     snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id, type_str);
     return true;
   }
@@ -1913,7 +1940,10 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
   }
   // Default: meshcore format
   if (!isIATAValid()) return false;
-  const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
+  const char* type_str = (type == MSG_STATUS) ? "status"
+    : (type == MSG_PACKETS) ? "packets"
+    : (type == MSG_RAW) ? "raw"
+    : "neighbors";
   snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id, type_str);
   return true;
 }
@@ -2735,6 +2765,45 @@ bool MQTTBridge::publishStatus() {
 
   return false;
 }
+
+#if defined(WITH_MQTT_NEIGHBORS)
+void MQTTBridge::requestPublishNeighbors(const char* json, size_t len) {
+  if (!_neighbors_json_buffer || !json || len == 0) return;
+  if (_neighbors_publish_pending.load(std::memory_order_acquire)) return;
+  if (len >= NEIGHBORS_JSON_BUFFER_SIZE) {
+    len = NEIGHBORS_JSON_BUFFER_SIZE - 1;
+  }
+  memcpy(_neighbors_json_buffer, json, len);
+  _neighbors_json_buffer[len] = '\0';
+  _neighbors_publish_len = len;
+  _neighbors_publish_pending.store(true, std::memory_order_release);
+}
+
+bool MQTTBridge::publishNeighbors() {
+  if (!_neighbors_json_buffer || _neighbors_publish_len == 0) {
+    return false;
+  }
+  if (!_cached_has_connected_slots) {
+    return false;
+  }
+
+  refreshOriginFromPrefs();
+
+  bool published = false;
+  char topic[128];
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
+      if (buildTopicForSlot(i, MSG_NEIGHBORS, topic, sizeof(topic))) {
+        bool use_retain = _slots[i].preset ? _slots[i].preset->allow_retain : false;
+        if (publishToSlot(i, topic, _neighbors_json_buffer, use_retain, 1)) {
+          published = true;
+        }
+      }
+    }
+  }
+  return published;
+}
+#endif
 
 bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
                                 const uint8_t* raw_data, int raw_len,

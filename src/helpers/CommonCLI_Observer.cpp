@@ -246,6 +246,27 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     } else {
       strcpy(reply, "Error: interval must be between 1-60 minutes");
     }
+#if defined(BOARD_HAS_PSRAM) && defined(MAX_NEIGHBOURS) && MAX_NEIGHBOURS > 0
+  } else if (memcmp(config, "mqtt.neighbors ", 15) == 0) {
+    _mqtt_prefs.mqtt_neighbors_enabled = memcmp(&config[15], "on", 2) == 0;
+    savePrefs();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.neighbors.interval ", 24) == 0) {
+    uint32_t hours = _atoi(&config[24]);
+    if (hours >= MQTT_NEIGHBORS_MIN_INTERVAL_HOURS &&
+        hours <= MQTT_NEIGHBORS_MAX_INTERVAL_HOURS) {
+      _mqtt_prefs.mqtt_neighbors_interval = hours * 3600000UL;
+      savePrefs();
+      sprintf(reply, "OK - neighbors interval set to %u hours (%lu ms)", hours,
+              (unsigned long)_mqtt_prefs.mqtt_neighbors_interval);
+    } else {
+      strcpy(reply, "Error: neighbors interval must be between 12-336 hours");
+    }
+#elif defined(WITH_MQTT_BRIDGE)
+  } else if (memcmp(config, "mqtt.neighbors ", 15) == 0 ||
+             memcmp(config, "mqtt.neighbors.interval ", 24) == 0) {
+    strcpy(reply, "Err - not supported (requires PSRAM)");
+#endif
   } else if (memcmp(config, "mqtt.ntp ", 9) == 0) {
     const char* host = &config[9];
     while (*host == ' ') host++;
@@ -711,6 +732,17 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "mqtt.interval", 13) == 0) {
     uint32_t minutes = (_mqtt_prefs.mqtt_status_interval + 29999) / 60000;
     sprintf(reply, "> %u minutes (%lu ms)", minutes, (unsigned long)_mqtt_prefs.mqtt_status_interval);
+#if defined(BOARD_HAS_PSRAM) && defined(MAX_NEIGHBOURS) && MAX_NEIGHBOURS > 0
+  } else if (memcmp(config, "mqtt.neighbors.interval", 23) == 0) {
+    uint32_t hours = (_mqtt_prefs.mqtt_neighbors_interval + 3599999) / 3600000;
+    sprintf(reply, "> %u hours (%lu ms)", hours, (unsigned long)_mqtt_prefs.mqtt_neighbors_interval);
+  } else if (memcmp(config, "mqtt.neighbors", 14) == 0) {
+    sprintf(reply, "> %s", _mqtt_prefs.mqtt_neighbors_enabled ? "on" : "off");
+#elif defined(WITH_MQTT_BRIDGE)
+  } else if (memcmp(config, "mqtt.neighbors", 14) == 0 ||
+             memcmp(config, "mqtt.neighbors.interval", 23) == 0) {
+    strcpy(reply, "Err - not supported (requires PSRAM)");
+#endif
   } else if (memcmp(config, "mqtt.ntp.diag", 13) == 0 && (config[13] == '\0' || config[13] == ' ')) {
 #ifdef ESP_PLATFORM
     // Connectivity probe across all configured NTP servers; never updates the clock.
