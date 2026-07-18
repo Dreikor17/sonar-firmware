@@ -1,5 +1,8 @@
 #pragma once
 
+#include <stdint.h>
+#include <string.h>  // strcmp/memcmp used by the inline preset helpers below
+
 // Maximum number of configurable MQTT connection slots (available to all builds for struct layout).
 // Used in NodePrefs/MQTTPrefs for persistent storage — do NOT change without migration.
 static const int MAX_MQTT_SLOTS = 6;

@@ -534,6 +534,26 @@ serial and use the CLI directly (e.g. `set wifi.ssid ...`, `set wifi.pwd ...`,
 `get wifi.status`, `stop webconfig`). Serial access always works regardless of
 the portal state.
 
+### Local testing without hardware
+
+Two ways to iterate on observer/WiFi functionality without flashing a device:
+
+- **Portal UI** — run the mock backend and open the real portal in a browser:
+  `python3 scripts/webconfig_mock_server.py` (add `--setup` for the first-boot
+  wizard), then browse to `http://localhost:8080/`. It serves `webui/index.html`
+  and mirrors the firmware's `/api/*` contract (reqid handshake, reboot gating,
+  validation, secret masking), so the portal JS runs against realistic
+  responses. Stdlib only; no account.
+- **Boot / WiFi / MQTT / CLI / OLED** — the Wokwi ESP32-S3 sim. Build
+  `pio run -e Heltec_v3_repeater_observer_mqtt_sim -t mergebin` (LoRa radio
+  stubbed via `SimRadio`, WiFi pre-seeded to `Wokwi-GUEST`), then run the sim
+  from `wokwi.toml`/`diagram.json` (VS Code Wokwi extension or `wokwi-cli`).
+  Outbound MQTT works on the free gateway; incoming (browser → on-device portal)
+  needs Wokwi's paid Private Gateway — use the mock backend above for portal UI.
+
+Backend handler logic is covered by host unit tests under `test/` (`pio test -e
+native`); see [test/README.md](test/README.md) for the suites and how to run them.
+
 ## Command Architecture
 
 The CLI commands are organized into two levels:

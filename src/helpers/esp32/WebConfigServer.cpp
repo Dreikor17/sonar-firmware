@@ -12,6 +12,7 @@
 
 #include <helpers/CommonCLI.h>
 #include <helpers/MQTTPresets.h>
+#include <helpers/WebConfigKeys.h>
 #include <helpers/bridges/MQTTBridge.h>
 
 #include "WebConfigHtml.h"
@@ -20,52 +21,11 @@
 // so an untouched password field never overwrites the stored value.
 static const char SECRET_SENTINEL[] = "********";
 
-// Keys the web UI may drive through the CLI `set` handlers. Everything else
-// is rejected, so a crafted request can't reach arbitrary commands (`erase`,
-// `password`, ...) through the batch.
-static const char* const ALLOWED_SET_KEYS[] = {
-  // NodePrefs (radio / node)
-  "name", "lat", "lon", "radio", "tx", "af", "rxdelay", "txdelay",
-  "cad", "radio.rxgain", "repeat", "advert.interval", "flood.advert.interval",
-  "flood.max", "flood.max.advert", "flood.max.unscoped", "loop.detect",
-  // MQTTPrefs (WiFi / MQTT / misc observer)
-  "wifi.ssid", "wifi.pwd", "wifi.powersave",
-  "mqtt.origin", "mqtt.iata", "mqtt.status", "mqtt.packets", "mqtt.raw",
-  "mqtt.tx", "mqtt.rx", "mqtt.interval", "mqtt.ntp", "mqtt.owner", "mqtt.email",
-  "timezone", "timezone.offset", "snmp", "snmp.community",
-};
-static const char* const ALLOWED_SLOT_KEYS[] = {
-  "preset", "server", "port", "username", "password", "token", "topic", "audience",
-};
-
-// Shortest slot key is "mqttN.x" (mqtt + digit + '.' + 1-char field) = 7 chars.
-// The prefix probe below indexes key[4..6], so it must never run on a shorter
-// string — an attacker-supplied "mqtt" or "m" would otherwise read past the
-// terminator. strcmp() is null-safe, so the exact-match loop needs no guard.
-static bool isSlotKeyPrefix(const char* key) {
-  return strlen(key) >= 7 && memcmp(key, "mqtt", 4) == 0
-      && key[4] >= '1' && key[4] <= ('0' + MAX_MQTT_SLOTS) && key[5] == '.';
-}
-
-static bool isAllowedSetKey(const char* key) {
-  for (size_t i = 0; i < sizeof(ALLOWED_SET_KEYS) / sizeof(ALLOWED_SET_KEYS[0]); i++) {
-    if (strcmp(key, ALLOWED_SET_KEYS[i]) == 0) return true;
-  }
-  // mqtt<1-6>.<field>
-  if (isSlotKeyPrefix(key)) {
-    for (size_t i = 0; i < sizeof(ALLOWED_SLOT_KEYS) / sizeof(ALLOWED_SLOT_KEYS[0]); i++) {
-      if (strcmp(&key[6], ALLOWED_SLOT_KEYS[i]) == 0) return true;
-    }
-  }
-  return false;
-}
-
-static bool isSecretKey(const char* key) {
-  if (strcmp(key, "wifi.pwd") == 0) return true;
-  if (isSlotKeyPrefix(key)
-      && (strcmp(&key[6], "password") == 0 || strcmp(&key[6], "token") == 0)) return true;
-  return false;
-}
+// Key classification (allowlist, secret detection, slot-prefix parsing) lives in
+// helpers/WebConfigKeys.h so it can be unit-tested on the host. Thin aliases keep
+// the call sites below readable.
+static inline bool isAllowedSetKey(const char* key) { return wcIsAllowedSetKey(key); }
+static inline bool isSecretKey(const char* key) { return wcIsSecretKey(key); }
 
 // Constant-time-ish comparison so login timing doesn't leak a prefix match.
 static bool fixedTimeEquals(const char* a, const char* b, size_t max_len) {

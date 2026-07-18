@@ -12,6 +12,7 @@
 #include "CommonCLI.h"
 #include "TxtDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch[Hex]()
+#include "MQTTObserverValidation.h"  // pure input validators (host-testable)
 #include <Utils.h>
 #ifdef ESP_PLATFORM
 #include <WiFi.h>
@@ -92,19 +93,16 @@ static int getMQTTPresetNameCount() {
   return MQTT_PRESET_COUNT + 2; // built-ins + custom + none
 }
 
-static bool isValidNtpHostname(const char* host) {
-  if (!host || host[0] == '\0') return false;
-  size_t len = strlen(host);
-  if (len > 63) return false;
-  if (host[0] == '.' || host[len - 1] == '.') return false;
-  for (size_t i = 0; i < len; i++) {
-    char c = host[i];
-    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-          (c >= '0' && c <= '9') || c == '.' || c == '-')) {
-      return false;
-    }
+// Reject a value that wouldn't fit its destination MQTTPrefs buffer (which must
+// hold the string plus a NUL) so an over-long CLI/web submission fails loudly
+// instead of being silently truncated. Fills reply and returns true when too
+// long. reply is the caller's 160-byte command buffer.
+static bool valueTooLong(const char* val, size_t bufsize, char* reply, const char* label) {
+  if (!mqttValueFits(val, bufsize)) {
+    snprintf(reply, 160, "Error: %s too long (max %u chars)", label, (unsigned)(bufsize - 1));
+    return true;
   }
-  return true;
+  return false;
 }
 
 static const char* getMQTTPresetNameByIndex(int index) {
@@ -163,6 +161,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 #ifdef WITH_MQTT_BRIDGE
   bool handled = true;
   if (memcmp(config, "snmp.community ", 15) == 0) {
+    if (valueTooLong(&config[15], sizeof(_mqtt_prefs.snmp_community), reply, "snmp.community")) return true;
     StrHelper::strncpy(_mqtt_prefs.snmp_community, &config[15], sizeof(_mqtt_prefs.snmp_community));
     savePrefs();
     strcpy(reply, "OK - restart to apply");
@@ -200,6 +199,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     savePrefs();
     strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.origin ", 12) == 0) {
+    if (valueTooLong(&config[12], sizeof(_mqtt_prefs.mqtt_origin), reply, "origin")) return true;
     StrHelper::strncpy(_mqtt_prefs.mqtt_origin, &config[12], sizeof(_mqtt_prefs.mqtt_origin));
     StrHelper::stripSurroundingQuotes(_mqtt_prefs.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
     savePrefs();
@@ -217,12 +217,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     } else {
       // A region code goes straight into MQTT topic paths, so require exactly
       // three alphanumeric characters (real IATA codes are 3 letters, e.g. DEN).
-      bool valid = (iata_len == 3);
-      for (size_t i = 0; valid && i < iata_len; i++) {
-        char c = iata[i];
-        valid = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
-      }
-      if (!valid) {
+      if (!mqttIataValid(iata)) {
         strcpy(reply, "Error: IATA code must be exactly 3 letters/digits (e.g. DEN)");
       } else {
         StrHelper::strncpy(_mqtt_prefs.mqtt_iata, iata, sizeof(_mqtt_prefs.mqtt_iata));
@@ -272,7 +267,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     const char* host = &config[9];
     while (*host == ' ') host++;
     bool clearing = strcmp(host, "none") == 0;
-    if (!clearing && !isValidNtpHostname(host)) {
+    if (!clearing && !mqttNtpHostnameValid(host)) {
       strcpy(reply, "Error: invalid NTP hostname");
     } else {
       if (clearing) {
@@ -300,10 +295,12 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 #endif
     }
   } else if (memcmp(config, "wifi.ssid ", 10) == 0) {
+    if (valueTooLong(&config[10], sizeof(_mqtt_prefs.wifi_ssid), reply, "wifi.ssid")) return true;
     StrHelper::strncpy(_mqtt_prefs.wifi_ssid, &config[10], sizeof(_mqtt_prefs.wifi_ssid));
     savePrefs();
     strcpy(reply, "OK");
   } else if (memcmp(config, "wifi.pwd ", 9) == 0) {
+    if (valueTooLong(&config[9], sizeof(_mqtt_prefs.wifi_password), reply, "wifi.pwd")) return true;
     StrHelper::strncpy(_mqtt_prefs.wifi_password, &config[9], sizeof(_mqtt_prefs.wifi_password));
     savePrefs();
     strcpy(reply, "OK");
@@ -347,6 +344,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 #endif
     }
   } else if (memcmp(config, "timezone ", 9) == 0) {
+    if (valueTooLong(&config[9], sizeof(_mqtt_prefs.timezone_string), reply, "timezone")) return true;
     StrHelper::strncpy(_mqtt_prefs.timezone_string, &config[9], sizeof(_mqtt_prefs.timezone_string));
     savePrefs();
     strcpy(reply, "OK");
@@ -407,6 +405,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         strcpy(reply, "Error: unknown preset. Use 'get mqtt.presets'");
       }
     } else if (memcmp(subcmd, "server ", 7) == 0) {
+      if (valueTooLong(&subcmd[7], sizeof(_mqtt_prefs.mqtt_slot_host[slot]), reply, "server")) return true;
       StrHelper::strncpy(_mqtt_prefs.mqtt_slot_host[slot], &subcmd[7], sizeof(_mqtt_prefs.mqtt_slot_host[slot]));
       savePrefs();
       // Reconfigure the slot so the new host reaches the live connection (other
@@ -425,16 +424,19 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         strcpy(reply, "Error: port must be between 1 and 65535");
       }
     } else if (memcmp(subcmd, "username ", 9) == 0) {
+      if (valueTooLong(&subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_username[slot]), reply, "username")) return true;
       StrHelper::strncpy(_mqtt_prefs.mqtt_slot_username[slot], &subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_username[slot]));
       savePrefs();
       _callbacks->restartBridgeSlot(slot);
       strcpy(reply, "OK");
     } else if (memcmp(subcmd, "password ", 9) == 0) {
+      if (valueTooLong(&subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_password[slot]), reply, "password")) return true;
       StrHelper::strncpy(_mqtt_prefs.mqtt_slot_password[slot], &subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_password[slot]));
       savePrefs();
       _callbacks->restartBridgeSlot(slot);
       strcpy(reply, "OK");
     } else if (memcmp(subcmd, "token ", 6) == 0) {
+      if (valueTooLong(&subcmd[6], sizeof(_mqtt_prefs.mqtt_slot_token[slot]), reply, "token")) return true;
       StrHelper::strncpy(_mqtt_prefs.mqtt_slot_token[slot], &subcmd[6], sizeof(_mqtt_prefs.mqtt_slot_token[slot]));
       savePrefs();
       _callbacks->restartBridgeSlot(slot);
@@ -442,6 +444,8 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     } else if (memcmp(subcmd, "topic ", 6) == 0) {
       if (strcmp(_mqtt_prefs.mqtt_slot_preset[slot], "custom") != 0) {
         sprintf(reply, "Error: topic template only applies to custom preset slots");
+      } else if (valueTooLong(&subcmd[6], sizeof(_mqtt_prefs.mqtt_slot_topic[slot]), reply, "topic")) {
+        return true;
       } else {
         StrHelper::strncpy(_mqtt_prefs.mqtt_slot_topic[slot], &subcmd[6], sizeof(_mqtt_prefs.mqtt_slot_topic[slot]));
         savePrefs();
@@ -449,6 +453,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         sprintf(reply, "OK - slot %d topic: %s", slot + 1, _mqtt_prefs.mqtt_slot_topic[slot]);
       }
     } else if (memcmp(subcmd, "audience ", 9) == 0) {
+      if (valueTooLong(&subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_audience[slot]), reply, "audience")) return true;
       StrHelper::strncpy(_mqtt_prefs.mqtt_slot_audience[slot], &subcmd[9], sizeof(_mqtt_prefs.mqtt_slot_audience[slot]));
       savePrefs();
       _callbacks->restartBridgeSlot(slot);
@@ -488,34 +493,21 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.owner ", 11) == 0) {
     const char* owner_key = &config[11];
-    int key_len = strlen(owner_key);
-    if (key_len == 0) {
+    if (owner_key[0] == '\0') {
       // Owner key is optional — empty clears it (previously this errored, so a
       // set key could never be removed via the portal/CLI).
       _mqtt_prefs.mqtt_owner_public_key[0] = '\0';
       savePrefs();
       strcpy(reply, "OK - owner key cleared");
-    } else if (key_len == 64) {
-      bool valid_key = true;
-      for (int i = 0; i < key_len; i++) {
-        if (!((owner_key[i] >= '0' && owner_key[i] <= '9') ||
-              (owner_key[i] >= 'A' && owner_key[i] <= 'F') ||
-              (owner_key[i] >= 'a' && owner_key[i] <= 'f'))) {
-          valid_key = false;
-          break;
-        }
-      }
-      if (valid_key) {
-        StrHelper::strncpy(_mqtt_prefs.mqtt_owner_public_key, owner_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
-        savePrefs();
-        strcpy(reply, "OK");
-      } else {
-        strcpy(reply, "Error: invalid hex characters in public key");
-      }
+    } else if (mqttOwnerKeyValid(owner_key)) {
+      StrHelper::strncpy(_mqtt_prefs.mqtt_owner_public_key, owner_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
+      savePrefs();
+      strcpy(reply, "OK");
     } else {
       strcpy(reply, "Error: public key must be 64 hex characters (32 bytes)");
     }
   } else if (memcmp(config, "mqtt.email ", 11) == 0) {
+    if (valueTooLong(&config[11], sizeof(_mqtt_prefs.mqtt_email), reply, "email")) return true;
     StrHelper::strncpy(_mqtt_prefs.mqtt_email, &config[11], sizeof(_mqtt_prefs.mqtt_email));
     savePrefs();
     strcpy(reply, "OK");

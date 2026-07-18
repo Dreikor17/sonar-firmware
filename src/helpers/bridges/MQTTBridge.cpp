@@ -1,5 +1,6 @@
 #include "MQTTBridge.h"
 #include "../MQTTMessageBuilder.h"
+#include "../MQTTTopicTemplate.h"
 #include "../TxtDataHelpers.h"
 #include <NTPClient.h>
 #include <WiFiUdp.h>
@@ -1885,45 +1886,9 @@ bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, bool 
 // ---------------------------------------------------------------------------
 bool MQTTBridge::substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size) {
   const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
-  const char* token = _obs->mqtt_slot_token[slot_index];
-
-  size_t out = 0;
-  const char* p = tmpl;
-  while (*p && out < buf_size - 1) {
-    if (*p == '{') {
-      if (strncmp(p, "{iata}", 6) == 0) {
-        size_t len = strlen(_iata);
-        if (out + len >= buf_size) return false;
-        memcpy(buf + out, _iata, len);
-        out += len;
-        p += 6;
-      } else if (strncmp(p, "{device}", 8) == 0) {
-        size_t len = strlen(_device_id);
-        if (out + len >= buf_size) return false;
-        memcpy(buf + out, _device_id, len);
-        out += len;
-        p += 8;
-      } else if (strncmp(p, "{token}", 7) == 0) {
-        size_t len = strlen(token);
-        if (out + len >= buf_size) return false;
-        memcpy(buf + out, token, len);
-        out += len;
-        p += 7;
-      } else if (strncmp(p, "{type}", 6) == 0) {
-        size_t len = strlen(type_str);
-        if (out + len >= buf_size) return false;
-        memcpy(buf + out, type_str, len);
-        out += len;
-        p += 6;
-      } else {
-        buf[out++] = *p++;
-      }
-    } else {
-      buf[out++] = *p++;
-    }
-  }
-  buf[out] = '\0';
-  return out > 0;
+  // Pure expansion lives in helpers/MQTTTopicTemplate.h (host-tested).
+  return mqttSubstituteTopic(tmpl, _iata, _device_id,
+                             _obs->mqtt_slot_token[slot_index], type_str, buf, buf_size);
 }
 
 bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size) {

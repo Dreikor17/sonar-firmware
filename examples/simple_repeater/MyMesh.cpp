@@ -995,6 +995,25 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
 
+#ifdef SIM_WIFI_SSID
+  // Emulator builds (Wokwi) boot with fresh NVS every run. Seed WiFi so the
+  // observer auto-joins the simulator's network and brings the MQTT bridge up
+  // (WiFi is driven by the bridge task), instead of raising the setup AP that
+  // the emulator can't model. No-op for real firmware (flag never defined).
+  {
+    MQTTPrefs* obs = _cli.getObserverPrefs();
+    if (obs->wifi_ssid[0] == 0) {
+      strncpy(obs->wifi_ssid, SIM_WIFI_SSID, sizeof(obs->wifi_ssid) - 1);
+      obs->wifi_ssid[sizeof(obs->wifi_ssid) - 1] = 0;
+  #ifdef SIM_WIFI_PWD
+      strncpy(obs->wifi_password, SIM_WIFI_PWD, sizeof(obs->wifi_password) - 1);
+      obs->wifi_password[sizeof(obs->wifi_password) - 1] = 0;
+  #endif
+      _prefs.bridge_enabled = 1;   // WiFi comes up via the MQTT bridge task
+    }
+  }
+#endif
+
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
   region_map.load(_fs);
