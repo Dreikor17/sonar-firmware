@@ -63,12 +63,24 @@ TEST(TopicTemplate, OverflowReturnsFalseNoWrite) {
   EXPECT_FALSE(mqttSubstituteTopic("{device}", IATA, DEV, TOK, "status", buf, sizeof(buf)));
 }
 
-TEST(TopicTemplate, LiteralOverflowTruncatesAndNulTerminates) {
+TEST(TopicTemplate, LiteralOverflowReturnsFalseAndNulTerminates) {
   char buf[5];
   // Literal longer than the buffer: fills up to buf_size-1 and NUL-terminates.
-  mqttSubstituteTopic("abcdefghij", IATA, DEV, TOK, "status", buf, sizeof(buf));
+  EXPECT_FALSE(mqttSubstituteTopic("abcdefghij", IATA, DEV, TOK, "status", buf, sizeof(buf)));
   EXPECT_EQ('\0', buf[4]);
   EXPECT_EQ((size_t)4, strlen(buf));
+}
+
+TEST(TopicTemplate, LiteralSuffixOverflowAfterSubstitutionReturnsFalse) {
+  char buf[8];
+  EXPECT_FALSE(mqttSubstituteTopic("{iata}/tail", IATA, DEV, TOK, "status", buf, sizeof(buf)));
+  EXPECT_STREQ("DEN/tai", buf);
+}
+
+TEST(TopicTemplate, ExactFitLiteralSucceeds) {
+  char buf[5];
+  EXPECT_TRUE(mqttSubstituteTopic("abcd", IATA, DEV, TOK, "status", buf, sizeof(buf)));
+  EXPECT_STREQ("abcd", buf);
 }
 
 TEST(TopicTemplate, AlwaysNulTerminatedAndBounded) {

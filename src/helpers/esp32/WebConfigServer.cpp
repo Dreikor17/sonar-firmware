@@ -214,7 +214,7 @@ void WebConfigServer::finalizeTeardown() {
   // listener socket is released by _server->end() on stop) and route requests
   // through the currently attached session, so nothing a live request points at
   // is ever freed.
-  
+
   _server = NULL;
   delete _dns;
   _dns = NULL;

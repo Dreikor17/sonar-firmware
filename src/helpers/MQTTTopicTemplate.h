@@ -48,5 +48,9 @@ static inline bool mqttSubstituteTopic(const char* tmpl, const char* iata,
     }
   }
   buf[out] = '\0';
+  // The loop also stops when the output buffer is full. If input remains,
+  // report overflow just as we do for an oversized placeholder substitution;
+  // callers must never publish a silently truncated topic.
+  if (*p) return false;
   return out > 0;
 }
