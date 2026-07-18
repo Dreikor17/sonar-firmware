@@ -1,6 +1,8 @@
 #include "MQTTBridge.h"
+#include "../MQTTConnectionPolicy.h"
 #include "../MQTTMessageBuilder.h"
-#include "../MQTTTopicTemplate.h"
+#include "../MQTTPacketQueuePolicy.h"
+#include "../MQTTTopicRouter.h"
 #include "../TxtDataHelpers.h"
 #include <NTPClient.h>
 #include <WiFiUdp.h>
@@ -1520,8 +1522,8 @@ void MQTTBridge::maintainSlotConnections() {
 
   // JWT tokens require valid timestamps
   unsigned long clock_sec = current_time;
-  bool clock_looks_set = (clock_sec >= 1735689600);  // 2025-01-01 00:00:00 UTC
-  bool can_do_jwt = _ntp_synced || clock_looks_set;
+  bool can_do_jwt = MQTTConnectionPolicy::jwtClockAvailable(
+      _ntp_synced, static_cast<uint32_t>(clock_sec));
 
   // Count connected slots to inform reconnect decisions
   int connected_count = 0;
@@ -1534,8 +1536,8 @@ void MQTTBridge::maintainSlotConnections() {
   // Time-based guard: block reconnects if any slot reconnected within the last 15 s,
   // ensuring the previous TLS handshake (and its Core-0-expensive completion events)
   // finish before the next slot begins its own handshake.
-  const unsigned long RECONNECT_GUARD_MS = 15000UL;
-  bool reconnect_attempted_this_cycle = (now_millis - _last_slot_reconnect_ms < RECONNECT_GUARD_MS);
+  bool reconnect_attempted_this_cycle = MQTTConnectionPolicy::reconnectGuardActive(
+      static_cast<uint32_t>(now_millis), static_cast<uint32_t>(_last_slot_reconnect_ms));
   // Only allow one full teardown+setup per cycle to limit heap fragmentation
   // when multiple slots fail simultaneously
   bool teardown_attempted_this_cycle = false;
@@ -1564,11 +1566,10 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   // (worst case the 300 s rung / 30-minute breaker probes) instead of
   // hammering full TLS handshakes at the 10 s rung — see the onConnect
   // handler in initSlotClients() for why this doesn't happen on CONNACK.
-  static const unsigned long BACKOFF_STABLE_RESET_MS = 120000UL;
   if (slot.connected &&
       (slot.reconnect_backoff != 0 || slot.max_backoff_failures != 0) &&
-      slot.connected_at_ms != 0 &&
-      (now_millis - slot.connected_at_ms) >= BACKOFF_STABLE_RESET_MS) {
+      MQTTConnectionPolicy::stableConnection(static_cast<uint32_t>(now_millis),
+                                             static_cast<uint32_t>(slot.connected_at_ms))) {
     MQTT_DEBUG_PRINTLN("MQTT%d stable for %lus - clearing reconnect backoff (was level %d)",
         index + 1, (now_millis - slot.connected_at_ms) / 1000UL, slot.reconnect_backoff);
     slot.reconnect_backoff = 0;
@@ -1580,23 +1581,19 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
                        (!slot.preset && slot.audience[0] != '\0');
   if (slot_uses_jwt) {
     // Renew (and below, reconnect) this many seconds before the token's exp
-    // claim. Scaled to the slot's token lifetime — see tokenRenewalBufferSecs
+    // claim. Scaled to the slot's token lifetime — see renewalBufferSecs()
     // for why a flat 60 s lost the renewal race against brokers that enforce
     // exp on live sessions (waev's 55-minute tokens).
-    const unsigned long renewal_buffer = tokenRenewalBufferSecs(slotTokenLifetime(index));
-    bool token_needs_renewal = false;
-    if (!time_synced) {
-      token_needs_renewal = (slot.token_expires_at == 0);
-    } else {
-      token_needs_renewal = (slot.token_expires_at == 0) ||
-                           !(slot.token_expires_at >= 1000000000) ||
-                           (current_time >= slot.token_expires_at) ||
-                           (current_time >= (slot.token_expires_at - renewal_buffer));
-    }
+    const unsigned long renewal_buffer = MQTTConnectionPolicy::renewalBufferSecs(
+        static_cast<uint32_t>(slotTokenLifetime(index)));
+    bool token_needs_renewal = MQTTConnectionPolicy::tokenNeedsRenewal(
+        time_synced, static_cast<uint32_t>(current_time),
+        static_cast<uint32_t>(slot.token_expires_at),
+        static_cast<uint32_t>(renewal_buffer));
 
     // Throttle renewal attempts to once per minute
-    const unsigned long RENEWAL_THROTTLE_MS = 60000;
-    bool can_attempt_renewal = (now_millis - slot.last_token_renewal) >= RENEWAL_THROTTLE_MS;
+    bool can_attempt_renewal = MQTTConnectionPolicy::renewalAttemptAllowed(
+        static_cast<uint32_t>(now_millis), static_cast<uint32_t>(slot.last_token_renewal));
 
     if (token_needs_renewal && can_attempt_renewal) {
       slot.last_token_renewal = now_millis;
@@ -1653,11 +1650,10 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   // Periodic probe for circuit-breaker-tripped slots (recovery from transient outages)
   // Attempts a single reconnect every 30 minutes to see if the server has come back
   if (slot.circuit_breaker_tripped && !reconnect_attempted) {
-    static const unsigned long CIRCUIT_BREAKER_PROBE_INTERVAL_MS = 1800000UL; // 30 minutes
-    unsigned long probe_elapsed = (now_millis >= slot.last_reconnect_attempt) ?
-                                  (now_millis - slot.last_reconnect_attempt) :
-                                  (ULONG_MAX - slot.last_reconnect_attempt + now_millis + 1);
-    if (probe_elapsed >= CIRCUIT_BREAKER_PROBE_INTERVAL_MS) {
+    unsigned long probe_elapsed = MQTTConnectionPolicy::elapsedMs(
+        static_cast<uint32_t>(now_millis), static_cast<uint32_t>(slot.last_reconnect_attempt));
+    if (MQTTConnectionPolicy::circuitBreakerProbeDue(
+            static_cast<uint32_t>(now_millis), static_cast<uint32_t>(slot.last_reconnect_attempt))) {
       slot.last_reconnect_attempt = now_millis;
       reconnect_attempted = true;
       _last_slot_reconnect_ms = now_millis;
@@ -1686,24 +1682,18 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
   // Reconnect with exponential backoff (for disconnected slots that already have valid config)
   // Only one reconnect per maintenance cycle to prevent TLS handshakes from blocking other slots
   if (!slot.connected && slot.initial_connect_done && !slot.circuit_breaker_tripped && !reconnect_attempted) {
-    static const unsigned long SLOT_BACKOFF_MS[] = { 10000, 30000, 60000, 120000, 300000 };
-    static const uint8_t MAX_FAILURES_AT_MAX_BACKOFF = 3; // ~15 min at max backoff before giving up
-    unsigned long reconnect_elapsed = (now_millis >= slot.last_reconnect_attempt) ?
-                                    (now_millis - slot.last_reconnect_attempt) :
-                                    (ULONG_MAX - slot.last_reconnect_attempt + now_millis + 1);
-    unsigned int idx = (slot.reconnect_backoff < 5) ? slot.reconnect_backoff : 4;
-    unsigned long delay_ms = SLOT_BACKOFF_MS[idx] + (index * 3000UL); // stagger by slot index
-    if (reconnect_elapsed >= delay_ms) {
+    if (MQTTConnectionPolicy::reconnectDue(
+            static_cast<uint32_t>(now_millis), static_cast<uint32_t>(slot.last_reconnect_attempt),
+            slot.reconnect_backoff, static_cast<uint8_t>(index))) {
       slot.last_reconnect_attempt = now_millis;
-      if (slot.reconnect_backoff < 5) {
-        slot.reconnect_backoff++;
-      } else {
-        slot.max_backoff_failures++;
-        if (slot.max_backoff_failures >= MAX_FAILURES_AT_MAX_BACKOFF) {
-          slot.circuit_breaker_tripped = true;
-          MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker tripped after %d failures at max backoff - stopping reconnect attempts. Reconfigure slot to retry.", index + 1, slot.max_backoff_failures);
-          return;
-        }
+      MQTTConnectionPolicy::BackoffAdvance advance = MQTTConnectionPolicy::advanceBackoff(
+          slot.reconnect_backoff, slot.max_backoff_failures);
+      slot.reconnect_backoff = advance.reconnect_backoff;
+      slot.max_backoff_failures = advance.max_backoff_failures;
+      slot.circuit_breaker_tripped = advance.circuit_breaker_tripped;
+      if (!advance.should_reconnect) {
+        MQTT_DEBUG_PRINTLN("MQTT%d circuit breaker tripped after %d failures at max backoff - stopping reconnect attempts. Reconfigure slot to retry.", index + 1, slot.max_backoff_failures);
+        return;
       }
       MQTT_DEBUG_PRINTLN("MQTT%d reconnecting (backoff level %d, failures at max: %d, int_heap=%d)", index + 1, slot.reconnect_backoff, slot.max_backoff_failures,
           (int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
@@ -1740,14 +1730,12 @@ void MQTTBridge::maintainSlotConnection(int index, unsigned long now_millis, uns
 // renewal scheduling in maintainSlotConnection() can be derived from it.
 unsigned long MQTTBridge::slotTokenLifetime(int index) const {
   const MQTTSlot& slot = _slots[index];
-  unsigned long base_lifetime = 86400; // default 24h
+  unsigned long base_lifetime = MQTTConnectionPolicy::kDefaultJwtLifetimeSecs;
   if (slot.preset && slot.preset->auth_type == MQTT_AUTH_JWT && slot.preset->token_lifetime > 0) {
     base_lifetime = slot.preset->token_lifetime;
   }
-  // Stagger token expiry per slot to avoid simultaneous renewal/reconnect.
-  // Use 5% of lifetime per slot, capped at 300s, so short-lived tokens aren't over-reduced.
-  unsigned long stagger = index * min((unsigned long)300, base_lifetime / 20);
-  return base_lifetime - stagger;
+  return MQTTConnectionPolicy::jwtLifetimeSecs(
+      static_cast<uint32_t>(base_lifetime), static_cast<uint8_t>(index));
 }
 
 // How early (seconds before the token's exp claim) to renew the token AND
@@ -1763,13 +1751,6 @@ unsigned long MQTTBridge::slotTokenLifetime(int index) const {
 // lifetime/10 with a 60 s floor and 300 s cap: 24 h tokens renew 5 min early
 // (unchanged in practice), waev renews ~5 min early with ~5 throttled retry
 // windows, and degenerate short lifetimes still renew inside their validity.
-unsigned long MQTTBridge::tokenRenewalBufferSecs(unsigned long lifetime_secs) {
-  unsigned long buffer = lifetime_secs / 10;
-  if (buffer < 60) buffer = 60;
-  if (buffer > 300) buffer = 300;
-  return buffer;
-}
-
 bool MQTTBridge::createSlotAuthToken(int index) {
   if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
   MQTTSlot& slot = _slots[index];
@@ -1885,31 +1866,28 @@ bool MQTTBridge::publishToAllSlots(const char* topic, const char* payload, bool 
 // Presets use hardcoded topic logic; custom slots support user-defined templates.
 // ---------------------------------------------------------------------------
 bool MQTTBridge::substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size) {
-  const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
-  // Pure expansion lives in helpers/MQTTTopicTemplate.h (host-tested).
-  return mqttSubstituteTopic(tmpl, _iata, _device_id,
-                             _obs->mqtt_slot_token[slot_index], type_str, buf, buf_size);
+  return mqttBuildPublicationTopic(MQTT_ROUTE_CUSTOM, (int)type, tmpl,
+                                   _iata, _device_id, _obs->mqtt_slot_token[slot_index],
+                                   buf, buf_size);
 }
 
 bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size) {
-  if (index < 0 || index >= RUNTIME_MQTT_SLOTS) return false;
+  static_assert(
+      static_cast<int>(MSG_STATUS) == MQTT_PUBLICATION_STATUS &&
+      static_cast<int>(MSG_PACKETS) == MQTT_PUBLICATION_PACKETS &&
+      static_cast<int>(MSG_RAW) == MQTT_PUBLICATION_RAW,
+      "topic router enum drift");
+
+  if (!mqttTopicSlotIndexValid(index, RUNTIME_MQTT_SLOTS)) return false;
   const MQTTSlot& slot = _slots[index];
 
   // Preset slots: use hardcoded topic logic
   if (slot.preset) {
-    if (slot.preset->topic_style == MQTT_TOPIC_MESHRANK) {
-      // MeshRank: packets only, uses per-slot token in topic path
-      if (type != MSG_PACKETS) return false;
-      const char* token = _obs->mqtt_slot_token[index];
-      if (!token || token[0] == '\0') return false;
-      snprintf(topic_buf, buf_size, "meshrank/uplink/%s/%s/packets", token, _device_id);
-      return true;
-    }
-    // MQTT_TOPIC_MESHCORE (default for all other presets)
-    if (!isIATAValid()) return false;
-    const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
-    snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id, type_str);
-    return true;
+    MQTTTopicRouteStyle style = (slot.preset->topic_style == MQTT_TOPIC_MESHRANK)
+        ? MQTT_ROUTE_MESHRANK : MQTT_ROUTE_MESHCORE;
+    return mqttBuildPublicationTopic(style, (int)type, nullptr,
+                                     _iata, _device_id, _obs->mqtt_slot_token[index],
+                                     topic_buf, buf_size);
   }
 
   // Custom slots: use topic template if set, otherwise default meshcore format
@@ -1917,10 +1895,9 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
     return substituteTopicTemplate(_obs->mqtt_slot_topic[index], type, index, topic_buf, buf_size);
   }
   // Default: meshcore format
-  if (!isIATAValid()) return false;
-  const char* type_str = (type == MSG_STATUS) ? "status" : (type == MSG_PACKETS) ? "packets" : "raw";
-  snprintf(topic_buf, buf_size, "meshcore/%s/%s/%s", _iata, _device_id, type_str);
-  return true;
+  return mqttBuildPublicationTopic(MQTT_ROUTE_MESHCORE, (int)type, nullptr,
+                                   _iata, _device_id, _obs->mqtt_slot_token[index],
+                                   topic_buf, buf_size);
 }
 
 void MQTTBridge::publishStatusToSlot(int index) {
@@ -2451,7 +2428,9 @@ void MQTTBridge::processPacketQueue() {
       // Flush stale packets after extended disconnect
       if (_queue_disconnected_since == 0) {
         _queue_disconnected_since = now;
-      } else if ((now - _queue_disconnected_since) >= QUEUE_STALE_MS) {
+      } else if (MQTTPacketQueuePolicy::shouldFlushDisconnected(
+                     static_cast<uint32_t>(now),
+                     static_cast<uint32_t>(_queue_disconnected_since))) {
         QueuedPacket discard;
         while (xQueueReceive(_packet_queue_handle, &discard, 0) == pdTRUE) {}
         _queue_count = 0;
@@ -2467,19 +2446,18 @@ void MQTTBridge::processPacketQueue() {
 
   // Adaptive drain: burst-process when queue has backlog, gentle otherwise
   int processed = 0;
-  int max_per_loop = (_queue_count > 5) ? 5 : 1;
+  const MQTTPacketQueuePolicy::DrainBudget drain_budget =
+      MQTTPacketQueuePolicy::drainBudget(static_cast<size_t>(_queue_count));
   unsigned long loop_start_time = millis();
-  const unsigned long MAX_PROCESSING_TIME_MS = (_queue_count > 5) ? 100 : 30;
-  static const uint8_t MAX_QOS0_RETRY_ATTEMPTS = 3;
-  static const unsigned long RETRY_DELAY_BASE_MS = 300UL;
-  static const unsigned long RETRY_DELAY_JITTER_MS = 200UL;
   #ifdef MQTT_DIAG_VERBOSE
   static unsigned long last_retry_schedule_log = 0;
   #endif
 
-  while (processed < max_per_loop) {
-    unsigned long elapsed = millis() - loop_start_time;
-    if (elapsed > MAX_PROCESSING_TIME_MS) {
+  while (processed < drain_budget.max_packets) {
+    if (!MQTTPacketQueuePolicy::drainTimeAvailable(
+            static_cast<uint32_t>(millis()),
+            static_cast<uint32_t>(loop_start_time),
+            drain_budget.max_time_ms)) {
       break;
     }
 
@@ -2490,7 +2468,10 @@ void MQTTBridge::processPacketQueue() {
     }
 
     unsigned long now_ms = millis();
-    if (queued.next_retry_ms != 0 && now_ms < queued.next_retry_ms) {
+    if (!MQTTPacketQueuePolicy::retryReady(
+            static_cast<uint32_t>(now_ms),
+            static_cast<uint32_t>(queued.next_retry_ms),
+            queued.retry_attempts)) {
       // Not ready yet; put it back and stop draining this cycle.
       xQueueSend(_packet_queue_handle, &queued, 0);
       break;
@@ -2520,16 +2501,22 @@ void MQTTBridge::processPacketQueue() {
     }
 
     bool any_published = packet_published || raw_published;
-    if (!any_published && queued.retry_attempts < MAX_QOS0_RETRY_ATTEMPTS) {
-      queued.retry_attempts++;
-      unsigned long retry_delay_ms = RETRY_DELAY_BASE_MS + (now_ms % RETRY_DELAY_JITTER_MS);
-      queued.next_retry_ms = now_ms + retry_delay_ms;
+    const MQTTPacketQueuePolicy::RetryDecision retry =
+        MQTTPacketQueuePolicy::retryDecision(
+            any_published, queued.retry_attempts,
+            static_cast<uint32_t>(now_ms));
+    if (retry.action == MQTTPacketQueuePolicy::RetryAction::Schedule) {
+      queued.retry_attempts = retry.retry_attempts;
+      queued.next_retry_ms = retry.next_retry_ms;
       #ifdef MQTT_DIAG_VERBOSE
       if (now_ms - last_retry_schedule_log > 5000UL) {
-        unsigned long age_ms = (queued.timestamp > 0 && now_ms >= queued.timestamp) ? (now_ms - queued.timestamp) : 0;
+        unsigned long age_ms = queued.timestamp > 0
+            ? MQTTPacketQueuePolicy::elapsedMs(static_cast<uint32_t>(now_ms),
+                                               static_cast<uint32_t>(queued.timestamp))
+            : 0;
         MQTT_DEBUG_PRINTLN("Retry scheduled: attempt=%u/%u delay=%lu age=%lu q=%u pkt_type=%u packet_ok=%d raw_ok=%d",
-          (unsigned)queued.retry_attempts, (unsigned)MAX_QOS0_RETRY_ATTEMPTS,
-          retry_delay_ms, age_ms, (unsigned)uxQueueMessagesWaiting(_packet_queue_handle),
+          (unsigned)queued.retry_attempts, (unsigned)MQTTPacketQueuePolicy::kMaxQos0RetryAttempts,
+          (unsigned long)retry.delay_ms, age_ms, (unsigned)uxQueueMessagesWaiting(_packet_queue_handle),
           (unsigned)queued.packet_copy.getPayloadType(), packet_published ? 1 : 0, raw_published ? 1 : 0);
         last_retry_schedule_log = now_ms;
       }
@@ -2537,13 +2524,16 @@ void MQTTBridge::processPacketQueue() {
       if (xQueueSend(_packet_queue_handle, &queued, 0) != pdTRUE) {
         MQTT_DEBUG_PRINTLN("Retry requeue failed, dropping packet (attempt=%u)", queued.retry_attempts);
       }
-    } else if (!any_published) {
+    } else if (retry.action == MQTTPacketQueuePolicy::RetryAction::Drop) {
       // Intentional: QoS0 best-effort packets are dropped silently in normal
       // builds; detailed exhaustion logs are only emitted in verbose mode.
       #ifdef MQTT_DIAG_VERBOSE
       static unsigned long last_retry_drop_log = 0;
       if (now_ms - last_retry_drop_log > 60000UL) {
-        unsigned long age_ms = (queued.timestamp > 0 && now_ms >= queued.timestamp) ? (now_ms - queued.timestamp) : 0;
+        unsigned long age_ms = queued.timestamp > 0
+            ? MQTTPacketQueuePolicy::elapsedMs(static_cast<uint32_t>(now_ms),
+                                               static_cast<uint32_t>(queued.timestamp))
+            : 0;
         MQTT_DEBUG_PRINTLN("Packet dropped after retry exhaustion (attempts=%u age=%lu pkt_type=%u packet_ok=%d raw_ok=%d)",
           queued.retry_attempts, age_ms, (unsigned)queued.packet_copy.getPayloadType(),
           packet_published ? 1 : 0, raw_published ? 1 : 0);
@@ -2558,6 +2548,7 @@ void MQTTBridge::processPacketQueue() {
   #else
   // Non-ESP32: Use circular buffer
   if (_queue_count == 0) {
+    _queue_disconnected_since = 0;
     return;
   }
 
@@ -2570,33 +2561,48 @@ void MQTTBridge::processPacketQueue() {
         MQTT_DEBUG_PRINTLN("Queue has %d packets but no slots connected", _queue_count);
         _last_no_broker_log = now;
       }
+      if (_queue_disconnected_since == 0) {
+        _queue_disconnected_since = now;
+      } else if (MQTTPacketQueuePolicy::shouldFlushDisconnected(
+                     static_cast<uint32_t>(now),
+                     static_cast<uint32_t>(_queue_disconnected_since))) {
+        while (_queue_count > 0) {
+          dequeuePacket();
+        }
+        MQTT_DEBUG_PRINTLN("Flushed stale packet queue after %lu ms disconnected",
+                           now - _queue_disconnected_since);
+        _queue_disconnected_since = now;
+      }
     }
     return;
   }
 
+  _queue_disconnected_since = 0;
   _last_no_broker_log = 0;
 
   // Adaptive drain: burst-process when queue has backlog, gentle otherwise
   int processed = 0;
-  int max_per_loop = (_queue_count > 5) ? 5 : 1;
+  const MQTTPacketQueuePolicy::DrainBudget drain_budget =
+      MQTTPacketQueuePolicy::drainBudget(static_cast<size_t>(_queue_count));
   unsigned long loop_start_time = millis();
-  const unsigned long MAX_PROCESSING_TIME_MS = (_queue_count > 5) ? 100 : 30;
-  static const uint8_t MAX_QOS0_RETRY_ATTEMPTS = 3;
-  static const unsigned long RETRY_DELAY_BASE_MS = 300UL;
-  static const unsigned long RETRY_DELAY_JITTER_MS = 200UL;
   #ifdef MQTT_DIAG_VERBOSE
   static unsigned long last_retry_schedule_log = 0;
   #endif
 
-  while (_queue_count > 0 && processed < max_per_loop) {
-    unsigned long elapsed = millis() - loop_start_time;
-    if (elapsed > MAX_PROCESSING_TIME_MS) {
+  while (_queue_count > 0 && processed < drain_budget.max_packets) {
+    if (!MQTTPacketQueuePolicy::drainTimeAvailable(
+            static_cast<uint32_t>(millis()),
+            static_cast<uint32_t>(loop_start_time),
+            drain_budget.max_time_ms)) {
       break;
     }
 
     QueuedPacket& queued = _packet_queue[_queue_head];
     unsigned long now_ms = millis();
-    if (queued.next_retry_ms != 0 && now_ms < queued.next_retry_ms) {
+    if (!MQTTPacketQueuePolicy::retryReady(
+            static_cast<uint32_t>(now_ms),
+            static_cast<uint32_t>(queued.next_retry_ms),
+            queued.retry_attempts)) {
       break;
     }
 
@@ -2621,28 +2627,37 @@ void MQTTBridge::processPacketQueue() {
     }
 
     bool any_published = packet_published || raw_published;
-    if (!any_published && queued.retry_attempts < MAX_QOS0_RETRY_ATTEMPTS) {
-      queued.retry_attempts++;
-      unsigned long retry_delay_ms = RETRY_DELAY_BASE_MS + (now_ms % RETRY_DELAY_JITTER_MS);
-      queued.next_retry_ms = now_ms + retry_delay_ms;
+    const MQTTPacketQueuePolicy::RetryDecision retry =
+        MQTTPacketQueuePolicy::retryDecision(
+            any_published, queued.retry_attempts,
+            static_cast<uint32_t>(now_ms));
+    if (retry.action == MQTTPacketQueuePolicy::RetryAction::Schedule) {
+      queued.retry_attempts = retry.retry_attempts;
+      queued.next_retry_ms = retry.next_retry_ms;
       #ifdef MQTT_DIAG_VERBOSE
       if (now_ms - last_retry_schedule_log > 5000UL) {
-        unsigned long age_ms = (queued.timestamp > 0 && now_ms >= queued.timestamp) ? (now_ms - queued.timestamp) : 0;
+        unsigned long age_ms = queued.timestamp > 0
+            ? MQTTPacketQueuePolicy::elapsedMs(static_cast<uint32_t>(now_ms),
+                                               static_cast<uint32_t>(queued.timestamp))
+            : 0;
         MQTT_DEBUG_PRINTLN("Retry scheduled: attempt=%u/%u delay=%lu age=%lu q=%d pkt_type=%u packet_ok=%d raw_ok=%d",
-          (unsigned)queued.retry_attempts, (unsigned)MAX_QOS0_RETRY_ATTEMPTS,
-          retry_delay_ms, age_ms, _queue_count,
+          (unsigned)queued.retry_attempts, (unsigned)MQTTPacketQueuePolicy::kMaxQos0RetryAttempts,
+          (unsigned long)retry.delay_ms, age_ms, _queue_count,
           (unsigned)queued.packet_copy.getPayloadType(), packet_published ? 1 : 0, raw_published ? 1 : 0);
         last_retry_schedule_log = now_ms;
       }
       #endif
       break;  // keep packet at head for delayed retry
-    } else if (!any_published) {
+    } else if (retry.action == MQTTPacketQueuePolicy::RetryAction::Drop) {
       // Intentional: QoS0 best-effort packets are dropped silently in normal
       // builds; detailed exhaustion logs are only emitted in verbose mode.
       #ifdef MQTT_DIAG_VERBOSE
       static unsigned long last_retry_drop_log = 0;
       if (now_ms - last_retry_drop_log > 60000UL) {
-        unsigned long age_ms = (queued.timestamp > 0 && now_ms >= queued.timestamp) ? (now_ms - queued.timestamp) : 0;
+        unsigned long age_ms = queued.timestamp > 0
+            ? MQTTPacketQueuePolicy::elapsedMs(static_cast<uint32_t>(now_ms),
+                                               static_cast<uint32_t>(queued.timestamp))
+            : 0;
         MQTT_DEBUG_PRINTLN("Packet dropped after retry exhaustion (attempts=%u age=%lu pkt_type=%u packet_ok=%d raw_ok=%d)",
           queued.retry_attempts, age_ms, (unsigned)queued.packet_copy.getPayloadType(),
           packet_published ? 1 : 0, raw_published ? 1 : 0);
@@ -2970,15 +2985,24 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
 
   // Try to send to queue (non-blocking)
   if (xQueueSend(_packet_queue_handle, &queued, 0) != pdTRUE) {
+    const MQTTPacketQueuePolicy::EnqueueAction action =
+        MQTTPacketQueuePolicy::enqueueAction(
+            static_cast<size_t>(uxQueueMessagesWaiting(_packet_queue_handle)),
+            static_cast<size_t>(MAX_QUEUE_SIZE));
     QueuedPacket oldest;
-    if (xQueueReceive(_packet_queue_handle, &oldest, 0) == pdTRUE) {
+    if (action == MQTTPacketQueuePolicy::EnqueueAction::EvictOldestThenEnqueue &&
+        xQueueReceive(_packet_queue_handle, &oldest, 0) == pdTRUE) {
       MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet reference");
-      if (xQueueSend(_packet_queue_handle, &queued, 0) != pdTRUE) {
-        MQTT_DEBUG_PRINTLN("Failed to queue packet after dropping oldest");
-        return;
-      }
-    } else {
+    } else if (action == MQTTPacketQueuePolicy::EnqueueAction::Reject) {
+      MQTT_DEBUG_PRINTLN("Queue has no capacity");
+      return;
+    } else if (action == MQTTPacketQueuePolicy::EnqueueAction::EvictOldestThenEnqueue) {
       MQTT_DEBUG_PRINTLN("Queue full and cannot remove oldest packet");
+      return;
+    }
+    // If the consumer made room after the failed send, retry without evicting.
+    if (xQueueSend(_packet_queue_handle, &queued, 0) != pdTRUE) {
+      MQTT_DEBUG_PRINTLN("Failed to queue packet after overflow handling");
       return;
     }
   }
@@ -2987,10 +3011,15 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
   _queue_count = queue_messages;
   #else
   // Non-ESP32: Use circular buffer
-  if (_queue_count >= MAX_QUEUE_SIZE) {
+  const MQTTPacketQueuePolicy::EnqueueAction action =
+      MQTTPacketQueuePolicy::enqueueAction(
+          static_cast<size_t>(_queue_count), static_cast<size_t>(MAX_QUEUE_SIZE));
+  if (action == MQTTPacketQueuePolicy::EnqueueAction::EvictOldestThenEnqueue) {
     QueuedPacket& oldest = _packet_queue[_queue_head];
     MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet (queue size: %d)", _queue_count);
     dequeuePacket();
+  } else if (action == MQTTPacketQueuePolicy::EnqueueAction::Reject) {
+    return;
   }
 
   QueuedPacket& queued = _packet_queue[_queue_tail];
