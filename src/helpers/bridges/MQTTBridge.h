@@ -376,6 +376,11 @@ private:
   void getClientVersion(char* buffer, size_t buffer_size) const;
   void logMemoryStatus();
   void refreshOriginFromPrefs();
+  // begin()/end()-scoped PSRAM buffers. Each allocation is independent so a
+  // transient heap shortage degrades to the existing stack fallback instead
+  // of making the bridge unusable.
+  void allocateRuntimeBuffers();
+  void releaseRuntimeBuffers();
 
   // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt_prefs.
   // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).

@@ -2,6 +2,7 @@
 #include "../MQTTConnectionPolicy.h"
 #include "../MQTTMessageBuilder.h"
 #include "../MQTTPacketQueuePolicy.h"
+#include "../MQTTRuntimeBufferLifecycle.h"
 #include "../MQTTTopicRouter.h"
 #include "../TxtDataHelpers.h"
 #include <NTPClient.h>
@@ -488,7 +489,13 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       // so we must pass rules here.
       _timezone_storage(TimeChangeRule{"UTC", Last, Sun, Mar, 0, 0}, TimeChangeRule{"UTC", Last, Sun, Mar, 0, 0}),
       _timezone(&_timezone_storage),
+#if defined(BOARD_HAS_PSRAM)
+      _last_raw_data(nullptr),
+#endif
       _last_raw_len(0), _last_snr(0), _last_rssi(0), _last_raw_timestamp(0),
+#if defined(BOARD_HAS_PSRAM)
+      _publish_json_buffer(nullptr), _status_json_buffer(nullptr),
+#endif
       _identity(identity),
       _cached_has_connected_slots(false),
       _last_memory_check(0), _skipped_publishes(0),
@@ -567,18 +574,50 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #endif
   #endif
 
-  // On PSRAM boards, allocate raw radio buffer and JSON char buffers in PSRAM to preserve
-  // internal heap. On non-PSRAM boards these are inline arrays in the class object —
-  // no separate allocation needed.
-  #if defined(BOARD_HAS_PSRAM)
-  _last_raw_data       = (uint8_t*)psram_malloc(LAST_RAW_DATA_SIZE);
-  _publish_json_buffer = (char*)psram_malloc(PUBLISH_JSON_BUFFER_SIZE);
-  _status_json_buffer  = (char*)psram_malloc(STATUS_JSON_BUFFER_SIZE);
-  #else
+  // Non-PSRAM boards keep the raw cache inline for the bridge lifetime.
+  // PSRAM boards allocate their runtime buffers in begin(), after PSRAM has
+  // been probed/initialized, and release them in end().
+  #if !defined(BOARD_HAS_PSRAM)
   memset(_last_raw_data, 0, sizeof(_last_raw_data));
   #endif
   // JSON document scratch space is now a StaticJsonDocument inline class member —
   // no heap allocation needed; reused via doc.clear() on every publish.
+}
+
+void MQTTBridge::allocateRuntimeBuffers() {
+  #if defined(BOARD_HAS_PSRAM)
+  // Keep each allocation independent. A nullptr is deliberately retained on
+  // failure: status/packet publish paths already use stack fallbacks, and the
+  // next begin() will retry only the missing buffer.
+  _last_raw_data = static_cast<uint8_t*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _last_raw_data, LAST_RAW_DATA_SIZE, psram_malloc));
+  _publish_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _publish_json_buffer, PUBLISH_JSON_BUFFER_SIZE, psram_malloc));
+  _status_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _status_json_buffer, STATUS_JSON_BUFFER_SIZE, psram_malloc));
+  MQTT_DEBUG_PRINTLN("Runtime buffers: raw=%s publish=%s status=%s",
+      _last_raw_data ? "PSRAM" : "unavailable",
+      _publish_json_buffer ? "PSRAM" : "stack fallback",
+      _status_json_buffer ? "PSRAM" : "stack fallback");
+  #endif
+}
+
+void MQTTBridge::releaseRuntimeBuffers() {
+  #if defined(BOARD_HAS_PSRAM)
+  _last_raw_data = static_cast<uint8_t*>(MQTTRuntimeBufferLifecycle::release(
+      _last_raw_data, psram_free));
+  _publish_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
+      _publish_json_buffer, psram_free));
+  _status_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
+      _status_json_buffer, psram_free));
+  #endif
+
+  // Never pair a newly allocated raw buffer with metadata from a prior bridge
+  // run. This also makes non-PSRAM restarts discard their stale raw cache.
+  _last_raw_len = 0;
+  _last_snr = 0;
+  _last_rssi = 0;
+  _last_raw_timestamp = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +667,10 @@ void MQTTBridge::begin() {
     MQTT_DEBUG_PRINTLN("MQTT Bridge initialization skipped - WiFi credentials not configured");
     return;
   }
+
+  // These are begin()/end()-scoped on PSRAM targets. Allocation happens after
+  // the PSRAM probe above so a late psramInit() has taken effect.
+  allocateRuntimeBuffers();
 
   refreshOriginFromPrefs();
 
@@ -743,6 +786,7 @@ void MQTTBridge::begin() {
     psram_free(_packet_queue_storage);
     #endif
     _packet_queue_storage = nullptr;
+    releaseRuntimeBuffers();
     return;
   }
 
@@ -781,6 +825,7 @@ void MQTTBridge::begin() {
     psram_free(_packet_queue_storage);
     #endif
     _packet_queue_storage = nullptr;
+    releaseRuntimeBuffers();
     return;
   }
 
@@ -863,13 +908,8 @@ void MQTTBridge::end() {
   // the MQTT memory-defrag work — nothing to delete. _timezone always
   // points at &_timezone_storage and stays valid for the bridge lifetime.
 
-  // Free PSRAM-backed buffers (non-PSRAM builds use inline class arrays — no free needed)
-  #if defined(BOARD_HAS_PSRAM)
-  psram_free(_last_raw_data);       _last_raw_data = nullptr;
-  psram_free(_publish_json_buffer); _publish_json_buffer = nullptr;
-  psram_free(_status_json_buffer);  _status_json_buffer = nullptr;
-  #endif
-  // JSON documents are now StaticJsonDocument inline members — no heap allocation to free.
+  releaseRuntimeBuffers();
+  // JSON documents are StaticJsonDocument inline members — no heap allocation to free.
 
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
