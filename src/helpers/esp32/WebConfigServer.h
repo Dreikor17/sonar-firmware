@@ -85,6 +85,13 @@ public:
 private:
   static const int MAX_BATCH = 24;
   static const size_t MAX_BODY = 4096;
+  // Teardown timing. requestStop() closes the listener immediately; the server
+  // object is freed once (a) the settle window has elapsed so any request
+  // already queued on the async_tcp task has been counted, and (b) no request
+  // is still in flight — but never later than the hard cap, so a stalled client
+  // can't pin the server (and its heap) open forever.
+  static const uint32_t STOP_SETTLE_MS = 2000;
+  static const uint32_t STOP_MAX_WAIT_MS = 10000;
   enum BatchState : uint8_t { BATCH_IDLE = 0, BATCH_PENDING, BATCH_DONE };
   struct BatchEntry {
     char key[24];     // allowlisted `set` key (echoed back to the UI)
@@ -141,14 +148,20 @@ private:
   uint32_t _diag_last = 0;
 
   volatile uint32_t _last_activity = 0;
-  uint32_t _reboot_at = 0;      // 0 = none scheduled
-  uint32_t _delete_at = 0;      // deferred teardown deadline
+  uint32_t _reboot_at = 0;         // 0 = none scheduled
+  uint32_t _delete_at = 0;         // earliest teardown time (settle window ends)
+  uint32_t _delete_deadline = 0;   // hard cap: free even if requests are still in flight
+  // Requests currently being processed/streamed. Mutated only on the async_tcp
+  // task (increment in beginRequest, decrement in the per-request onDisconnect),
+  // read on the loop task in tick(); a 32-bit read is atomic so no lock needed.
+  volatile int _inflight = 0;
   volatile uint32_t _stats_wanted_until = 0;
   uint32_t _stats_built_at = 0;
   char _stats_json[1024] = {0};
 
   void createServer();
   void registerRoutes();
+  void beginRequest(AsyncWebServerRequest* req);  // log + in-flight tracking
   void drainBatch(uint32_t now);
   void finalizeTeardown();
   bool checkAuth(AsyncWebServerRequest* req);

@@ -217,13 +217,27 @@ void WebConfigServer::requestStop() {
   if (_dns) _dns->stop();
   _mode = MODE_OFF;
   _stopping = true;
-  // Deleting an AsyncWebServer with live connections is a known crash source;
-  // give in-flight responses a grace period before freeing.
-  _delete_at = millis() + 2000;
+  // Deleting an AsyncWebServer with a live request is a known crash source (the
+  // route lambdas capture `this`). end() above stops accepting new connections;
+  // tick() then frees the server once in-flight requests have drained (see
+  // _inflight), bounded by a settle window and a hard cap.
+  uint32_t now = millis();
+  _delete_at = now + STOP_SETTLE_MS;
   if (_delete_at == 0) _delete_at = 1;
+  _delete_deadline = now + STOP_MAX_WAIT_MS;
+  if (_delete_deadline == 0) _delete_deadline = 1;
 }
 
 void WebConfigServer::finalizeTeardown() {
+  // Design note: we free the server on stop rather than keeping one persistent
+  // instance for the firmware lifetime. A persistent server would avoid this
+  // delete entirely (no UAF window, no start/stop heap churn), but the route
+  // lambdas capture `this`, so keeping them alive means keeping the whole
+  // ~10 KB WebConfigServer (the _batch[] array dominates) resident forever on
+  // any node that ever opened the portal — on top of AsyncTCP's ~16 KB worker
+  // task, which is never reclaimed either way. That permanent heap cost was
+  // ruled out (fleet includes tight non-PSRAM boards); instead we free on stop
+  // and gate the delete on _inflight so a live request is never freed under it.
   delete _server;
   _server = NULL;
   delete _dns;
@@ -241,6 +255,8 @@ void WebConfigServer::finalizeTeardown() {
   }
   _stopping = false;
   _delete_at = 0;
+  _delete_deadline = 0;
+  _inflight = 0;
   _reboot_at = 0;
   _batch_state = BATCH_IDLE;
   _batch_next = 0;
@@ -252,7 +268,14 @@ void WebConfigServer::finalizeTeardown() {
 
 void WebConfigServer::tick(uint32_t now) {
   if (_stopping) {
-    if (_delete_at && (int32_t)(now - _delete_at) >= 0) finalizeTeardown();
+    if (_delete_at) {
+      // Free once the settle window has passed AND nothing is in flight, or
+      // unconditionally at the hard cap. The settle window lets any request
+      // already queued when we closed the listener get counted first.
+      bool settled = (int32_t)(now - _delete_at) >= 0;
+      bool capped = (int32_t)(now - _delete_deadline) >= 0;
+      if ((settled && _inflight <= 0) || capped) finalizeTeardown();
+    }
     return;
   }
   if (_mode == MODE_OFF) return;
@@ -346,26 +369,37 @@ static void wcLogReq(AsyncWebServerRequest* r) {
   Serial.printf("WC: http %s %s\n", r->methodToString(), r->url().c_str());
 }
 
+// Called at the top of every route handler (async_tcp task). Counts the request
+// as in flight until its connection closes, so requestStop() can wait for the
+// last response to finish before freeing the server instead of guessing with a
+// fixed delay. Responses send `Connection: close`, so onDisconnect fires as soon
+// as the reply is delivered — no lingering keep-alive connections to over-count.
+void WebConfigServer::beginRequest(AsyncWebServerRequest* req) {
+  wcLogReq(req);
+  _inflight++;
+  req->onDisconnect([this]() { if (_inflight > 0) _inflight--; });
+}
+
 void WebConfigServer::registerRoutes() {
-  _server->on("/", HTTP_GET, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleRoot(r); });
-  _server->on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleStatus(r); });
-  _server->on("/api/presets", HTTP_GET, [this](AsyncWebServerRequest* r) { wcLogReq(r); handlePresets(r); });
-  _server->on("/api/login", HTTP_POST, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleLogin(r); },
+  _server->on("/", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleRoot(r); });
+  _server->on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleStatus(r); });
+  _server->on("/api/presets", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handlePresets(r); });
+  _server->on("/api/login", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handleLogin(r); },
               NULL, collectBody);
-  _server->on("/api/logout", HTTP_POST, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleLogout(r); });
+  _server->on("/api/logout", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handleLogout(r); });
   // NB: plain-string routes match sub-paths too ("/api/config" matches
   // "/api/config/result") and handlers run in registration order, so the more
   // specific route MUST be registered first or it never fires. This was why
   // save confirmations were lost: result polls were answered with config JSON.
-  _server->on("/api/config/result", HTTP_GET, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleConfigResult(r); });
-  _server->on("/api/config", HTTP_GET, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleConfigGet(r); });
-  _server->on("/api/config", HTTP_POST, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleConfigPost(r); },
+  _server->on("/api/config/result", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleConfigResult(r); });
+  _server->on("/api/config", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleConfigGet(r); });
+  _server->on("/api/config", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handleConfigPost(r); },
               NULL, collectBody);
-  _server->on("/api/stats", HTTP_GET, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleStats(r); });
-  _server->on("/api/scan", HTTP_GET, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleScan(r); });
-  _server->on("/api/reboot", HTTP_POST, [this](AsyncWebServerRequest* r) { wcLogReq(r); handleReboot(r); });
-  _server->on("/api/portal/exit", HTTP_POST, [this](AsyncWebServerRequest* r) { wcLogReq(r); handlePortalExit(r); });
-  _server->onNotFound([this](AsyncWebServerRequest* r) { wcLogReq(r); handleNotFound(r); });
+  _server->on("/api/stats", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleStats(r); });
+  _server->on("/api/scan", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleScan(r); });
+  _server->on("/api/reboot", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handleReboot(r); });
+  _server->on("/api/portal/exit", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handlePortalExit(r); });
+  _server->onNotFound([this](AsyncWebServerRequest* r) { beginRequest(r); handleNotFound(r); });
 }
 
 // Accumulate a small JSON body into request->_tempObject (freed automatically
