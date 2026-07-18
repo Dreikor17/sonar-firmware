@@ -47,6 +47,12 @@ struct WCLock {
 };
 
 WebConfigServer* WebConfigServer::_active = NULL;
+AsyncWebServer* WebConfigServer::_host = NULL;
+
+// Protects the permanent route host's active-session pointer and handler
+// references across the loop and async_tcp cores. The critical sections only
+// copy a pointer/update a counter; handlers themselves never run under it.
+static portMUX_TYPE s_wc_route_mux = portMUX_INITIALIZER_UNLOCKED;
 
 WebConfigServer::WebConfigServer(NodePrefs* prefs, MQTTPrefs* obs, Callbacks* callbacks,
                                  const uint8_t* pub_key, const char* fw_ver,
@@ -54,11 +60,10 @@ WebConfigServer::WebConfigServer(NodePrefs* prefs, MQTTPrefs* obs, Callbacks* ca
     : _prefs(prefs), _obs(obs), _cb(callbacks), _pub_key(pub_key),
       _fw_ver(fw_ver), _role(role), _board_name(board_name) {
   _mux = xSemaphoreCreateMutex();
-  _active = this;
 }
 
 WebConfigServer::~WebConfigServer() {
-  if (_active == this) _active = NULL;
+  detachRoutes();
   if (_mux) vSemaphoreDelete(_mux);
 }
 
@@ -120,8 +125,8 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   _dns = new DNSServer();
   _dns->start(53, "*", ip);  // captive portal: every name resolves to us
 
-  createServer();
   _mode = MODE_SETUP;
+  createServer();
   _was_setup_ap = true;
   _last_activity = millis();
   WiFi.scanNetworks(true);  // pre-populate the SSID picker
@@ -139,8 +144,8 @@ bool WebConfigServer::startLanMode(char reply[]) {
     strcpy(reply, "Err: WiFi not connected");
     return false;
   }
-  createServer();
   _mode = MODE_LAN;
+  createServer();
   _last_activity = millis();
 
   int pos = sprintf(reply, "WebConfig started: http://%s/ (admin password login)",
@@ -152,7 +157,13 @@ bool WebConfigServer::startLanMode(char reply[]) {
 }
 
 void WebConfigServer::createServer() {
-  _server = new AsyncWebServer(80);
+  if (_host == NULL) {
+    _host = new AsyncWebServer(80);
+    _server = _host;
+    registerRoutes();
+  } else {
+    _server = _host;
+  }
   // iOS caches plain-HTTP GETs aggressively (keyed by URL, surviving even a
   // device reflash behind the same IP), which poisons /api/config/result and
   // friends with stale responses from earlier sessions. Forbid caching on
@@ -167,38 +178,43 @@ void WebConfigServer::createServer() {
     DefaultHeaders::Instance().addHeader("Cache-Control", "no-store");
     s_default_headers_registered = true;
   }
-  registerRoutes();
+  attachRoutes();
   _server->begin();
 }
 
 void WebConfigServer::requestStop() {
   if (_mode == MODE_OFF && !_stopping) return;
+  // Detach first. Any request whose headers/body finish parsing after this point
+  // is dispatched by the permanent host as 503 and never sees this session.
+  detachRoutes();
   if (_server) _server->end();
   if (_dns) _dns->stop();
   _mode = MODE_OFF;
   _stopping = true;
-  // Deleting an AsyncWebServer with a live request is a known crash source (the
-  // route lambdas capture `this`). end() above stops accepting new connections;
-  // tick() then frees the server once in-flight requests have drained (see
-  // _inflight), bounded by a settle window and a hard cap.
-  uint32_t now = millis();
-  _delete_at = now + STOP_SETTLE_MS;
-  if (_delete_at == 0) _delete_at = 1;
-  _delete_deadline = now + STOP_MAX_WAIT_MS;
-  if (_delete_deadline == 0) _delete_deadline = 1;
+  uint32_t warn_at = millis() + STOP_WARN_MS;
+  _stop_warn_at = warn_at ? warn_at : 1;
+  _stop_warned = false;
 }
 
 void WebConfigServer::finalizeTeardown() {
-  // Design note: we free the server on stop rather than keeping one persistent
-  // instance for the firmware lifetime. A persistent server would avoid this
-  // delete entirely (no UAF window, no start/stop heap churn), but the route
-  // lambdas capture `this`, so keeping them alive means keeping the whole
-  // ~10 KB WebConfigServer (the _batch[] array dominates) resident forever on
-  // any node that ever opened the portal — on top of AsyncTCP's ~16 KB worker
-  // task, which is never reclaimed either way. That permanent heap cost was
-  // ruled out (fleet includes tight non-PSRAM boards); instead we free on stop
-  // and gate the delete on _inflight so a live request is never freed under it.
-  delete _server;
+  // `_host` and its routes are process-lifetime. AsyncWebServerRequest retains
+  // its server pointer until disconnect, so deleting the host here cannot be
+  // made safe using route-level request counts. Only the per-run session is
+  // reclaimed by MyMesh after this method reports completion.
+  //
+  // Design note (reverses the earlier free-on-stop approach): stop used to
+  // `delete _server` here once an in-flight request count hit zero, gated by a
+  // settle window and a hard cap. That could never be race-free - the hard cap
+  // freed the server even with a request still in flight, and because the
+  // request holds the server pointer until it disconnects, no request count can
+  // close that window. The disconnect UAF that motivated this file lived
+  // exactly there. We now keep the AsyncWebServer resident for the firmware
+  // lifetime (a small, bounded permanent cost: the server object + route table;
+  // the ~10 KB session with its _batch[] array is still reclaimed, and the
+  // listener socket is released by _server->end() on stop) and route requests
+  // through the currently attached session, so nothing a live request points at
+  // is ever freed.
+  
   _server = NULL;
   delete _dns;
   _dns = NULL;
@@ -214,9 +230,8 @@ void WebConfigServer::finalizeTeardown() {
     _was_setup_ap = false;
   }
   _stopping = false;
-  _delete_at = 0;
-  _delete_deadline = 0;
-  _inflight = 0;
+  _stop_warn_at = 0;
+  _stop_warned = false;
   _reboot_at = 0;
   _batch_state = BATCH_IDLE;
   _batch_next = 0;
@@ -228,13 +243,13 @@ void WebConfigServer::finalizeTeardown() {
 
 void WebConfigServer::tick(uint32_t now) {
   if (_stopping) {
-    if (_delete_at) {
-      // Free once the settle window has passed AND nothing is in flight, or
-      // unconditionally at the hard cap. The settle window lets any request
-      // already queued when we closed the listener get counted first.
-      bool settled = (int32_t)(now - _delete_at) >= 0;
-      bool capped = (int32_t)(now - _delete_deadline) >= 0;
-      if ((settled && _inflight <= 0) || capped) finalizeTeardown();
+    uint32_t refs = handlerRefCount();
+    if (refs == 0) {
+      finalizeTeardown();
+    } else if (!_stop_warned && _stop_warn_at && (int32_t)(now - _stop_warn_at) >= 0) {
+      _stop_warned = true;
+      Serial.printf("WC: stop waiting for %lu handler(s); retaining session safely\n",
+                    (unsigned long)refs);
     }
     return;
   }
@@ -329,37 +344,67 @@ static void wcLogReq(AsyncWebServerRequest* r) {
   Serial.printf("WC: http %s %s\n", r->methodToString(), r->url().c_str());
 }
 
-// Called at the top of every route handler (async_tcp task). Counts the request
-// as in flight until its connection closes, so requestStop() can wait for the
-// last response to finish before freeing the server instead of guessing with a
-// fixed delay. Responses send `Connection: close`, so onDisconnect fires as soon
-// as the reply is delivered — no lingering keep-alive connections to over-count.
-void WebConfigServer::beginRequest(AsyncWebServerRequest* req) {
+void WebConfigServer::attachRoutes() {
+  portENTER_CRITICAL(&s_wc_route_mux);
+  _active = this;
+  portEXIT_CRITICAL(&s_wc_route_mux);
+}
+
+void WebConfigServer::detachRoutes() {
+  portENTER_CRITICAL(&s_wc_route_mux);
+  if (_active == this) _active = NULL;
+  portEXIT_CRITICAL(&s_wc_route_mux);
+}
+
+uint32_t WebConfigServer::handlerRefCount() const {
+  portENTER_CRITICAL(&s_wc_route_mux);
+  uint32_t refs = _handler_refs;
+  portEXIT_CRITICAL(&s_wc_route_mux);
+  return refs;
+}
+
+void WebConfigServer::dispatchRequest(AsyncWebServerRequest* req, RequestHandler handler) {
   wcLogReq(req);
-  _inflight++;
-  req->onDisconnect([this]() { if (_inflight > 0) _inflight--; });
+  WebConfigServer* target = NULL;
+  portENTER_CRITICAL(&s_wc_route_mux);
+  if (_active != NULL) {
+    target = _active;
+    target->_handler_refs++;
+  }
+  portEXIT_CRITICAL(&s_wc_route_mux);
+
+  if (target == NULL) {
+    req->send(503, "application/json", "{\"error\":\"webconfig stopped\"}");
+    return;
+  }
+
+  (target->*handler)(req);
+
+  portENTER_CRITICAL(&s_wc_route_mux);
+  if (target->_handler_refs > 0) target->_handler_refs--;
+  portEXIT_CRITICAL(&s_wc_route_mux);
 }
 
 void WebConfigServer::registerRoutes() {
-  _server->on("/", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleRoot(r); });
-  _server->on("/api/status", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleStatus(r); });
-  _server->on("/api/presets", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handlePresets(r); });
-  _server->on("/api/login", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handleLogin(r); },
+  _server->on("/", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleRoot); });
+  _server->on("/api/status", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleStatus); });
+  _server->on("/api/presets", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handlePresets); });
+  _server->on("/api/login", HTTP_POST, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleLogin); },
               NULL, collectBody);
-  _server->on("/api/logout", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handleLogout(r); });
+  _server->on("/api/logout", HTTP_POST, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleLogout); });
   // NB: plain-string routes match sub-paths too ("/api/config" matches
   // "/api/config/result") and handlers run in registration order, so the more
   // specific route MUST be registered first or it never fires. This was why
   // save confirmations were lost: result polls were answered with config JSON.
-  _server->on("/api/config/result", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleConfigResult(r); });
-  _server->on("/api/config", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleConfigGet(r); });
-  _server->on("/api/config", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handleConfigPost(r); },
+  _server->on("/api/config/result", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleConfigResult); });
+  _server->on("/api/config", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleConfigGet); });
+  _server->on("/api/config", HTTP_POST, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleConfigPost); },
               NULL, collectBody);
-  _server->on("/api/stats", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleStats(r); });
-  _server->on("/api/scan", HTTP_GET, [this](AsyncWebServerRequest* r) { beginRequest(r); handleScan(r); });
-  _server->on("/api/reboot", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handleReboot(r); });
-  _server->on("/api/portal/exit", HTTP_POST, [this](AsyncWebServerRequest* r) { beginRequest(r); handlePortalExit(r); });
-  _server->onNotFound([this](AsyncWebServerRequest* r) { beginRequest(r); handleNotFound(r); });
+  _server->on("/api/stats", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleStats); });
+  _server->on("/api/scan", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleScan); });
+  _server->on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleReboot); });
+  _server->on("/api/portal/exit", HTTP_POST, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handlePortalExit); });
+  _server->onNotFound([](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleNotFound); });
 }
 
 // Accumulate a small JSON body into request->_tempObject (freed automatically
@@ -577,11 +622,28 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
   }
   bool reboot_after = doc["reboot"] | false;
   const char* reqid = doc["reqid"] | "";
+  if (!wcIsValidReqId(reqid)) {
+    req->send(400, "application/json", "{\"error\":\"bad reqid\"}");
+    return;
+  }
   JsonObject set = doc["set"];
 
   WCLock lock(_mux);
   // A DONE batch stays readable until the next POST claims the slot, so a
   // client that lost the result response can re-poll instead of failing.
+  // Repeating a POST with the same request ID is also idempotent: acknowledge
+  // the batch already occupying the slot instead of applying its commands a
+  // second time after an ambiguous network failure.
+  if (_batch_state != BATCH_IDLE && strcmp(reqid, _batch_reqid) == 0) {
+    StaticJsonDocument<96> ack;
+    ack["state"] = _batch_state == BATCH_DONE ? "done" : "pending";
+    ack["count"] = _batch_count;
+    ack["reqid"] = (const char*)_batch_reqid;
+    String out;
+    serializeJson(ack, out);
+    req->send(202, "application/json", out);
+    return;
+  }
   if (_batch_state == BATCH_PENDING) {
     // Echo the in-flight batch's reqid so the caller can tell its own retry
     // (same reqid — landed, keep polling) from another client's save.
@@ -659,6 +721,15 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
 void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
   if (_mode == MODE_OFF) { Serial.println("WC: result read -> 503 (mode off)"); req->send(503); return; }
   if (!checkAuth(req)) { Serial.println("WC: result read -> 401"); req->send(401, "application/json", "{\"error\":\"auth\"}"); return; }
+  if (!req->hasParam("reqid")) {
+    req->send(400, "application/json", "{\"error\":\"bad reqid\"}");
+    return;
+  }
+  String requested_reqid = req->getParam("reqid")->value();
+  if (!wcIsValidReqId(requested_reqid.c_str())) {
+    req->send(400, "application/json", "{\"error\":\"bad reqid\"}");
+    return;
+  }
 
   // Entry print BEFORE the lock (racy state read is fine for diag): if this
   // fires but no branch print follows, the handler is blocked on _mux.
@@ -666,7 +737,16 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
   WCLock lock(_mux);
   if (_batch_state == BATCH_IDLE) {
     Serial.println("WC: result read -> idle");
-    req->send(200, "application/json", "{\"state\":\"idle\"}");
+    StaticJsonDocument<64> idle;
+    idle["state"] = "idle";
+    idle["reqid"] = requested_reqid;
+    String out;
+    serializeJson(idle, out);
+    req->send(200, "application/json", out);
+    return;
+  }
+  if (strcmp(requested_reqid.c_str(), _batch_reqid) != 0) {
+    req->send(404, "application/json", "{\"error\":\"unknown request\"}");
     return;
   }
   if (_batch_state == BATCH_PENDING) {

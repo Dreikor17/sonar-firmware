@@ -31,6 +31,7 @@ import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX_HTML = os.path.join(HERE, "..", "webui", "index.html")
@@ -267,6 +268,10 @@ def is_secret_key(key):
     return key == "wifi.pwd" or bool(re.match(r"^mqtt[1-6]\.(password|token)$", key))
 
 
+def valid_reqid(reqid):
+    return isinstance(reqid, str) and bool(re.fullmatch(r"[0-9A-Fa-f]{16}", reqid))
+
+
 # ---------------------------------------------------------------------------
 # HTTP handler
 # ---------------------------------------------------------------------------
@@ -383,10 +388,17 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._json(400, {"error": "bad json"})
         reqid = body.get("reqid", "")
+        if not valid_reqid(reqid):
+            return self._json(400, {"error": "bad reqid"})
         reboot = bool(body.get("reboot", False))
         setmap = body.get("set", {}) or {}
 
         with ST.lock:
+            if ST.batch.get("state") != "idle" and ST.batch.get("reqid") == reqid:
+                return self._json(202, {
+                    "state": ST.batch["state"], "count": len(ST.batch.get("results", [])),
+                    "reqid": reqid,
+                })
             if ST.batch.get("state") == "pending":
                 return self._json(409, {"error": "busy", "reqid": ST.batch.get("reqid", "")})
             # drop unchanged secrets (sentinel), like the firmware does
@@ -407,10 +419,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(202, {"state": "pending", "count": len(entries), "reqid": reqid})
 
     def _config_result(self):
+        query = parse_qs(urlsplit(self.path).query)
+        reqid = query.get("reqid", [""])[0]
+        if not valid_reqid(reqid):
+            return self._json(400, {"error": "bad reqid"})
         with ST.lock:
             b = ST.batch
             if b.get("state") == "idle":
-                return self._json(200, {"state": "idle"})
+                return self._json(200, {"state": "idle", "reqid": reqid})
+            if b.get("reqid") != reqid:
+                return self._json(404, {"error": "unknown request"})
             if b["state"] == "pending" and time.time() < b["done_at"]:
                 return self._json(200, {"state": "pending", "reqid": b["reqid"]})
             b["state"] = "done"      # stays readable until next POST

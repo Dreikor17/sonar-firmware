@@ -60,3 +60,18 @@ static inline bool wcIsSecretKey(const char* key) {
       && (strcmp(&key[6], "password") == 0 || strcmp(&key[6], "token") == 0)) return true;
   return false;
 }
+
+// Browser-generated request IDs are exactly eight random bytes encoded as
+// hexadecimal. Keeping the grammar deliberately small makes the ID safe to
+// echo in JSON/logs and prevents an empty or truncated ID from weakening the
+// save/result correlation contract.
+static inline bool wcIsValidReqId(const char* reqid) {
+  if (reqid == NULL || strlen(reqid) != 16) return false;
+  for (size_t i = 0; i < 16; i++) {
+    char c = reqid[i];
+    if (!((c >= '0' && c <= '9') ||
+          (c >= 'a' && c <= 'f') ||
+          (c >= 'A' && c <= 'F'))) return false;
+  }
+  return true;
+}

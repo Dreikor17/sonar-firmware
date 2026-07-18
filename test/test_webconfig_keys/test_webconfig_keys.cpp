@@ -98,6 +98,23 @@ TEST(WebConfigKeys, EverySecretKeyIsAlsoAllowed) {
   }
 }
 
+// ---- request correlation -------------------------------------------------
+
+TEST(WebConfigKeys, AcceptsExactHexRequestIds) {
+  EXPECT_TRUE(wcIsValidReqId("0123456789abcdef"));
+  EXPECT_TRUE(wcIsValidReqId("ABCDEF0123456789"));
+}
+
+TEST(WebConfigKeys, RejectsMissingMalformedOrWrongLengthRequestIds) {
+  EXPECT_FALSE(wcIsValidReqId(NULL));
+  EXPECT_FALSE(wcIsValidReqId(""));
+  EXPECT_FALSE(wcIsValidReqId("0123456789abcde"));
+  EXPECT_FALSE(wcIsValidReqId("0123456789abcdef0"));
+  EXPECT_FALSE(wcIsValidReqId("0123456789abcdeg"));
+  EXPECT_FALSE(wcIsValidReqId("01234567-9abcdef"));
+  EXPECT_FALSE(wcIsValidReqId("01234567 9abcdef"));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

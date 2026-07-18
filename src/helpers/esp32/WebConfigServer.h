@@ -14,6 +14,10 @@
 // are marshaled into a single-slot command batch that tick() - called from
 // MyMesh::loop() on the Arduino loop task - drains through the existing CLI
 // `set` handlers. Prefs-struct reads and batch state are guarded by _mux.
+// The HTTP server/routes live for the firmware lifetime; routes acquire the
+// currently attached WebConfigServer session only for the synchronous handler
+// call. This lets a stopped session be reclaimed without deleting an
+// AsyncWebServer that may still be referenced by a partially received request.
 //
 // No persisted state: everything here is RAM-only, so prefs-file layouts
 // (fleet-critical) are untouched.
@@ -54,7 +58,7 @@ public:
     virtual void onConfigBatchEnd() {}
     // Fill buf with the stats JSON snapshot. Called from tick() (loop task).
     virtual void buildStatsJson(char* buf, size_t buf_size) = 0;
-    // Teardown finished (server + DNS freed, WiFi mode restored).
+    // Teardown finished (session + DNS freed, WiFi mode restored).
     virtual void onWebConfigStopped() {}
   };
 
@@ -75,7 +79,7 @@ public:
 
   bool startSetupMode(char reply[]);   // open SoftAP + DNS captive portal
   bool startLanMode(char reply[]);     // bind to existing STA connection
-  void requestStop();                  // stop listening now, free after grace period
+  void requestStop();                  // stop listening and detach this session
   void tick(uint32_t now);             // call every loop iteration
 
   Mode mode() const { return _mode; }
@@ -85,13 +89,10 @@ public:
 private:
   static const int MAX_BATCH = 24;
   static const size_t MAX_BODY = 4096;
-  // Teardown timing. requestStop() closes the listener immediately; the server
-  // object is freed once (a) the settle window has elapsed so any request
-  // already queued on the async_tcp task has been counted, and (b) no request
-  // is still in flight — but never later than the hard cap, so a stalled client
-  // can't pin the server (and its heap) open forever.
-  static const uint32_t STOP_SETTLE_MS = 2000;
-  static const uint32_t STOP_MAX_WAIT_MS = 10000;
+  // A detached session normally drains immediately because handlers are short.
+  // If one does not, keep the session alive (safe) and emit a diagnostic rather
+  // than freeing memory still referenced by the async task.
+  static const uint32_t STOP_WARN_MS = 10000;
   enum BatchState : uint8_t { BATCH_IDLE = 0, BATCH_PENDING, BATCH_DONE };
   struct BatchEntry {
     char key[24];     // allowlisted `set` key (echoed back to the UI)
@@ -115,8 +116,12 @@ private:
   bool _was_setup_ap = false;
   char _ap_ssid[33] = {0};
 
-  // Most-recently-created instance, for the display's getSetupInfo() poll.
+  // Currently attached session, also used by the display's setup-info poll.
   static WebConfigServer* _active;
+  // Process-lifetime listener and route table. Requests retain a pointer to the
+  // AsyncWebServer internally until disconnect, so this object is deliberately
+  // never deleted during normal firmware operation.
+  static AsyncWebServer* _host;
 
   // Command batch: filled by async_tcp under _mux, drained by tick().
   volatile BatchState _batch_state = BATCH_IDLE;
@@ -149,19 +154,22 @@ private:
 
   volatile uint32_t _last_activity = 0;
   uint32_t _reboot_at = 0;         // 0 = none scheduled
-  uint32_t _delete_at = 0;         // earliest teardown time (settle window ends)
-  uint32_t _delete_deadline = 0;   // hard cap: free even if requests are still in flight
-  // Requests currently being processed/streamed. Mutated only on the async_tcp
-  // task (increment in beginRequest, decrement in the per-request onDisconnect),
-  // read on the loop task in tick(); a 32-bit read is atomic so no lock needed.
-  volatile int _inflight = 0;
+  uint32_t _stop_warn_at = 0;
+  bool _stop_warned = false;
+  // Number of synchronous route handlers currently using this session. Access
+  // is serialized by the file-local route spinlock in WebConfigServer.cpp.
+  uint32_t _handler_refs = 0;
   volatile uint32_t _stats_wanted_until = 0;
   uint32_t _stats_built_at = 0;
   char _stats_json[1024] = {0};
 
   void createServer();
   void registerRoutes();
-  void beginRequest(AsyncWebServerRequest* req);  // log + in-flight tracking
+  typedef void (WebConfigServer::*RequestHandler)(AsyncWebServerRequest*);
+  static void dispatchRequest(AsyncWebServerRequest* req, RequestHandler handler);
+  void attachRoutes();
+  void detachRoutes();
+  uint32_t handlerRefCount() const;
   void drainBatch(uint32_t now);
   void finalizeTeardown();
   bool checkAuth(AsyncWebServerRequest* req);

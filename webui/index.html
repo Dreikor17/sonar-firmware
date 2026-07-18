@@ -722,12 +722,12 @@ function pollResult(cb,errs,idles,acked,reqid){
   errs=errs||0;idles=idles||0;
   function fail(){$("#save-btn").disabled=false;
     if(cb)cb(null,acked);else toast(acked?"Saved, but confirmation was lost — reload to verify":"Save failed — check connection and retry")}
-  api("/api/config/result",{timeout:4000}).then(function(r){
+  api("/api/config/result?reqid="+encodeURIComponent(reqid),{timeout:4000}).then(function(r){
     // The device keeps the last batch's result readable until a new POST claims
     // the slot. If the reqid doesn't match ours, this result belongs to another
     // save (a concurrent client, or a stale DONE from before our POST) — never
     // consume it as our own success.
-    if(reqid&&r.reqid&&r.reqid!==reqid){fail();return}
+    if(r.reqid!==reqid){fail();return}
     if(r.state==="pending"){setTimeout(function(){pollResult(cb,0,idles,true,reqid)},400);return}
     if(r.state!=="done"){
       // idle: the POST likely never arrived — but give it a moment in case
@@ -755,6 +755,9 @@ function pollResult(cb,errs,idles,acked,reqid){
     loadConfigSoft();
   }).catch(function(e){
     if(e.message==="auth"){fail();return}
+    // A syntactically invalid or unknown ID is a definitive rejection, not a
+    // transient transport failure. Retrying cannot make it become our batch.
+    if(e.status===400||e.status===404){fail();return}
     // Transient network error: the save itself can knock the phone off the
     // AP for a moment (flash writes stall WiFi). Keep polling — the device
     // holds the result until we manage to read it.
