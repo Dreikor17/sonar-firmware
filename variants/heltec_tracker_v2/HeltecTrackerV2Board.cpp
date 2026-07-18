@@ -80,7 +80,14 @@ void HeltecTrackerV2Board::begin() {
   }
 
   const char* HeltecTrackerV2Board::getManufacturerName() const {
+    // The v1.1 environment reuses this V2 board implementation (same variant
+    // dir), so report the correct identity per build flag — this string feeds
+    // WebConfig and MQTT status/board metadata.
+#ifdef HELTEC_TRACKER_V1_1
+    return "Heltec Tracker V1.1";
+#else
     return "Heltec Tracker V2";
+#endif
   }
 
   bool HeltecTrackerV2Board::setLoRaFemLnaEnabled(bool enable) {

@@ -38,13 +38,21 @@ static const char* const ALLOWED_SLOT_KEYS[] = {
   "preset", "server", "port", "username", "password", "token", "topic", "audience",
 };
 
+// Shortest slot key is "mqttN.x" (mqtt + digit + '.' + 1-char field) = 7 chars.
+// The prefix probe below indexes key[4..6], so it must never run on a shorter
+// string — an attacker-supplied "mqtt" or "m" would otherwise read past the
+// terminator. strcmp() is null-safe, so the exact-match loop needs no guard.
+static bool isSlotKeyPrefix(const char* key) {
+  return strlen(key) >= 7 && memcmp(key, "mqtt", 4) == 0
+      && key[4] >= '1' && key[4] <= ('0' + MAX_MQTT_SLOTS) && key[5] == '.';
+}
+
 static bool isAllowedSetKey(const char* key) {
   for (size_t i = 0; i < sizeof(ALLOWED_SET_KEYS) / sizeof(ALLOWED_SET_KEYS[0]); i++) {
     if (strcmp(key, ALLOWED_SET_KEYS[i]) == 0) return true;
   }
   // mqtt<1-6>.<field>
-  if (memcmp(key, "mqtt", 4) == 0 && key[4] >= '1' && key[4] <= ('0' + MAX_MQTT_SLOTS)
-      && key[5] == '.') {
+  if (isSlotKeyPrefix(key)) {
     for (size_t i = 0; i < sizeof(ALLOWED_SLOT_KEYS) / sizeof(ALLOWED_SLOT_KEYS[0]); i++) {
       if (strcmp(&key[6], ALLOWED_SLOT_KEYS[i]) == 0) return true;
     }
@@ -54,7 +62,7 @@ static bool isAllowedSetKey(const char* key) {
 
 static bool isSecretKey(const char* key) {
   if (strcmp(key, "wifi.pwd") == 0) return true;
-  if (memcmp(key, "mqtt", 4) == 0 && key[5] == '.'
+  if (isSlotKeyPrefix(key)
       && (strcmp(&key[6], "password") == 0 || strcmp(&key[6], "token") == 0)) return true;
   return false;
 }
@@ -126,6 +134,15 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   // the AP is up. STA stays unconnected - the bridge won't touch WiFi
   // while wifi_ssid is empty, and `start webconfig ap` requires it stopped.
   WiFi.mode(WIFI_AP_STA);
+  // Setup mode serves an UNAUTHENTICATED API on the trust of physical AP
+  // proximity. `start webconfig ap` can be run with the STA still associated
+  // to the operator's LAN (MQTTBridge::end() leaves the STA link up and
+  // auto-reconnect on), which would expose that open API to every host on the
+  // LAN. Drop the association and disable auto-reconnect so only the SoftAP
+  // interface is reachable; the STA interface itself stays up (unassociated)
+  // purely so WiFi.scanNetworks() below can populate the SSID picker.
+  WiFi.setAutoReconnect(false);
+  WiFi.disconnect(false /*keep radio on*/, true /*erase stored AP so it can't reconnect*/);
   snprintf(_ap_ssid, sizeof(_ap_ssid), "MeshCore-Setup-%02X%02X", _pub_key[0], _pub_key[1]);
 #ifdef WEBCONFIG_AP_PASSWORD
   bool ap_ok = WiFi.softAP(_ap_ssid, WEBCONFIG_AP_PASSWORD);
@@ -180,7 +197,16 @@ void WebConfigServer::createServer() {
   // device reflash behind the same IP), which poisons /api/config/result and
   // friends with stale responses from earlier sessions. Forbid caching on
   // every response; the HTML is small enough to refetch per visit.
-  DefaultHeaders::Instance().addHeader("Cache-Control", "no-store");
+  //
+  // DefaultHeaders::Instance() is a process-lifetime singleton and addHeader()
+  // appends unconditionally, so registering here on every start/stop cycle
+  // would leak heap and stack duplicate "Cache-Control" headers on every
+  // response. Register exactly once for the firmware lifetime.
+  static bool s_default_headers_registered = false;
+  if (!s_default_headers_registered) {
+    DefaultHeaders::Instance().addHeader("Cache-Control", "no-store");
+    s_default_headers_registered = true;
+  }
   registerRoutes();
   _server->begin();
 }
@@ -276,8 +302,19 @@ void WebConfigServer::drainBatch(uint32_t now) {
     BatchEntry& e = _batch[_batch_next++];
     e.reply[0] = 0;
     uint32_t t0 = millis();
-    _cb->execCommand(e.cmd, e.reply);
-    if (e.reply[0] == 0) strcpy(e.reply, "OK");
+    // Hold _mux across the setter: it mutates the same _prefs/_obs strings that
+    // handleConfigGet() serializes on the async_tcp task, so without the lock
+    // the "read" side is unprotected and a GET can observe a half-written value.
+    // One command per tick keeps the hold brief; the flash write inside stalls
+    // WiFi regardless, so a concurrent GET waiting on it costs nothing extra.
+    {
+      WCLock lock(_mux);
+      _cb->execCommand(e.cmd, e.reply);
+      if (e.reply[0] == 0) strcpy(e.reply, "OK");
+      // Success convention across every allowlisted setter is an "OK" prefix
+      // (the UI relies on the same test); anything else is a rejection.
+      if (strncmp(e.reply, "OK", 2) != 0) _batch_all_ok = false;
+    }
     _batch_last_cmd = millis();
     Serial.printf("WC: cmd %d/%d '%s' took %lums\n", (int)_batch_next, (int)_batch_count,
                   e.key, (unsigned long)(_batch_last_cmd - t0));
@@ -286,12 +323,13 @@ void WebConfigServer::drainBatch(uint32_t now) {
   _cb->onConfigBatchEnd();
   WCLock lock(_mux);
   _batch_state = BATCH_DONE;
-  if (_batch_reboot) {
-    // Fallback only: the real 3 s reboot timer is armed when the client reads
-    // /api/config/result (handleConfigResult), so the browser gets its
-    // confirmation before the AP/WiFi drops. This covers a client that
-    // disconnected and never polls — generous enough for a phone that got
-    // bounced off the AP mid-save to rejoin and fetch its confirmation.
+  if (_batch_reboot && _batch_all_ok) {
+    // Fallback only, and only when every command succeeded: rebooting into a
+    // partially-applied config would strand the node. The real 3 s reboot timer
+    // is armed when the client reads /api/config/result (handleConfigResult), so
+    // the browser gets its confirmation before the AP/WiFi drops. This covers a
+    // client that disconnected and never polls — generous enough for a phone
+    // that got bounced off the AP mid-save to rejoin and fetch its confirmation.
     _reboot_at = now + 30000;
     if (_reboot_at == 0) _reboot_at = 1;
   }
@@ -397,6 +435,9 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   doc["uptime_s"] = millis() / 1000;
   doc["runtime_slots"] = RUNTIME_MQTT_SLOTS;
   doc["max_slots"] = MAX_MQTT_SLOTS;
+  // Servers the UI should expose: only as many as can actually be active at
+  // once (2 without PSRAM, 5 with). Configuring more never connects.
+  doc["active_slots"] = MQTTBridge::getMaxActiveSlots();
 
   AsyncResponseStream* res = req->beginResponseStream("application/json");
   serializeJson(doc, *res);
@@ -541,13 +582,21 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
     return;
   }
   bool reboot_after = doc["reboot"] | false;
+  const char* reqid = doc["reqid"] | "";
   JsonObject set = doc["set"];
 
   WCLock lock(_mux);
   // A DONE batch stays readable until the next POST claims the slot, so a
   // client that lost the result response can re-poll instead of failing.
   if (_batch_state == BATCH_PENDING) {
-    req->send(409, "application/json", "{\"error\":\"busy\"}");
+    // Echo the in-flight batch's reqid so the caller can tell its own retry
+    // (same reqid — landed, keep polling) from another client's save.
+    StaticJsonDocument<96> bd;
+    bd["error"] = "busy";
+    bd["reqid"] = (const char*)_batch_reqid;
+    String out;
+    serializeJson(bd, out);
+    req->send(409, "application/json", out);
     return;
   }
 
@@ -556,9 +605,17 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
     const char* key = kv.key().c_str();
     const char* val = kv.value().as<const char*>();
     if (!val || !isAllowedSetKey(key)) {
-      char err[96];
-      snprintf(err, sizeof(err), "{\"error\":\"bad key\",\"key\":\"%.32s\"}", key);
-      req->send(400, "application/json", err);
+      // Build with ArduinoJson so an attacker-supplied key containing quotes or
+      // backslashes is escaped rather than breaking out of the JSON string.
+      char safe_key[33];
+      strncpy(safe_key, key, sizeof(safe_key) - 1);
+      safe_key[sizeof(safe_key) - 1] = 0;
+      StaticJsonDocument<128> ed;
+      ed["error"] = "bad key";
+      ed["key"] = safe_key;
+      String out;
+      serializeJson(ed, out);
+      req->send(400, "application/json", out);
       return;
     }
     if (isSecretKey(key) && strcmp(val, SECRET_SENTINEL) == 0) continue;  // unchanged
@@ -587,15 +644,22 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
   _batch_next = 0;
   _batch_reboot = reboot_after;
   _batch_reboot_armed = false;
+  _batch_all_ok = true;
+  strncpy(_batch_reqid, reqid, sizeof(_batch_reqid) - 1);
+  _batch_reqid[sizeof(_batch_reqid) - 1] = 0;
   _batch_state = BATCH_PENDING;  // tick() picks it up on the loop task
   uint32_t du = millis() + 60000;
   if (du == 0) du = 1;
   _diag_until = du;
   Serial.printf("WC: config POST accepted, %d cmds, reboot=%d\n", count, (int)reboot_after);
 
-  char msg[64];
-  snprintf(msg, sizeof(msg), "{\"state\":\"pending\",\"count\":%d}", count);
-  req->send(202, "application/json", msg);
+  StaticJsonDocument<96> ack;
+  ack["state"] = "pending";
+  ack["count"] = count;
+  ack["reqid"] = (const char*)_batch_reqid;
+  String out;
+  serializeJson(ack, out);
+  req->send(202, "application/json", out);
 }
 
 void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
@@ -612,14 +676,23 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
     return;
   }
   if (_batch_state == BATCH_PENDING) {
-    req->send(200, "application/json", "{\"state\":\"pending\"}");
+    StaticJsonDocument<96> pd;
+    pd["state"] = "pending";
+    pd["reqid"] = (const char*)_batch_reqid;
+    String out;
+    serializeJson(pd, out);
+    req->send(200, "application/json", out);
     return;
   }
-  Serial.printf("WC: result read -> done (reboot=%d armed=%d)\n",
-                (int)_batch_reboot, (int)_batch_reboot_armed);
+  Serial.printf("WC: result read -> done (reboot=%d armed=%d all_ok=%d)\n",
+                (int)_batch_reboot, (int)_batch_reboot_armed, (int)_batch_all_ok);
   DynamicJsonDocument doc(6144);
   doc["state"] = "done";
-  doc["reboot"] = _batch_reboot;
+  // Only advertise a reboot when it will actually happen: a partially-failed
+  // batch is not rebooted (see below), so the UI must not show a reboot screen.
+  doc["reboot"] = _batch_reboot && _batch_all_ok;
+  doc["all_ok"] = _batch_all_ok;
+  doc["reqid"] = (const char*)_batch_reqid;
   JsonArray results = doc.createNestedArray("results");
   for (int i = 0; i < _batch_count; i++) {
     JsonObject r = results.createNestedObject();
@@ -627,10 +700,12 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
     r["reply"] = (const char*)_batch[i].reply;
   }
   // State stays DONE (re-readable) until the next POST claims the slot.
-  if (_batch_reboot && !_batch_reboot_armed) {
-    // Confirmation delivered — reboot 3 s from now (replaces the 15 s
-    // drain-time fallback) so the UI can show its countdown first. Armed
-    // once; re-reads must not keep pushing the deadline out.
+  if (_batch_reboot && _batch_all_ok && !_batch_reboot_armed) {
+    // Confirmation delivered and every command succeeded — reboot 3 s from now
+    // (replaces the 30 s drain-time fallback) so the UI can show its countdown
+    // first. Armed once; re-reads must not keep pushing the deadline out. A
+    // partially-failed batch is deliberately left running so the operator can
+    // correct and retry instead of rebooting into a broken config.
     _batch_reboot_armed = true;
     _reboot_at = millis() + 3000;
     if (_reboot_at == 0) _reboot_at = 1;

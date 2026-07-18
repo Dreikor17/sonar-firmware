@@ -148,11 +148,11 @@ canvas{width:100%;height:56px;display:block}
       <p style="font-size:13.5px;color:var(--mut);margin-bottom:12px">Connect this node to your WiFi network so it can reach the MQTT servers.</p>
       <div class="f"><label>Network name (SSID)</label>
         <div class="row" style="gap:8px">
-          <input type="text" data-k="wifi.ssid" id="wz-ssid" autocapitalize="off" autocorrect="off" style="flex:1">
+          <input type="text" data-k="wifi.ssid" id="wz-ssid" maxlength="31" autocapitalize="off" autocorrect="off" style="flex:1">
           <button class="btn sec" type="button" onmousedown="event.preventDefault()" onclick="openScan('wz-ssid')">Scan</button>
         </div></div>
       <div class="f"><label>Password</label>
-        <input type="password" data-k="wifi.pwd" autocomplete="off">
+        <input type="password" data-k="wifi.pwd" maxlength="63" autocomplete="off">
         <div class="hint">Leave blank for an open network. 2.4&thinsp;GHz networks only.</div></div>
       <div class="f"><label>Node name</label>
         <input type="text" data-k="name" maxlength="31">
@@ -171,6 +171,8 @@ canvas{width:100%;height:56px;display:block}
       <div class="f"><label>TX power (dBm)</label>
         <input type="number" data-k="tx" min="-9" max="30" style="max-width:120px">
         <div class="hint">Maximum legal power varies by region &mdash; check local rules.</div></div>
+      <div class="sw"><span><b>Repeat</b><i>Forward mesh traffic. Off = listen-only (still observes and publishes).</i></span>
+        <span class="tgl"><input type="checkbox" data-k="repeat"><u></u></span></div>
       <div class="note">Need settings that aren't listed? Choose <b>Keep current settings</b>, finish setup, then fine-tune in the <a href="#" onclick="enterApp();return false">Advanced editor</a>.</div>
     </div>
     <div class="row">
@@ -183,16 +185,16 @@ canvas{width:100%;height:56px;display:block}
     <div class="card">
       <h2>Step 3 &middot; MQTT</h2>
       <div class="f"><label>Observer name (origin)</label>
-        <input type="text" data-k="mqtt.origin" autocapitalize="off">
+        <input type="text" data-k="mqtt.origin" maxlength="31" autocapitalize="off">
         <div class="hint">How this observer identifies itself in published status/packet messages. Informational only &mdash; not used for topics or authentication. Prefilled with the node name.</div></div>
       <div class="f"><label>IATA region code</label>
-        <input type="text" data-k="mqtt.iata" maxlength="4" autocapitalize="characters" style="text-transform:uppercase;max-width:120px">
+        <input type="text" data-k="mqtt.iata" maxlength="3" autocapitalize="characters" style="text-transform:uppercase;max-width:120px">
         <div class="hint">Nearest airport code, e.g. <b>DEN</b>. Used in topic paths.</div></div>
       <div class="f"><label>Owner public key</label>
         <input type="text" data-k="mqtt.owner" maxlength="64" autocapitalize="off" autocorrect="off" autocomplete="off">
         <div class="hint">Optional &mdash; 64-char hex public key of your companion node. Included in auth JWTs so services that support it can let you claim this node.</div></div>
       <div class="f"><label>Owner email</label>
-        <input type="email" data-k="mqtt.email" autocapitalize="off">
+        <input type="email" data-k="mqtt.email" maxlength="63" autocapitalize="off">
         <div class="hint">Optional &mdash; also included in auth JWTs for claiming this node on some services.</div></div>
       <h2>Servers</h2>
       <div id="wz-slots"></div>
@@ -293,12 +295,12 @@ canvas{width:100%;height:56px;display:block}
   <div id="t-mqtt" class="hide">
     <div class="card">
       <h2>Identity</h2>
-      <div class="f"><label>Observer name (origin)</label><input type="text" data-k="mqtt.origin" autocapitalize="off">
+      <div class="f"><label>Observer name (origin)</label><input type="text" data-k="mqtt.origin" maxlength="31" autocapitalize="off">
         <div class="hint">How this observer identifies itself in published messages; informational only. Blank = node name.</div></div>
-      <div class="f"><label>IATA region code</label><input type="text" data-k="mqtt.iata" maxlength="4" autocapitalize="characters" style="text-transform:uppercase;max-width:120px"></div>
+      <div class="f"><label>IATA region code</label><input type="text" data-k="mqtt.iata" maxlength="3" autocapitalize="characters" style="text-transform:uppercase;max-width:120px"></div>
       <div class="f"><label>Owner public key</label><input type="text" data-k="mqtt.owner" maxlength="64" autocapitalize="off" autocorrect="off">
         <div class="hint">64-char hex public key of the owner's companion node (optional).</div></div>
-      <div class="f"><label>Owner email</label><input type="email" data-k="mqtt.email"></div>
+      <div class="f"><label>Owner email</label><input type="email" data-k="mqtt.email" maxlength="63"></div>
     </div>
     <div class="card">
       <h2>Publishing</h2>
@@ -324,15 +326,15 @@ canvas{width:100%;height:56px;display:block}
     </div>
     <div class="card">
       <h2>Time &amp; SNMP</h2>
-      <div class="f"><label>NTP server</label><input type="text" data-k="mqtt.ntp" autocapitalize="off" placeholder="pool.ntp.org">
+      <div class="f"><label>NTP server</label><input type="text" data-k="mqtt.ntp" maxlength="63" autocapitalize="off" placeholder="pool.ntp.org">
         <div class="hint">Enter <b>none</b> to clear.</div></div>
       <div class="row">
-        <div class="f"><label>Timezone (POSIX)</label><input type="text" data-k="timezone" autocapitalize="off" placeholder="MST7MDT,M3.2.0,M11.1.0"></div>
+        <div class="f"><label>Timezone (POSIX)</label><input type="text" data-k="timezone" maxlength="31" autocapitalize="off" placeholder="MST7MDT,M3.2.0,M11.1.0"></div>
         <div class="f" style="max-width:110px"><label>UTC offset</label><input type="number" data-k="timezone.offset" min="-12" max="14"></div>
       </div>
       <div class="sw"><span><b>SNMP agent</b><i>Restart required</i></span>
         <span class="tgl"><input type="checkbox" data-k="snmp"><u></u></span></div>
-      <div class="f"><label>SNMP community</label><input type="text" data-k="snmp.community" autocapitalize="off"></div>
+      <div class="f"><label>SNMP community</label><input type="text" data-k="snmp.community" maxlength="23" autocapitalize="off"></div>
     </div>
   </div>
 
@@ -342,10 +344,10 @@ canvas{width:100%;height:56px;display:block}
       <div class="note">Changing WiFi restarts the connection &mdash; this page will drop and the node reappears on the new network. Find its new IP from your router or the serial console.</div>
       <div class="f"><label>Network name (SSID)</label>
         <div class="row" style="gap:8px">
-          <input type="text" data-k="wifi.ssid" id="app-ssid" autocapitalize="off" autocorrect="off" style="flex:1">
+          <input type="text" data-k="wifi.ssid" id="app-ssid" maxlength="31" autocapitalize="off" autocorrect="off" style="flex:1">
           <button class="btn sec" type="button" onmousedown="event.preventDefault()" onclick="openScan('app-ssid')">Scan</button>
         </div></div>
-      <div class="f"><label>Password</label><input type="password" data-k="wifi.pwd" autocomplete="off"></div>
+      <div class="f"><label>Password</label><input type="password" data-k="wifi.pwd" maxlength="63" autocomplete="off"></div>
       <div class="f"><label>Power save</label>
         <select data-k="wifi.powersave"><option value="min">Minimum (default)</option><option value="none">None (lowest latency)</option><option value="max">Maximum (battery)</option></select></div>
     </div>
@@ -379,7 +381,7 @@ canvas{width:100%;height:56px;display:block}
 <div class="savebar" id="savebar">
   <b id="save-n"></b><span class="sp"></span>
   <button class="btn sec sm" onclick="revertAll()">Revert</button>
-  <button class="btn sm" id="save-btn" onclick="saveChanges()">Save changes</button>
+  <button class="btn sm" id="save-btn" onclick="appSave()">Save changes</button>
 </div>
 
 <!-- inline scan panel: moved under whichever SSID field requested it -->
@@ -420,7 +422,7 @@ canvas{width:100%;height:56px;display:block}
 <script>
 "use strict";
 var SENTINEL="********";
-var st={mode:"",authed:false,cfg:null,orig:{},dirty:{},presets:[],nslots:6,statsTimer:0,hist:{heap:[],noise:[]},scanTarget:"",scanTimer:0};
+var st={mode:"",authed:false,cfg:null,orig:{},dirty:{},presets:[],nslots:6,statsTimer:0,statsOn:false,statsInflight:false,hist:{heap:[],noise:[]},scanTarget:"",scanTimer:0};
 
 function $(s){return document.querySelector(s)}
 function $$(s){return Array.prototype.slice.call(document.querySelectorAll(s))}
@@ -438,15 +440,33 @@ function api(path,opts){
   }
   return fetch(path,opts).then(function(r){
     if(r.status===401){showLogin();throw new Error("auth")}
-    return r.json().then(function(j){if(!r.ok&&r.status!==202)throw new Error(j.error||("HTTP "+r.status));return j});
+    return r.json().then(function(j){
+      if(!r.ok&&r.status!==202){
+        // Carry the HTTP status and any batch reqid so callers can tell a
+        // definite rejection (400/409/413) from an ambiguous network failure.
+        var e=new Error(j.error||("HTTP "+r.status));e.status=r.status;e.reqid=j.reqid;throw e;
+      }
+      return j;
+    });
   });
 }
 function post(path,body){return api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})}
+// Random per-save batch id so a lost/stale/concurrent result can't be mistaken
+// for this save's own (the node echoes it back in the 202/result/409).
+function mkReqId(){
+  var a=new Uint8Array(8);
+  if(window.crypto&&crypto.getRandomValues)crypto.getRandomValues(a);
+  else for(var i=0;i<8;i++)a[i]=Math.floor(Math.random()*256);
+  return Array.prototype.map.call(a,function(b){return(b<16?"0":"")+b.toString(16)}).join("");
+}
 
 /* ---------- boot ---------- */
 function boot(){
   api("/api/status").then(function(s){
-    st.mode=s.mode;st.authed=s.auth;st.nslots=s.runtime_slots||6;
+    // Show only as many server slots as the board can keep active at once
+    // (active_slots: 2 without PSRAM, 5 with). Fall back to the runtime array
+    // size for older firmware that doesn't report it.
+    st.mode=s.mode;st.authed=s.auth;st.nslots=s.active_slots||s.runtime_slots||6;
     $("#h-name").textContent=s.name||"MeshCore";
     $("#h-sub").textContent=s.role+" · "+s.fw+" · "+s.board;
     var b=$("#h-badge");b.classList.remove("hide");
@@ -574,8 +594,13 @@ function updateSaveBar(){
 function revertAll(){loadConfig().then(function(){toast("Reverted")})}
 
 /* ---------- slots ---------- */
+// maxlength per destination MQTTPrefs buffer minus the NUL (host[64],
+// username[32], password[64], token[48], topic[96], audience[64]). Bounds the
+// common browser case; the backend still owns authoritative length limits.
+var SLOT_MAXLEN={token:47,username:31,password:63,server:63,topic:95,audience:63};
 function slotFieldHtml(i,f,type,label,hint){
-  return'<div class="f sf-'+f+'"><label>'+label+'</label><input type="'+type+'" data-k="mqtt'+i+'.'+f+'" autocapitalize="off" autocorrect="off" autocomplete="off">'+(hint?'<div class="hint">'+hint+'</div>':'')+'</div>';
+  var ml=SLOT_MAXLEN[f]?' maxlength="'+SLOT_MAXLEN[f]+'"':'';
+  return'<div class="f sf-'+f+'"><label>'+label+'</label><input type="'+type+'" data-k="mqtt'+i+'.'+f+'"'+ml+' autocapitalize="off" autocorrect="off" autocomplete="off">'+(hint?'<div class="hint">'+hint+'</div>':'')+'</div>';
 }
 function buildSlots(sel){
   var host=$(sel);if(!host)return;
@@ -637,28 +662,77 @@ function saveChanges(extra,cb){
   var body={set:setmap};
   if(extra&&extra.reboot)body.reboot=true;
   if(Object.keys(setmap).length===0&&!body.reboot){toast("Nothing to save");return}
+  var reqid=mkReqId();body.reqid=reqid;
   $("#save-btn").disabled=true;
-  post("/api/config",body).then(function(){pollResult(cb,0,0,true)})
+  post("/api/config",body).then(function(){pollResult(cb,0,0,true,reqid)})
   .catch(function(e){
     if(e.message==="auth"){$("#save-btn").disabled=false;if(cb)cb(null,false);return}
-    // The POST may have landed even though its response was lost (the save
-    // itself briefly stalls the AP's WiFi) — poll for the result regardless.
-    pollResult(cb,0,0,false);
+    // Definite HTTP rejection: the batch was NOT accepted, so there is no
+    // result to poll for. Report it instead of chasing a phantom save.
+    if(e.status===400||e.status===413){
+      $("#save-btn").disabled=false;
+      if(cb)cb(null,false);else toast(e.message||"Save rejected");
+      return;
+    }
+    // 409 busy: a batch is in flight. If it's ours (same reqid — our POST
+    // landed but its 202 was lost) poll it; otherwise another client owns it.
+    if(e.status===409){
+      if(e.reqid===reqid){pollResult(cb,0,0,true,reqid);return}
+      $("#save-btn").disabled=false;
+      if(cb)cb(null,false);else toast("Another change is being applied — retry shortly");
+      return;
+    }
+    // Ambiguous network failure: the POST may have landed even though its
+    // response was lost (the save itself briefly stalls the AP's WiFi) — poll
+    // for the result regardless, matching it by reqid.
+    pollResult(cb,0,0,false,reqid);
+  });
+}
+// App "Save changes" button. A WiFi SSID/password change only takes effect
+// after the node reconnects, and the live connection stays on the old network
+// until then — so persist and reboot (matching the note on the WiFi tab)
+// instead of silently leaving the running config on the old network. The
+// device only arms the reboot if every command succeeded (see the backend),
+// so a partially-rejected batch stays put for the operator to correct.
+function appSave(){
+  var wifiChanged=("wifi.ssid" in st.dirty)||("wifi.pwd" in st.dirty);
+  if(!wifiChanged){saveChanges();return}
+  saveChanges({reboot:true},function(r,acked){
+    if(!r){
+      if(acked){
+        showReboot("The node accepted the settings and is rebooting to join the new WiFi network. This page will drop — reconnect to your normal WiFi, then find the node's new IP on your router (or run “start webconfig” over serial).",
+          false,"Saved ✓ — node rebooting");
+        st.dirty={};updateSaveBar();
+      } else {
+        toast("Save failed — check connection and retry");
+      }
+      return;
+    }
+    var fails=(r.results||[]).filter(function(x){return!/^OK/i.test(x.reply)});
+    if(fails.length){toast(fails.length+" setting(s) rejected — see fields (not rebooting)");return}
+    showReboot("The node is joining the new WiFi network. This page will drop — reconnect to your normal WiFi, then find the node's new IP on your router (or run “start webconfig” over serial).",
+      false,"Saved ✓ — reconnecting");
+    st.dirty={};updateSaveBar();
   });
 }
 // acked: the node returned 202 for the POST, so the batch WILL be applied and
 // (for reboot saves) the node reboots on its own even if we never read the
 // result. Lets callers distinguish "confirmation lost" from "save never sent".
-function pollResult(cb,errs,idles,acked){
+function pollResult(cb,errs,idles,acked,reqid){
   errs=errs||0;idles=idles||0;
   function fail(){$("#save-btn").disabled=false;
     if(cb)cb(null,acked);else toast(acked?"Saved, but confirmation was lost — reload to verify":"Save failed — check connection and retry")}
   api("/api/config/result",{timeout:4000}).then(function(r){
-    if(r.state==="pending"){setTimeout(function(){pollResult(cb,0,idles,true)},400);return}
+    // The device keeps the last batch's result readable until a new POST claims
+    // the slot. If the reqid doesn't match ours, this result belongs to another
+    // save (a concurrent client, or a stale DONE from before our POST) — never
+    // consume it as our own success.
+    if(reqid&&r.reqid&&r.reqid!==reqid){fail();return}
+    if(r.state==="pending"){setTimeout(function(){pollResult(cb,0,idles,true,reqid)},400);return}
     if(r.state!=="done"){
       // idle: the POST likely never arrived — but give it a moment in case
       // it's still in flight after a connection blip
-      if(idles<4){setTimeout(function(){pollResult(cb,errs,idles+1,acked)},700);return}
+      if(idles<4){setTimeout(function(){pollResult(cb,errs,idles+1,acked,reqid)},700);return}
       fail();return;
     }
     $("#save-btn").disabled=false;
@@ -684,7 +758,7 @@ function pollResult(cb,errs,idles,acked){
     // Transient network error: the save itself can knock the phone off the
     // AP for a moment (flash writes stall WiFi). Keep polling — the device
     // holds the result until we manage to read it.
-    if(errs<20){setTimeout(function(){pollResult(cb,errs+1,idles,acked)},700);return}
+    if(errs<20){setTimeout(function(){pollResult(cb,errs+1,idles,acked,reqid)},700);return}
     fail();
   });
 }
@@ -714,10 +788,15 @@ $("#tabs").addEventListener("click",function(ev){
 function fmtUp(s){var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);
   return d>0?d+"d "+h+"h":(h>0?h+"h "+m+"m":m+"m")}
 function tile(i,b,s){return'<div class="tile"><i>'+i+'</i><b>'+b+'</b>'+(s?' <s>'+s+'</s>':'')+'</div>'}
-function startStats(){stopStats();pollStats();st.statsTimer=setInterval(pollStats,3000)}
-function stopStats(){if(st.statsTimer){clearInterval(st.statsTimer);st.statsTimer=0}}
+function startStats(){stopStats();st.statsOn=true;pollStats()}
+function stopStats(){st.statsOn=false;if(st.statsTimer){clearTimeout(st.statsTimer);st.statsTimer=0}}
 function pollStats(){
-  api("/api/stats").then(function(s){
+  // Chain the next poll only after this one settles (with an in-flight guard and
+  // a request timeout) so a slow/degraded link can't stack overlapping fetches
+  // and pressure both the browser and the ESP32.
+  if(st.statsInflight)return;
+  st.statsInflight=true;
+  api("/api/stats",{timeout:5000}).then(function(s){
     if(s.state==="pending"){$("#stats-age").textContent="collecting…";return}
     $("#stats-age").textContent="";
     var kb=Math.round(s.heap_free/1024);
@@ -744,7 +823,12 @@ function pollStats(){
     $("#stat-slots").innerHTML=sl.length?sl.map(function(x){
       return'<div class="kv"><i>Slot '+x.n+" · "+esc(x.name)+'</i><b><span class="pill '+esc(x.state)+'">'+esc(x.state)+'</span> '+x.ok+' ok / '+x.err+' err</b></div>';
     }).join(""):"No servers configured.";
-  }).catch(function(){});
+  }).catch(function(){}).then(function(){
+    // Runs whether the poll resolved or rejected: clear the guard, then schedule
+    // the next tick only if the Stats tab is still active.
+    st.statsInflight=false;
+    if(st.statsOn)st.statsTimer=setTimeout(pollStats,3000);
+  });
 }
 function push(a,v){a.push(v);if(a.length>60)a.shift()}
 function spark(cv,data){
@@ -904,33 +988,46 @@ function popOut(){
     $("#exit-ov").classList.add("show");
   }).catch(function(){toast("Couldn't reach the node — try again")});
 }
+// Effective value of a key: the pending edit if the user touched it (even to an
+// empty string — a deliberate clear), otherwise the loaded value. Using key
+// presence rather than truthiness stops a cleared field from silently reverting
+// to the original in the review/validation while the batch still submits "".
+function eff(k){return (k in st.dirty)?st.dirty[k]:(st.orig[k]||"")}
 function buildReview(){
   var rows=[],d=st.dirty;
   function row(l,v){rows.push('<div class="kv"><i>'+l+"</i><b>"+esc(v)+"</b></div>")}
-  row("WiFi network",d["wifi.ssid"]||st.orig["wifi.ssid"]||"(not set)");
-  row("WiFi password",d["wifi.pwd"]?"••••••":(st.orig["wifi.pwd"]?"(unchanged)":"(open network)"));
-  if(d.name||st.orig.name)row("Node name",d.name||st.orig.name);
-  var rc=d.radio||st.orig.radio||"",rp=null;
+  row("WiFi network",eff("wifi.ssid")||"(not set)");
+  var pwdChanged=("wifi.pwd" in d);
+  row("WiFi password",pwdChanged?(d["wifi.pwd"]?"••••••":"(open network)")
+                                :(st.orig["wifi.pwd"]?"(unchanged)":"(open network)"));
+  var nm=eff("name");if(nm)row("Node name",nm);
+  var rc=eff("radio")||"",rp=null;
   RADIO_PRESETS.forEach(function(p){if(comboEq(presetCombo(p),rc))rp=p});
-  row("Radio",(rp?rp.t+" — ":"")+rc.split(",").join(" / ")+(d.radio?"":" (unchanged)"));
-  if(d.tx)row("TX power",d.tx+" dBm");
-  row("Observer name",d["mqtt.origin"]||st.orig["mqtt.origin"]||"(not set)");
-  row("IATA",(d["mqtt.iata"]||st.orig["mqtt.iata"]||"(not set)").toUpperCase());
-  var own=d["mqtt.owner"]||st.orig["mqtt.owner"];
+  row("Radio",(rp?rp.t+" — ":"")+rc.split(",").join(" / ")+(("radio" in d)?"":" (unchanged)"));
+  if(("tx" in d)&&d.tx!=="")row("TX power",d.tx+" dBm");
+  row("Repeat",eff("repeat")==="off"?"off (listen-only)":"on");
+  row("Observer name",eff("mqtt.origin")||"(not set)");
+  row("IATA",(eff("mqtt.iata")||"(not set)").toUpperCase());
+  var own=eff("mqtt.owner");
   if(own)row("Owner key",own.length>12?own.slice(0,12)+"…":own);
-  var em=d["mqtt.email"]||st.orig["mqtt.email"];
+  var em=eff("mqtt.email");
   if(em)row("Owner email",em);
   for(var i=1;i<=st.nslots;i++){
-    var p=d["mqtt"+i+".preset"]||st.orig["mqtt"+i+".preset"];
+    var p=eff("mqtt"+i+".preset");
     if(p&&p!=="none")row("Slot "+i,p);
   }
-  var extra=Object.keys(d).filter(function(k){return!/^(wifi\.|name$|radio$|tx$|mqtt\.origin|mqtt\.iata|mqtt\.owner|mqtt\.email|mqtt[1-9]\.)/.test(k)}).length;
+  var extra=Object.keys(d).filter(function(k){return!/^(wifi\.|name$|radio$|tx$|repeat$|mqtt\.origin|mqtt\.iata|mqtt\.owner|mqtt\.email|mqtt[1-9]\.)/.test(k)}).length;
   if(extra)row("Other changes",extra+" setting(s)");
   $("#wz-review").innerHTML=rows.join("");
 }
 function wizardSave(){
-  if(!st.dirty["wifi.ssid"]&&!st.orig["wifi.ssid"]){$("#wz-err").textContent="Please set a WiFi network (step 1).";return}
+  // Use the effective value: a user who cleared the SSID must fail validation
+  // even if the node originally had one (the batch would submit an empty SSID).
+  if(!eff("wifi.ssid")){$("#wz-err").textContent="Please set a WiFi network (step 1).";return}
   if($("#wz-rp").value===""){$("#wz-err").textContent="Please choose a radio preset (step 2) — nodes ship with non-US defaults.";return}
+  // IATA is optional, but if given it must be exactly 3 chars (goes into topics).
+  var iata=eff("mqtt.iata");
+  if(iata&&iata.length!==3){$("#wz-err").textContent="IATA region code must be exactly 3 characters (e.g. DEN), or left blank.";return}
   $("#wz-err").textContent="";
   var b=$("#wz-save");b.disabled=true;
   saveChanges({reboot:true},function(r,acked){
@@ -952,7 +1049,7 @@ function wizardSave(){
       $("#wz-err").textContent=fails.map(function(x){return x.key+": "+x.reply}).join(" · ");
       return;
     }
-    showReboot("The node is joining “"+(st.dirty["wifi.ssid"]||st.orig["wifi.ssid"])
+    showReboot("The node is joining “"+eff("wifi.ssid")
       +"”. Reconnect your phone or laptop to your normal WiFi. Find the node's IP on your router, or run “start webconfig” over serial to manage it again.",
       false,"Settings saved ✓ — rebooting in a moment");
     st.dirty={};

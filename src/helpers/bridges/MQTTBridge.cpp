@@ -320,6 +320,17 @@ bool MQTTBridge::getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out) 
   return true;
 }
 
+int MQTTBridge::getMaxActiveSlots() {
+  // Each WSS/TLS connection needs ~40KB for mbedTLS buffers. Without PSRAM even
+  // 3 concurrent connections would exhaust internal heap, so cap at 2; with
+  // PSRAM cap at 5 (6 configurable but 5 active max).
+#if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
+  return psramFound() ? 5 : 2;
+#else
+  return 2;
+#endif
+}
+
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
 unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
 
@@ -605,15 +616,8 @@ void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("PSRAM: not configured for this board (no BOARD_HAS_PSRAM)");
   #endif
 
-  // Limit active slots based on available memory.
-  // Each WSS/TLS connection needs ~40KB for mbedTLS buffers.
-  // Without PSRAM, even 3 concurrent connections would exhaust internal heap.
-  // With PSRAM, cap at 5 for safety (6 configurable but 5 active max).
-  #if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
-  _max_active_slots = psramFound() ? 5 : 2;
-  #else
-  _max_active_slots = 2;
-  #endif
+  // Limit active slots based on available memory (see getMaxActiveSlots()).
+  _max_active_slots = getMaxActiveSlots();
   MQTT_DEBUG_PRINTLN("Max active slots: %d", _max_active_slots);
 
   // Check if WiFi credentials are configured first
@@ -634,7 +638,10 @@ void MQTTBridge::begin() {
     _iata[i] = toupper(_iata[i]);
   }
 
-  // Update enabled flags from preferences
+  // Initial snapshot of the publish toggles. NOTE: the publish hot paths read
+  // these live from _obs->mqtt_* (status/packets/raw/rx/tx) so a CLI/web `set`
+  // takes effect without a bridge restart; these members are kept only for
+  // startup logging/back-compat and are not the source of truth.
   _status_enabled = _obs->mqtt_status_enabled;
   _packets_enabled = _obs->mqtt_packets_enabled;
   _raw_enabled = _obs->mqtt_raw_enabled;
@@ -1107,8 +1114,10 @@ void MQTTBridge::mqttTaskLoop() {
       refreshNTP();
     }
 
-    // Publish status updates (handle millis() overflow correctly)
-    if (_status_enabled) {
+    // Publish status updates (handle millis() overflow correctly).
+    // Read the toggle live from prefs (like mqtt.packets/rx/tx below) so a
+    // CLI/web `set mqtt.status` change applies without a bridge restart.
+    if (_obs->mqtt_status_enabled) {
       bool has_destinations = _cached_has_connected_slots;
 
       // Early exit if no destinations - skip all the expensive logic below
@@ -2086,10 +2095,24 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
   }
 
   if (strcmp(preset_name, MQTT_PRESET_CUSTOM) == 0) {
-    slot.enabled = true;
     slot.preset = nullptr;
-    // Custom broker settings should already be set via setSlotCustomBroker
-    if (_initialized && customEndpointComplete(slot.host, slot.port)) {
+    // Re-sync every custom field from prefs (same copy begin() does at startup)
+    // so a CLI/web edit to the host, port, credentials, or JWT audience is
+    // actually picked up on reconfigure. Previously this branch reused the
+    // stale slot fields, so e.g. changing mqttN.server or mqttN.username had no
+    // effect on the live connection. Token and topic are read live from _obs in
+    // setupSlot()/buildTopicForSlot(), so they don't need copying here.
+    strncpy(slot.host, _obs->mqtt_slot_host[slot_index], sizeof(slot.host) - 1);
+    slot.host[sizeof(slot.host) - 1] = '\0';
+    slot.port = _obs->mqtt_slot_port[slot_index];
+    strncpy(slot.username, _obs->mqtt_slot_username[slot_index], sizeof(slot.username) - 1);
+    slot.username[sizeof(slot.username) - 1] = '\0';
+    strncpy(slot.password, _obs->mqtt_slot_password[slot_index], sizeof(slot.password) - 1);
+    slot.password[sizeof(slot.password) - 1] = '\0';
+    strncpy(slot.audience, _obs->mqtt_slot_audience[slot_index], sizeof(slot.audience) - 1);
+    slot.audience[sizeof(slot.audience) - 1] = '\0';
+    slot.enabled = (slot.host[0] != '\0');
+    if (_initialized && slot.enabled && customEndpointComplete(slot.host, slot.port)) {
       setupSlot(slot_index);
     }
     return;
@@ -2336,8 +2359,10 @@ void MQTTBridge::loop() {
     refreshNTP();
   }
 
-  // Publish status updates (handle millis() overflow correctly)
-  if (_status_enabled) {
+  // Publish status updates (handle millis() overflow correctly).
+  // Read the toggle live from prefs so a CLI/web `set mqtt.status` change
+  // applies without a bridge restart.
+  if (_obs->mqtt_status_enabled) {
     bool has_destinations = _cached_has_connected_slots;
 
     if (has_destinations) {
@@ -2522,9 +2547,10 @@ void MQTTBridge::processPacketQueue() {
                                           queued.snr, queued.rssi);
     taskYIELD();  // allow higher-priority tasks to run between packet publishes
 
-    // Publish raw if enabled
+    // Publish raw if enabled (live from prefs so `set mqtt.raw` applies without
+    // a bridge restart)
     bool raw_published = false;
-    if (_raw_enabled) {
+    if (_obs->mqtt_raw_enabled) {
       raw_published = publishRaw(&queued.packet_copy);
     }
 
@@ -2623,8 +2649,9 @@ void MQTTBridge::processPacketQueue() {
                                           queued.snr, queued.rssi);
     // No taskYIELD() on non-ESP32 platforms (non-FreeRTOS, cooperative scheduling not needed)
 
+    // Live from prefs so `set mqtt.raw` applies without a bridge restart.
     bool raw_published = false;
-    if (_raw_enabled) {
+    if (_obs->mqtt_raw_enabled) {
       raw_published = publishRaw(&queued.packet_copy);
     }
 
@@ -3235,6 +3262,13 @@ bool MQTTBridge::requestForcedNtpSync(uint32_t timeout_ms) {
   _ntp_force_done = false;
   _ntp_force_result = false;
   _ntp_force_requested = true;
+
+  // Fire-and-forget: callers on the Arduino loop task (web config batch, and
+  // the CLI which shares that task) must not block up to 30 s polling the MQTT
+  // task — that stalls mesh/radio forwarding, portal DNS, and reboot timers.
+  // The task still performs the sync; the result is observable via
+  // `get mqtt.ntp.diag`. Blocking callers pass a non-zero timeout.
+  if (timeout_ms == 0) return true;
 
   unsigned long start = millis();
   while (!_ntp_force_done) {

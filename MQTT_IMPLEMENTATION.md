@@ -474,6 +474,66 @@ These are standard MeshCore commands, not MQTT-specific, but important for obser
 
 See [MQTT_SNMP.md](MQTT_SNMP.md) for full SNMP documentation.
 
+### Web Configuration Portal
+
+The observer builds include a browser-based configuration portal so a node can
+be provisioned and managed without the serial CLI. It is started from the CLI
+(serial or remote admin) and is never on by default on a configured node.
+
+#### CLI commands
+- `start webconfig` — start the portal. If WiFi is already configured and
+  connected, it binds to the node's **LAN** IP and requires the admin password
+  to log in. If WiFi is **not** configured (`wifi.ssid` empty), it raises the
+  setup AP instead (same as first boot).
+- `start webconfig ap` — force the **setup AP** even when WiFi is configured.
+  The MQTT bridge must be stopped first (`set bridge off`); the AP owns the
+  radio. Used for re-provisioning in the field.
+- `stop webconfig` — stop the portal and free its resources. LAN mode runs until
+  this is issued; the setup AP also auto-stops after an idle timeout (default 10
+  minutes with no station associated).
+
+#### First-boot / setup-AP behavior
+On a node with no WiFi configured, the portal comes up automatically as an open
+SoftAP named `MeshCore-Setup-XXXX` (last two bytes of the public key), with a
+captive-portal redirect. The device display shows the AP name and portal URL
+(`http://192.168.4.1/`). Walk through the wizard (WiFi → radio → MQTT → review),
+then **Save & reboot**; the node reboots and joins the configured network.
+
+Optionally set a WPA2 password for the setup AP at build time with
+`-D WEBCONFIG_AP_PASSWORD='"yourpassword"'`.
+
+#### Modes and authentication
+- **Setup AP**: unauthenticated. Trust is based on physical proximity to the
+  open/PSK AP. Only the SoftAP interface serves the API — on `start webconfig
+  ap` the STA is explicitly disassociated so the API is **not** exposed on the
+  LAN the node was attached to.
+- **LAN**: requires the admin password (same one used for remote CLI admin).
+  Sessions use a cookie with a sliding idle expiry (default 20 minutes); five
+  failed logins trigger a 30-second lockout.
+
+> **Security note:** the open setup AP transports WiFi/MQTT credentials over
+> plain HTTP. Provision on a trusted, non-public frequency/location, set
+> `WEBCONFIG_AP_PASSWORD` where feasible, and prefer LAN mode for ongoing
+> management. The setup AP is intended for initial provisioning, not
+> long-running operation.
+
+#### Applying changes
+- **Radio** (freq/BW/SF/CR): persisted but applied only on reboot; the UI shows
+  a "reboot to apply" hint.
+- **WiFi SSID/password**: changing these in LAN mode saves and reboots so the
+  node reconnects on the new network (the page will drop; find the new IP on
+  your router). In the setup wizard, saving always reboots.
+- **MQTT publishing toggles / slot config**: applied live to the running bridge
+  (no reboot needed).
+- **NTP server**: saved immediately; the time sync runs in the background —
+  verify with `get mqtt.ntp.diag`.
+
+#### Recovery
+If provisioning fails or you're locked out of the portal, connect over USB
+serial and use the CLI directly (e.g. `set wifi.ssid ...`, `set wifi.pwd ...`,
+`get wifi.status`, `stop webconfig`). Serial access always works regardless of
+the portal state.
+
 ## Command Architecture
 
 The CLI commands are organized into two levels:

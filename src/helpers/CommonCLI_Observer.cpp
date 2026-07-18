@@ -205,13 +205,35 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     savePrefs();
     strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.iata ", 10) == 0) {
-    StrHelper::strncpy(_mqtt_prefs.mqtt_iata, &config[10], sizeof(_mqtt_prefs.mqtt_iata));
-    for (int i = 0; _mqtt_prefs.mqtt_iata[i]; i++) {
-      _mqtt_prefs.mqtt_iata[i] = toupper(_mqtt_prefs.mqtt_iata[i]);
+    const char* iata = &config[10];
+    size_t iata_len = strlen(iata);
+    if (iata_len == 0) {
+      // Empty clears the region code (meshcore-topic publishing stays disabled
+      // until one is set). This keeps the pre-existing "clear IATA" capability.
+      _mqtt_prefs.mqtt_iata[0] = '\0';
+      savePrefs();
+      _callbacks->restartBridge();
+      strcpy(reply, "OK - IATA cleared");
+    } else {
+      // A region code goes straight into MQTT topic paths, so require exactly
+      // three alphanumeric characters (real IATA codes are 3 letters, e.g. DEN).
+      bool valid = (iata_len == 3);
+      for (size_t i = 0; valid && i < iata_len; i++) {
+        char c = iata[i];
+        valid = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+      }
+      if (!valid) {
+        strcpy(reply, "Error: IATA code must be exactly 3 letters/digits (e.g. DEN)");
+      } else {
+        StrHelper::strncpy(_mqtt_prefs.mqtt_iata, iata, sizeof(_mqtt_prefs.mqtt_iata));
+        for (int i = 0; _mqtt_prefs.mqtt_iata[i]; i++) {
+          _mqtt_prefs.mqtt_iata[i] = toupper(_mqtt_prefs.mqtt_iata[i]);
+        }
+        savePrefs();
+        _callbacks->restartBridge();
+        strcpy(reply, "OK");
+      }
     }
-    savePrefs();
-    _callbacks->restartBridge();
-    strcpy(reply, "OK");
   } else if (memcmp(config, "mqtt.status ", 12) == 0) {
     _mqtt_prefs.mqtt_status_enabled = memcmp(&config[12], "on", 2) == 0;
     savePrefs();
@@ -260,16 +282,18 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       }
       savePrefs();
 #ifdef ESP_PLATFORM
-      // Validate by running an immediate sync. syncMqttNtp() marshals onto the MQTT
-      // task (Core 0) so no NTP I/O happens on this (Core 1) CLI thread.
+      // Queue a sync on the MQTT task (Core 0) but do NOT block: this handler
+      // runs on the Arduino loop task, shared with mesh/radio processing and the
+      // web config batch, so a synchronous wait of up to 30 s would stall the
+      // node. The sync runs in the background; verify with `get mqtt.ntp.diag`.
       if (WiFi.status() != WL_CONNECTED) {
         strcpy(reply, "OK - saved (WiFi not connected; NTP sync pending)");
       } else if (!_callbacks->isMqttBridgeRunning()) {
         strcpy(reply, "OK - saved (MQTT bridge not running)");
       } else if (_callbacks->syncMqttNtp()) {
-        strcpy(reply, "OK - time synced");
+        strcpy(reply, "OK - saved (NTP sync started; check 'get mqtt.ntp.diag')");
       } else {
-        strcpy(reply, "Error: NTP sync failed");
+        strcpy(reply, "OK - saved (NTP sync unavailable)");
       }
 #else
       strcpy(reply, "OK - saved");
@@ -385,12 +409,17 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     } else if (memcmp(subcmd, "server ", 7) == 0) {
       StrHelper::strncpy(_mqtt_prefs.mqtt_slot_host[slot], &subcmd[7], sizeof(_mqtt_prefs.mqtt_slot_host[slot]));
       savePrefs();
+      // Reconfigure the slot so the new host reaches the live connection (other
+      // custom-slot setters do the same; without it the change only applies on
+      // the next reboot/bridge restart).
+      _callbacks->restartBridgeSlot(slot);
       strcpy(reply, "OK");
     } else if (memcmp(subcmd, "port ", 5) == 0) {
       int port = atoi(&subcmd[5]);
       if (port > 0 && port <= 65535) {
         _mqtt_prefs.mqtt_slot_port[slot] = port;
         savePrefs();
+        _callbacks->restartBridgeSlot(slot);
         strcpy(reply, "OK");
       } else {
         strcpy(reply, "Error: port must be between 1 and 65535");
@@ -460,7 +489,13 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "mqtt.owner ", 11) == 0) {
     const char* owner_key = &config[11];
     int key_len = strlen(owner_key);
-    if (key_len == 64) {
+    if (key_len == 0) {
+      // Owner key is optional — empty clears it (previously this errored, so a
+      // set key could never be removed via the portal/CLI).
+      _mqtt_prefs.mqtt_owner_public_key[0] = '\0';
+      savePrefs();
+      strcpy(reply, "OK - owner key cleared");
+    } else if (key_len == 64) {
       bool valid_key = true;
       for (int i = 0; i < key_len; i++) {
         if (!((owner_key[i] >= '0' && owner_key[i] <= '9') ||

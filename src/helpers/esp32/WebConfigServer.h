@@ -118,6 +118,10 @@ private:
   uint32_t _batch_last_cmd = 0;
   bool _batch_reboot = false;
   bool _batch_reboot_armed = false;
+  bool _batch_all_ok = true;      // every drained command replied "OK" (gates reboot)
+  // Client-supplied batch identity, echoed in the 202/result/409 responses so a
+  // reused/lost/concurrent result can't be mistaken for this client's own.
+  char _batch_reqid[24] = {0};
   BatchEntry _batch[MAX_BATCH];
 
   // LAN-mode session (single slot; new login evicts the old session)

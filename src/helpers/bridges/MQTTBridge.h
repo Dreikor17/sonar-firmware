@@ -446,6 +446,11 @@ public:
   bool isSlotEnabledAndAttempted(int slot_index) const;
   const char* getSlotPresetName(int slot_index) const;
   static int getRuntimeSlotCount() { return RUNTIME_MQTT_SLOTS; }
+  /** Max slots that can be connected at once: 5 with PSRAM, 2 without (each
+   *  WSS/TLS connection needs ~40KB for mbedTLS buffers). This is the number of
+   *  usefully-configurable servers; RUNTIME_MQTT_SLOTS carries a spare for
+   *  reconfiguration. Safe to call before begin(). */
+  static int getMaxActiveSlots();
   /** Resolved origin for MQTT JSON: node_name when mqtt_origin is empty, else mqtt_origin (with quote stripping). */
   static void getEffectiveMqttOrigin(const NodePrefs* np, const MQTTPrefs* obs, char* buf, size_t buf_size);
   static const char* effectiveNtpPrimary(const MQTTPrefs* obs);

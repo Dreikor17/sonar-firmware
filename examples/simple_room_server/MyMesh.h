@@ -338,8 +338,11 @@ public:
 
   bool syncMqttNtp() override {
     if (!bridge || !bridge->isRunning()) return false;
-    // Marshal onto the MQTT task (Core 0); this runs on the CLI thread (Core 1).
-    return bridge->requestForcedNtpSync();
+    // Queue the sync onto the MQTT task (Core 0) without blocking: this runs on
+    // the Arduino loop task (serial CLI and the web config batch both drain
+    // here), and blocking up to 30 s would stall mesh/radio forwarding. Returns
+    // true once queued; verify with `get mqtt.ntp.diag`.
+    return bridge->requestForcedNtpSync(0);
   }
 
   bool runMqttNtpDiag(char* reply, size_t reply_size, bool verbose) override {
