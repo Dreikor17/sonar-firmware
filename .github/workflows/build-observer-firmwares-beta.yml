@@ -150,9 +150,10 @@ jobs:
       - name: Build Shard ${{ matrix.shard.idx }}
         env:
           FIRMWARE_BUILD_NUMBER: ${{ needs.enumerate.outputs.build_number }}
-          # These two are what make the output a beta build; build.sh reads both.
-          OTA_MANIFEST_BASE_URL: ${{ env.OTA_MANIFEST_BASE_URL }}
-          OTA_CHANNEL_TAG: ${{ env.OTA_CHANNEL_TAG }}
+          # OTA_MANIFEST_BASE_URL and OTA_CHANNEL_TAG (what actually make this a
+          # beta build) come from the workflow-level env: above, which every step
+          # inherits. Do NOT redeclare them as ${{ env.X }} here — that is a
+          # self-reference, and if it resolved empty it would blank the channel.
         run: /usr/bin/env bash build.sh build-firmware ${{ matrix.shard.envs }}
 
       - name: Verify beta channel is baked in
