@@ -13,25 +13,61 @@ tests and ownership boundaries needed to make lifecycle work safe, and only
 then the cooperative-shutdown refactor. Hardware soak testing validates the
 result; it is not the first line of defense for the riskiest change.
 
+## Roadmap Status
+
+The guardrail phases have already landed on this branch; the remaining work is
+the lifecycle refactor and its safety net. Phases are intentionally not
+renumbered so cross-references and the completed acceptance criteria stay stable;
+each phase below carries an explicit status line, and this table is the quick
+index.
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| 1 | PR CI smoke builds + ArduinoJson pin enforcement | Done (build-size gate and ASan/UBSan still pending) |
+| 2 | PSRAM restart resource symmetry | Done |
+| 3 | MQTT preference migration fixtures | Done (filesystem adapter still lives in `CommonCLI`) |
+| 0 | Pre-change lifecycle characterization | Not started — next actionable step |
+| 4 | Ownership and teardown test seams | Not started |
+| 5 | Cooperative MQTT shutdown | Not started (fixes the OTA teardown panic) |
+| — | OTA teardown barrier | Not started — release-critical |
+| 6 | Request/queue/connection/publication integration tests | Not started |
+| 7 | Uptime, memory, and fault-injection gates | Not started |
+
+Forward plan, in execution order: **Phase 0 → Phase 4 → Phase 5 (with the OTA
+teardown barrier) → Phase 6 → Phase 7.** Do not reopen a "Done" phase without a
+deliberate reason (see "Change-Control Discipline").
+
 ## Current Baseline
 
 The current branch has:
 
-- Native tests for MQTT presets, validation, topic templates/routing,
-  connection policy, packet-queue policy, payload construction, WebConfig keys,
-  and upstream `Utils::toHex` behavior.
-- ArduinoJson pinned to 7.4.3 in the native and firmware environments.
-- Representative MQTT firmware builds passing for a constrained non-PSRAM
-  Heltec V3 and a PSRAM-equipped T-Beam S3 Supreme.
+- Native tests (GoogleTest, `[env:native]`) for MQTT presets, validation, topic
+  templates and routing, connection policy, packet-queue policy, payload
+  construction, WebConfig keys, the `/mqtt_prefs` codec, the atomic prefs store,
+  the runtime-buffer lifecycle, and upstream `Utils::toHex` behavior.
+- ArduinoJson pinned to 7.4.3 across the native and all firmware environments,
+  enforced in CI by `scripts/check_arduinojson_pin.py`.
+- PR CI (`.github/workflows/`) that runs the native suite and compiles both
+  representative MQTT observer smoke builds:
+  `Heltec_v3_repeater_observer_mqtt` (non-PSRAM) and
+  `T_Beam_S3_Supreme_SX1262_repeater_observer_mqtt` (PSRAM).
+- Symmetric PSRAM runtime buffers: `begin()` allocates through
+  `allocateRuntimeBuffers()` and `end()` frees and nulls through
+  `releaseRuntimeBuffers()`, so raw-data caching and the PSRAM JSON buffers are
+  restored after a restart (`MQTTRuntimeBufferLifecycle.h`).
+- A versioned `/mqtt_prefs` loader extracted into fork-owned, host-tested seams
+  (`MQTTPrefsCodec.h`, `MQTTPrefsStorage.h`, `MQTTPrefsAtomicStore.h`) that
+  classifies every deployed layout, preserves an unknown or newer file without
+  overwriting it, and rejects corrupt input without out-of-bounds reads.
 - WebConfig request/result correlation, failed-batch reboot gating, and a
   process-lifetime HTTP listener that avoids deleting an object still referenced
   by an asynchronous request.
 - Pure MQTT policy helpers that reduce decision duplication while leaving the
   production bridge as the integration point.
 
-This is a useful unit-test foundation, but it does not yet validate the MQTT
-task/client lifecycle, cross-core state ownership, preference-file migrations,
-or long-running heap behavior.
+This is a solid guardrail and unit-test foundation, but it does not yet validate
+the MQTT task/client lifecycle, cross-core state ownership, the OTA teardown
+barrier, or long-running heap behavior. Those are the remaining phases.
 
 ## Constraints
 
@@ -46,9 +82,64 @@ or long-running heap behavior.
 5. Preserve observable behavior unless a behavior change is explicitly named,
    reviewed, and tested.
 
+## Change-Control Discipline (Stop-and-Ask)
+
+This roadmap is executed incrementally, often by an agent working one phase at a
+time. Each unit of work is scoped to its assigned phase. When work uncovers
+something outside that scope, the correct action is to **stop and ask, not to fix
+forward.** Silent scope expansion is the primary way a targeted stability change
+turns into an unreviewed refactor or a needless merge-conflict surface. This
+section is binding on anyone — human or agent — executing the plan.
+
+### Stop and ask before writing code when any of these is true
+
+- A refactor larger than the current phase authorizes appears necessary — for
+  example touching task lifecycle, client lifetime, cross-core ownership, or the
+  queue backends when the phase did not name them.
+- A bug is discovered that is not described in the plan, especially one
+  affecting persistence, teardown, OTA, or heap behavior.
+- A phase premise turns out to be false or already implemented (for example, a
+  described defect that is already fixed). Report the discrepancy and get the
+  plan re-baselined before writing code against a stale assumption.
+- A change would alter observable behavior the phase did not explicitly name,
+  review, and test (Constraint 5).
+- Work would touch upstream-heavy files (`MQTTBridge.cpp`, `CommonCLI`, the
+  role-specific `MyMesh` files) beyond a small, additive adapter (Constraint 2).
+- A change touches fleet-critical persistence layouts, or could overwrite or
+  discard an unknown or newer `/mqtt_prefs` file (Constraint 1).
+- Two phases would be combined in one change, or a "Explicitly Deferred Debt"
+  item would be pulled forward.
+- A fix spans multiple files, changes a public seam, or would surprise a
+  reviewer expecting only the phase's stated work.
+
+### What "stop and ask" means in practice
+
+- Do not implement the out-of-scope change in the same pass. Record it.
+- Report it with evidence: file and line references, a concrete reproduction or
+  failure scenario, and the specific invariant or constraint at risk.
+- Present options with tradeoffs and a recommendation, then wait for an explicit
+  decision on scope before proceeding.
+- File a newly found bug as its own item. Do not fold an opportunistic fix into
+  an unrelated phase's commit — single-purpose commits are required, and an
+  unexpected fix deserves its own review.
+
+### What may proceed without asking
+
+- Work squarely inside the assigned phase and its acceptance criteria.
+- Small, behavior-preserving fixes fully contained in fork-owned helper files
+  with matching host tests, where a reviewer would expect them as part of the
+  phase.
+
+When uncertain whether a change is in scope, treat it as out of scope and ask.
+The cost of a question is a round trip; the cost of an unreviewed lifecycle or
+persistence change across a fleet of thousands of devices is not.
+
 ## Sequenced Work
 
 ### Phase 0: Record the pre-change lifecycle characterization
+
+**Status: Not started — the next actionable step, and prerequisite for Phases 4
+and 5.**
 
 Capture current behavior before changing shutdown mechanics. This provides a
 reference for the lifecycle fakes and lets the later state-machine refactor
@@ -73,8 +164,14 @@ permanent high-volume production logging.
 
 ### Phase 1: Put MQTT/WebConfig firmware smoke builds in PR CI
 
-The regular PR build matrix does not currently compile an MQTT observer target.
-Add two required smoke builds for changes touching firmware, variants,
+**Status: Complete on this branch.** PR CI already compiles both smoke builds and
+runs the native suite and the ArduinoJson pin check. Still pending against the
+acceptance criteria: build-size artifact/threshold reporting (criterion 4) and
+the optional ASan/UBSan native job. The description below is retained as the
+record of intent.
+
+The PR build matrix historically did not compile an MQTT observer target; it now
+compiles two required smoke builds for changes touching firmware, variants,
 PlatformIO configuration, MQTT/WebConfig helpers, or their tests:
 
 - `Heltec_v3_repeater_observer_mqtt` for the constrained non-PSRAM path.
@@ -95,12 +192,19 @@ Acceptance criteria:
 
 ### Phase 2: Fix PSRAM restart resource symmetry
 
-PSRAM-backed raw-data and JSON buffers are allocated in the bridge constructor,
-freed by `end()`, and not reallocated by a later `begin()` on the same bridge
-object. After a restart, raw-data caching remains unavailable and JSON
-publication uses task-stack fallback buffers.
+**Status: Complete on this branch.** The asymmetry described in the original plan
+has been fixed; this section now documents the intended design and the tests that
+guard it, not outstanding work.
 
-Extract symmetric runtime-resource operations, for example:
+PSRAM-backed raw-data and JSON buffers are allocated in `begin()` through
+`allocateRuntimeBuffers()` (idempotent, allocate-if-missing), freed and nulled by
+`end()` through `releaseRuntimeBuffers()`, and reallocated by a later `begin()`.
+Raw-data caching and the PSRAM JSON buffers therefore survive a restart; the
+task-stack buffer is used only when a live allocation actually fails. The pure
+helpers live in `MQTTRuntimeBufferLifecycle.h`, covered by
+`test_mqtt_runtime_buffer_lifecycle`.
+
+The design keeps symmetric runtime-resource operations:
 
 - `allocateRuntimeBuffers()` called by `begin()` or a shared initialization
   path.
@@ -121,6 +225,16 @@ Tests and validation:
 - A short hardware restart loop shows stable free heap and largest free block.
 
 ### Phase 3: Add binary MQTT preference migration fixtures
+
+**Status: Complete on this branch.** The versioned loader, the frozen-layout
+`static_assert`s, and the migration/fixture coverage described below are
+implemented in `MQTTPrefsCodec.h`, `MQTTPrefsStorage.h`, and
+`MQTTPrefsAtomicStore.h`, and host-tested by `test_mqtt_prefs_codec` and
+`test_mqtt_prefs_atomic_store`. Unknown-newer files are preserved and corrupt
+input is rejected without overwrite. Residual: the concrete filesystem adapter
+and the `load/saveMQTTPrefs()` orchestration still live in `CommonCLI.cpp`
+(platform-coupled by design); keep that adapter small. The description below is
+retained as the record of intent.
 
 Build deterministic tests around the versioned `/mqtt_prefs` loader before
 upstream merges change `CommonCLI`, filesystem behavior, or preference structs.
@@ -153,6 +267,12 @@ Acceptance criteria:
   are added deliberately.
 
 ### Phase 4: Establish ownership and teardown test seams
+
+**Status: Not started.** Verified premise: the loop task, WebConfig, CLI, and
+`AlertReporter` currently read the MQTT task's live, mutable slot objects and
+client counters cross-core without a lock or a published snapshot.
+`getSlotStatusSnapshot()` is built on demand from live state despite its name —
+the refactor must actually publish a plain-data snapshot, not assume one exists.
 
 This phase is the safety net for cooperative shutdown. It must land before the
 shutdown state machine.
@@ -207,6 +327,14 @@ Required teardown-focused tests:
 
 ### OTA Teardown Barrier: release-critical scenario
 
+**Status: Not started. This is the fix for a known shipping crash, not a
+hypothetical hardening target.** With a broker down over `wss`, the abrupt
+`vTaskDelete` in `end()` can kill the MQTT task inside mbedTLS; `destroySlotClients()`
+then frees client buffers on a possibly-corrupted heap and OTA begins flashing
+with no barrier — the observed teardown heap panic. There is no coordination
+today between MQTT shutdown and flash writing beyond straight-line ordering on
+the loop task.
+
 Treat OTA teardown as a first-class test target throughout Phases 0, 2, 4, 5,
 and 7. It is not merely another restart case.
 
@@ -234,6 +362,13 @@ available. OTA-related lifecycle tests are release gates for any future change
 to bridge teardown, OTA sequencing, MQTT client lifetime, or task ownership.
 
 ### Phase 5: Implement cooperative MQTT shutdown
+
+**Status: Not started.** Verified premise: `end()` stops the MQTT task with a
+direct `vTaskDelete` mid-operation and no handshake, and lifecycle state is a
+single `_initialized` bool (no state enum). Note also that `begin()` is not
+currently guarded against a double-call — it re-creates the queue and task,
+leaking the prior ones — so fold that guard into the idempotent-start requirement
+below rather than leaving it to caller discipline.
 
 With Phase 0 behavior recorded and Phase 4 tests in place, replace direct task
 deletion with an explicit lifecycle such as:
@@ -266,6 +401,8 @@ Acceptance criteria:
 
 ### Phase 6: Expand request, queue, connection, and publication integration tests
 
+**Status: Not started.** Depends on Phase 4/5 lifecycle ownership being stable.
+
 After lifecycle ownership is stable, broaden deterministic integration coverage:
 
 - WebConfig POST/result/reboot/stop behavior, including lost responses,
@@ -286,6 +423,9 @@ backend retains pop/requeue/dequeue ownership. Do not make queue deduplication a
 prerequisite for the stability work.
 
 ### Phase 7: Establish uptime, memory, and fault-injection gates
+
+**Status: Not started.** The final validation gate; runs after the lifecycle and
+OTA-barrier work is in place.
 
 Use hardware soak tests to validate the already-tested design, not to discover
 basic lifecycle errors for the first time.
