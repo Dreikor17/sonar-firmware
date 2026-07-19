@@ -2367,18 +2367,17 @@ bool MQTTBridge::handleWiFiConnection(unsigned long now) {
         }
       }
     } else if (_wifi_disconnected_time > 0) {
-      unsigned long disconnected_duration = now - _wifi_disconnected_time;
-      static const unsigned long WIFI_BACKOFF_MS[] = { 15000, 30000, 60000, 120000, 300000 };
-      unsigned int idx = (_wifi_reconnect_backoff_attempt < 5) ? _wifi_reconnect_backoff_attempt : 4;
-      unsigned long delay_ms = WIFI_BACKOFF_MS[idx];
-      unsigned long elapsed_since_attempt = (now >= _last_wifi_reconnect_attempt)
-          ? (now - _last_wifi_reconnect_attempt)
-          : (ULONG_MAX - _last_wifi_reconnect_attempt + now + 1);
-      if (disconnected_duration >= delay_ms && elapsed_since_attempt >= delay_ms) {
+      // Backoff ladder + wrap-safe timing live in MQTTConnectionPolicy (Phase 6),
+      // exercised by host tests. Behavior is unchanged: both the link-down
+      // duration and the since-last-attempt interval must clear the current rung
+      // (elapsedMs is the wrap-safe form of the old ULONG_MAX branch).
+      if (MQTTConnectionPolicy::wifiReconnectDue(
+              (uint32_t)now, (uint32_t)_wifi_disconnected_time,
+              (uint32_t)_last_wifi_reconnect_attempt,
+              _wifi_reconnect_backoff_attempt)) {
         _last_wifi_reconnect_attempt = now;
-        if (_wifi_reconnect_backoff_attempt < 5) {
-          _wifi_reconnect_backoff_attempt++;
-        }
+        _wifi_reconnect_backoff_attempt =
+            MQTTConnectionPolicy::nextWifiBackoffAttempt(_wifi_reconnect_backoff_attempt);
         WiFi.disconnect();
         WiFi.begin(_obs->wifi_ssid, _obs->wifi_password);
       }
@@ -2697,7 +2696,7 @@ void MQTTBridge::processPacketQueue() {
       raw_published = publishRaw(&queued.packet_copy);
     }
 
-    bool any_published = packet_published || raw_published;
+    bool any_published = MQTTPacketQueuePolicy::queuedPacketPublished(packet_published, raw_published);
     const MQTTPacketQueuePolicy::RetryDecision retry =
         MQTTPacketQueuePolicy::retryDecision(
             any_published, queued.retry_attempts,
@@ -2823,7 +2822,7 @@ void MQTTBridge::processPacketQueue() {
       raw_published = publishRaw(&queued.packet_copy);
     }
 
-    bool any_published = packet_published || raw_published;
+    bool any_published = MQTTPacketQueuePolicy::queuedPacketPublished(packet_published, raw_published);
     const MQTTPacketQueuePolicy::RetryDecision retry =
         MQTTPacketQueuePolicy::retryDecision(
             any_published, queued.retry_attempts,

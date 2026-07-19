@@ -87,6 +87,17 @@ struct RetryDecision {
   uint32_t next_retry_ms;
 };
 
+// A queued packet counts as delivered if EITHER its structured-packet publish
+// or its raw-frame publish reached at least one slot. Partial success (one
+// succeeds while the other fails or was not attempted) is still success — the
+// packet completes and is not retried. This is the (packet, raw) outcome pairing
+// fed to retryDecision(); naming it keeps the "partial publish = done" contract
+// explicit and host-tested rather than inline in the bridge's queue drain.
+static inline bool queuedPacketPublished(bool packet_published,
+                                         bool raw_published) {
+  return packet_published || raw_published;
+}
+
 static inline RetryDecision retryDecision(bool any_published,
                                           uint8_t retry_attempts,
                                           uint32_t now) {

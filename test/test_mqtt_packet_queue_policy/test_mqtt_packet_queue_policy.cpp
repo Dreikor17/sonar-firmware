@@ -151,6 +151,29 @@ TEST(MQTTPacketQueuePolicy, RetrySchedulingDeadlineMayWrapToZero) {
                                       decision.retry_attempts));
 }
 
+TEST(MQTTPacketQueuePolicy, PartialPublishCountsAsDeliveredEitherWay) {
+  EXPECT_TRUE(QueuePolicy::queuedPacketPublished(true, true));
+  EXPECT_TRUE(QueuePolicy::queuedPacketPublished(true, false));   // packet ok, raw failed
+  EXPECT_TRUE(QueuePolicy::queuedPacketPublished(false, true));   // raw ok, packet failed
+  EXPECT_FALSE(QueuePolicy::queuedPacketPublished(false, false)); // neither reached a slot
+}
+
+TEST(MQTTPacketQueuePolicy, PublishOutcomePairingDrivesRetryDecision) {
+  // packet succeeds / raw fails -> completed, no retry.
+  QueuePolicy::RetryDecision d =
+      QueuePolicy::retryDecision(QueuePolicy::queuedPacketPublished(true, false), 0, 1234U);
+  EXPECT_EQ(QueuePolicy::RetryAction::Complete, d.action);
+
+  // raw succeeds / packet fails -> also completed.
+  d = QueuePolicy::retryDecision(QueuePolicy::queuedPacketPublished(false, true), 0, 1234U);
+  EXPECT_EQ(QueuePolicy::RetryAction::Complete, d.action);
+
+  // both fail on a fresh packet -> scheduled for a bounded retry.
+  d = QueuePolicy::retryDecision(QueuePolicy::queuedPacketPublished(false, false), 0, 1234U);
+  EXPECT_EQ(QueuePolicy::RetryAction::Schedule, d.action);
+  EXPECT_EQ(1U, d.retry_attempts);
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

@@ -152,6 +152,49 @@ TEST(MQTTConnectionPolicy, JwtClockNeedsNtpOrAReasonableWallClock) {
   EXPECT_TRUE(Policy::jwtClockAvailable(true, 0U));
 }
 
+TEST(MQTTConnectionPolicy, WifiBackoffLadderStartsAtFifteenSecondsAndSaturates) {
+  EXPECT_EQ(15000U, Policy::wifiReconnectBackoffMs(0));
+  EXPECT_EQ(30000U, Policy::wifiReconnectBackoffMs(1));
+  EXPECT_EQ(60000U, Policy::wifiReconnectBackoffMs(2));
+  EXPECT_EQ(120000U, Policy::wifiReconnectBackoffMs(3));
+  EXPECT_EQ(300000U, Policy::wifiReconnectBackoffMs(4));
+  // Clamps at the 300 s rung for the saturated attempt count and beyond.
+  EXPECT_EQ(300000U, Policy::wifiReconnectBackoffMs(5));
+  EXPECT_EQ(300000U, Policy::wifiReconnectBackoffMs(200));
+}
+
+TEST(MQTTConnectionPolicy, WifiBackoffAttemptClimbsThenSaturatesAtFive) {
+  uint8_t attempt = 0;
+  for (uint8_t expected = 1; expected <= 5; ++expected) {
+    attempt = Policy::nextWifiBackoffAttempt(attempt);
+    EXPECT_EQ(expected, attempt);
+  }
+  // Saturated: never advances past 5 (index stays clamped at the 300 s rung).
+  EXPECT_EQ(5U, Policy::nextWifiBackoffAttempt(attempt));
+  EXPECT_EQ(5U, Policy::nextWifiBackoffAttempt(5));
+}
+
+TEST(MQTTConnectionPolicy, WifiReconnectRequiresBothDownAndSinceAttemptToClearRung) {
+  const uint32_t down_since = 1000U;
+  const uint32_t last_attempt = 1000U;
+  const uint8_t attempt = 0;  // 15 s rung
+  // Neither interval has elapsed yet.
+  EXPECT_FALSE(Policy::wifiReconnectDue(1000U + 14999U, down_since, last_attempt, attempt));
+  // Down long enough, but an attempt was made only 5 s ago (since-attempt short).
+  EXPECT_FALSE(Policy::wifiReconnectDue(1000U + 15000U, down_since, 1000U + 10000U, attempt));
+  // Both cleared at the exact boundary: due.
+  EXPECT_TRUE(Policy::wifiReconnectDue(1000U + 15000U, down_since, last_attempt, attempt));
+}
+
+TEST(MQTTConnectionPolicy, WifiReconnectDueSurvivesMillisRollover) {
+  const uint32_t down_since = std::numeric_limits<uint32_t>::max() - 100U;
+  const uint32_t last_attempt = down_since;
+  const uint8_t attempt = 0;  // 15 s rung
+  const uint32_t now = down_since + 15000U;  // wraps past zero
+  EXPECT_TRUE(Policy::wifiReconnectDue(now, down_since, last_attempt, attempt));
+  EXPECT_FALSE(Policy::wifiReconnectDue(down_since + 14999U, down_since, last_attempt, attempt));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
