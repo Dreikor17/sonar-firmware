@@ -36,9 +36,14 @@ void HeltecTrackerV2Board::begin() {
   }
 
   void HeltecTrackerV2Board::powerOff() {
-    // Turn off PA
+    // Turn off PA. Guarded because this board file is also compiled for the
+    // heltec_tracker_v1_1 envs, which do not define P_LORA_PA_POWER (it is set
+    // only in variants/heltec_tracker_v2/platformio.ini). Same guard idiom
+    // LoRaFEMControl.cpp already uses for this macro.
+#if defined(P_LORA_PA_POWER)
     digitalWrite(P_LORA_PA_POWER, LOW);
     rtc_gpio_hold_en((gpio_num_t)P_LORA_PA_POWER);
+#endif
 
     ESP32Board::powerOff();
   }
@@ -67,24 +72,6 @@ void HeltecTrackerV2Board::begin() {
 #else
     return "Heltec Tracker V2";
 #endif
-  }
-
-  bool HeltecTrackerV2Board::setLoRaFemLnaEnabled(bool enable) {
-    if (!loRaFEMControl.isLnaCanControl()) {
-      return false;
-    }
-
-    loRaFEMControl.setLNAEnable(enable);
-    loRaFEMControl.setRxModeEnable();
-    return true;
-  }
-
-  bool HeltecTrackerV2Board::canControlLoRaFemLna() const {
-    return loRaFEMControl.isLnaCanControl();
-  }
-
-  bool HeltecTrackerV2Board::isLoRaFemLnaEnabled() const {
-    return loRaFEMControl.isLNAEnabled();
   }
 
   bool HeltecTrackerV2Board::setLoRaFemLnaEnabled(bool enable) {
