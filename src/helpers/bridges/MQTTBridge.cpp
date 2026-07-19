@@ -661,7 +661,7 @@ void MQTTBridge::begin() {
   // would re-run allocation and re-create the task, leaking the previous
   // queue/task. Guard here instead of relying on caller discipline.
   if (_initialized) {
-    MQTT_DEBUG_PRINTLN("MQTT Bridge already running — begin() ignored");
+    MQTT_DEBUG_PRINTLN("MQTT Bridge already running - begin() ignored");
     return;
   }
 
@@ -910,7 +910,7 @@ void MQTTBridge::end() {
 
   // Idempotent stop: nothing to tear down if we never started (or already stopped).
   if (!_initialized) {
-    MQTT_DEBUG_PRINTLN("MQTT Bridge already stopped — end() ignored");
+    MQTT_DEBUG_PRINTLN("MQTT Bridge already stopped - end() ignored");
     return;
   }
 
@@ -966,7 +966,7 @@ void MQTTBridge::end() {
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
   MQTT_DEBUG_PRINTLN("MQTT Bridge stopped (%s)",
-                     _lifecycle.stopTimedOut() ? "forced/timeout — OTA blocked" : "clean");
+                     _lifecycle.stopTimedOut() ? "forced/timeout - OTA blocked" : "clean");
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,7 +1148,7 @@ void MQTTBridge::mqttTaskLoop() {
     // this teardown has completed, then self-terminate via the mqttTask()
     // trampoline (vTaskDelete(nullptr)).
     if (_stop_requested) {
-      MQTT_DEBUG_PRINTLN("MQTT task: cooperative stop — tearing down clients on Core 0");
+      MQTT_DEBUG_PRINTLN("MQTT task: cooperative stop - tearing down clients on Core 0");
       for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
         teardownSlot(i);
       }
@@ -1256,7 +1256,7 @@ void MQTTBridge::mqttTaskLoop() {
           }
           char reason[80];
           if (!isSlotReady(i, reason, sizeof(reason))) {
-            MQTT_DEBUG_PRINTLN("MQTT%d not ready — run '%s' to connect", i + 1, reason);
+            MQTT_DEBUG_PRINTLN("MQTT%d not ready - run '%s' to connect", i + 1, reason);
             continue;
           }
           setupSlot(i);
@@ -1498,7 +1498,7 @@ void MQTTBridge::setupSlot(int index) {
   // Persistent client is expected to have been allocated by initSlotClients().
   // If it hasn't, we can't proceed — bail loudly rather than silently leaking.
   if (slot.client == nullptr) {
-    MQTT_DEBUG_PRINTLN("MQTT%d: setupSlot before initSlotClients() — skipping", index + 1);
+    MQTT_DEBUG_PRINTLN("MQTT%d: setupSlot before initSlotClients() - skipping", index + 1);
     return;
   }
 
@@ -2270,7 +2270,7 @@ void MQTTBridge::applySlotPreset(int slot_index, const char* preset_name) {
     if (_initialized) {
       char reason[80];
       if (!isSlotReady(slot_index, reason, sizeof(reason))) {
-        MQTT_DEBUG_PRINTLN("MQTT%d (%s) not ready — run '%s' to connect", slot_index + 1, preset_name, reason);
+        MQTT_DEBUG_PRINTLN("MQTT%d (%s) not ready - run '%s' to connect", slot_index + 1, preset_name, reason);
         return;
       }
       setupSlot(slot_index);
@@ -2301,7 +2301,7 @@ void MQTTBridge::checkConfigurationMismatch() {
   if (_obs->mqtt_packets_enabled && !_obs->mqtt_rx_enabled && _obs->mqtt_tx_enabled == 0) {
     unsigned long now = millis();
     if (_last_config_warning == 0 || (now - _last_config_warning > CONFIG_WARNING_INTERVAL)) {
-      MQTT_DEBUG_PRINTLN("MQTT: Both mqtt.rx and mqtt.tx are off — no packets will be published. Run 'set mqtt.rx on' or 'set mqtt.tx on' to fix.");
+      MQTT_DEBUG_PRINTLN("MQTT: Both mqtt.rx and mqtt.tx are off - no packets will be published. Run 'set mqtt.rx on' or 'set mqtt.tx on' to fix.");
       _last_config_warning = now;
     }
   } else {

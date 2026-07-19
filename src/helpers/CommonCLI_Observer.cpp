@@ -785,7 +785,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
       if (_mqtt_prefs.mqtt_slot_audience[slot][0] != '\0') {
         sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_audience[slot]);
       } else {
-        strcpy(reply, "> (not set — custom slots use username/password auth)");
+        strcpy(reply, "> (not set - custom slots use username/password auth)");
       }
     } else if (memcmp(subcmd, "diag", 4) == 0) {
       MQTTBridge::formatSlotDiagReply(reply, 160, slot);
