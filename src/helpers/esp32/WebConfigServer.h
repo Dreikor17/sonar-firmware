@@ -29,6 +29,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <helpers/WebConfigBatch.h>
 
 class AsyncWebServer;
 class AsyncWebServerRequest;
@@ -87,13 +88,27 @@ public:
   bool isStopping() const { return _stopping; }
 
 private:
-  static const int MAX_BATCH = 24;
+  // Batch/reboot/stop decisions and timings live in the fork-owned pure spec
+  // WebConfigBatch.h (host-tested by test/test_webconfig_batch). These aliases
+  // keep a single source of truth so the spec and this server cannot drift.
+  static const int MAX_BATCH = WebConfigBatch::kMaxBatch;
   static const size_t MAX_BODY = 4096;
   // A detached session normally drains immediately because handlers are short.
   // If one does not, keep the session alive (safe) and emit a diagnostic rather
   // than freeing memory still referenced by the async task.
-  static const uint32_t STOP_WARN_MS = 10000;
+  static const uint32_t STOP_WARN_MS = WebConfigBatch::kStopWarnMs;
   enum BatchState : uint8_t { BATCH_IDLE = 0, BATCH_PENDING, BATCH_DONE };
+
+  // BatchState and WebConfigBatch::State are deliberately kept as separate
+  // types (the enum is stored in a volatile member and used in prints); this
+  // is the one conversion point.
+  static WebConfigBatch::State toSpecState(BatchState s) {
+    switch (s) {
+      case BATCH_PENDING: return WebConfigBatch::State::Pending;
+      case BATCH_DONE:    return WebConfigBatch::State::Done;
+      default:            return WebConfigBatch::State::Idle;
+    }
+  }
   struct BatchEntry {
     char key[24];     // allowlisted `set` key (echoed back to the UI)
     char cmd[160];    // full CLI command (may contain secrets - never echoed)

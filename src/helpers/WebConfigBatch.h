@@ -11,14 +11,24 @@
 // exercised deterministically without AsyncWebServer, ArduinoJson, WiFi, or the
 // FreeRTOS mutex/refcount.
 //
-// Scope boundary (spec-first, exactly like Phase 4's MQTTLifecycle.h): this
-// header is the SPEC and the test seam. It is NOT yet wired into
-// WebConfigServer.cpp. The batch/reboot/stop state machine there is
-// hardware-tuned (it was debugged against real iOS captive-portal behavior,
-// HTTP caching, and route ordering), so the production rewiring that makes these
-// functions load-bearing is a deliberately separate, hardware-validated
-// follow-up. Until then, keep this in sync with WebConfigServer.cpp by hand; the
-// file:line references below point at the behavior each function mirrors.
+// WIRED: WebConfigServer.cpp calls these functions directly, so they are
+// load-bearing and the host tests cover production behavior rather than a
+// parallel copy of it. MAX_BATCH and STOP_WARN_MS in WebConfigServer.h alias
+// kMaxBatch/kStopWarnMs here, so the constants cannot drift either.
+//
+// Two deliberate asymmetries remain between this spec and its caller:
+//
+//  1. finishRebootAt() returns 0 for "no reboot scheduled", but the caller must
+//     only ASSIGN _reboot_at when the result is non-zero. _reboot_at is not
+//     solely batch-owned — the manual /api/reboot route arms it from the
+//     async_tcp task, possibly while a batch is still draining — so an
+//     unconditional assign would silently cancel a manual reboot.
+//  2. classifyPost() is consulted in two phases by handleConfigPost, because the
+//     change count is only known after the `set` map is parsed, and parsing must
+//     not precede the Replay/Busy answer (a replayed POST carrying a bad key
+//     must still receive its 202).
+//
+// The file:line references below point at the behavior each function mirrors.
 //
 // Behavior source (all line refs against WebConfigServer.{h,cpp} at the time of
 // writing): constants at .h:90-96,155-161; POST accept at .cpp:610-719; drain at

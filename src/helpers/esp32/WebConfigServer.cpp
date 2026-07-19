@@ -69,8 +69,9 @@ WebConfigServer::~WebConfigServer() {
 
 bool WebConfigServer::isRebootPending() {
   WebConfigServer* w = _active;
-  return w != NULL && w->_reboot_at != 0 && w->_batch_reboot &&
-         w->_batch_state == BATCH_DONE;
+  return w != NULL && WebConfigBatch::isConfigRebootPending(
+                          w->_reboot_at, w->_batch_reboot,
+                          toSpecState(w->_batch_state));
 }
 
 bool WebConfigServer::getSetupInfo(char* ssid, size_t ssid_len, char* ip, size_t ip_len) {
@@ -191,8 +192,7 @@ void WebConfigServer::requestStop() {
   if (_dns) _dns->stop();
   _mode = MODE_OFF;
   _stopping = true;
-  uint32_t warn_at = millis() + STOP_WARN_MS;
-  _stop_warn_at = warn_at ? warn_at : 1;
+  _stop_warn_at = WebConfigBatch::scheduleAt(millis(), STOP_WARN_MS);
   _stop_warned = false;
 }
 
@@ -244,12 +244,17 @@ void WebConfigServer::finalizeTeardown() {
 void WebConfigServer::tick(uint32_t now) {
   if (_stopping) {
     uint32_t refs = handlerRefCount();
-    if (refs == 0) {
-      finalizeTeardown();
-    } else if (!_stop_warned && _stop_warn_at && (int32_t)(now - _stop_warn_at) >= 0) {
-      _stop_warned = true;
-      Serial.printf("WC: stop waiting for %lu handler(s); retaining session safely\n",
-                    (unsigned long)refs);
+    switch (WebConfigBatch::stopStep(refs, _stop_warned, _stop_warn_at, now)) {
+      case WebConfigBatch::StopAction::Finalize:
+        finalizeTeardown();
+        break;
+      case WebConfigBatch::StopAction::Warn:
+        _stop_warned = true;
+        Serial.printf("WC: stop waiting for %lu handler(s); retaining session safely\n",
+                      (unsigned long)refs);
+        break;
+      case WebConfigBatch::StopAction::Wait:
+        break;
     }
     return;
   }
@@ -259,7 +264,7 @@ void WebConfigServer::tick(uint32_t now) {
 
   if (_batch_state == BATCH_PENDING) drainBatch(now);
 
-  if (_reboot_at && (int32_t)(now - _reboot_at) >= 0) {
+  if (WebConfigBatch::rebootDue(_reboot_at, now)) {
     Serial.printf("WC: rebooting now (%s)\n", _batch_reboot_armed ? "confirmed" : "fallback");
     _cb->rebootNow();  // does not return
   }
@@ -293,7 +298,7 @@ void WebConfigServer::drainBatch(uint32_t now) {
   // clients (iPhones especially) to drop off mid-save.
   if (_batch_next == 0) {
     _cb->onConfigBatchStart();
-  } else if (_batch_next < _batch_count && (int32_t)(now - _batch_last_cmd) < 25) {
+  } else if (WebConfigBatch::drainMustWait(_batch_next, _batch_count, now, _batch_last_cmd)) {
     return;  // let the WiFi task breathe between flash writes
   }
   if (_batch_next < _batch_count) {
@@ -311,25 +316,31 @@ void WebConfigServer::drainBatch(uint32_t now) {
       if (e.reply[0] == 0) strcpy(e.reply, "OK");
       // Success convention across every allowlisted setter is an "OK" prefix
       // (the UI relies on the same test); anything else is a rejection.
-      if (strncmp(e.reply, "OK", 2) != 0) _batch_all_ok = false;
+      _batch_all_ok = WebConfigBatch::nextAllOk(_batch_all_ok,
+                                                strncmp(e.reply, "OK", 2) == 0);
     }
     _batch_last_cmd = millis();
     Serial.printf("WC: cmd %d/%d '%s' took %lums\n", (int)_batch_next, (int)_batch_count,
                   e.key, (unsigned long)(_batch_last_cmd - t0));
-    if (_batch_next < _batch_count) return;  // more commands next tick
+    if (!WebConfigBatch::drainFinished(_batch_next, _batch_count)) {
+      return;  // more commands next tick
+    }
   }
   _cb->onConfigBatchEnd();
   WCLock lock(_mux);
   _batch_state = BATCH_DONE;
-  if (_batch_reboot && _batch_all_ok) {
+  // Assign only when a reboot is actually scheduled. finishRebootAt() returns 0
+  // for "not scheduled", but _reboot_at is NOT solely batch-owned: the manual
+  // /api/reboot route can arm it from the async_tcp task while a batch is still
+  // draining, and an unconditional assign here would silently cancel it.
+  if (WebConfigBatch::finishRebootAt(_batch_reboot, _batch_all_ok, now) != 0) {
     // Fallback only, and only when every command succeeded: rebooting into a
     // partially-applied config would strand the node. The real 3 s reboot timer
     // is armed when the client reads /api/config/result (handleConfigResult), so
     // the browser gets its confirmation before the AP/WiFi drops. This covers a
     // client that disconnected and never polls — generous enough for a phone
     // that got bounced off the AP mid-save to rejoin and fetch its confirmation.
-    _reboot_at = now + 30000;
-    if (_reboot_at == 0) _reboot_at = 1;
+    _reboot_at = WebConfigBatch::finishRebootAt(_batch_reboot, _batch_all_ok, now);
   }
 }
 
@@ -634,9 +645,20 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
   // Repeating a POST with the same request ID is also idempotent: acknowledge
   // the batch already occupying the slot instead of applying its commands a
   // second time after an ambiguous network failure.
-  if (_batch_state != BATCH_IDLE && strcmp(reqid, _batch_reqid) == 0) {
+  // Classification lives in WebConfigBatch::classifyPost. It is consulted in two
+  // phases because the change count is only known after the `set` map is parsed
+  // below, and parsing must not run before Replay/Busy are answered (a replayed
+  // POST carrying a bad key must still get its 202, not a 400). kCountUnknown is
+  // a non-zero placeholder that keeps the count-dependent arms unreachable here.
+  const WebConfigBatch::State bstate = toSpecState(_batch_state);
+  const bool reqid_matches = (strcmp(reqid, _batch_reqid) == 0);
+  const int kCountUnknown = 1;
+  const WebConfigBatch::PostOutcome pre =
+      WebConfigBatch::classifyPost(bstate, reqid_matches, kCountUnknown, reboot_after);
+
+  if (pre == WebConfigBatch::PostOutcome::Replay) {
     StaticJsonDocument<96> ack;
-    ack["state"] = _batch_state == BATCH_DONE ? "done" : "pending";
+    ack["state"] = WebConfigBatch::replayStateName(bstate);
     ack["count"] = _batch_count;
     ack["reqid"] = (const char*)_batch_reqid;
     String out;
@@ -644,7 +666,7 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
     req->send(202, "application/json", out);
     return;
   }
-  if (_batch_state == BATCH_PENDING) {
+  if (pre == WebConfigBatch::PostOutcome::Busy) {
     // Echo the in-flight batch's reqid so the caller can tell its own retry
     // (same reqid — landed, keep polling) from another client's save.
     StaticJsonDocument<96> bd;
@@ -692,7 +714,10 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
     e.cmd[pos] = 0;
     count++;
   }
-  if (count == 0 && !reboot_after) {
+  // Phase 2: the count is now known, so the remaining NoChanges/Accept arms
+  // resolve. Replay/Busy were already answered above.
+  if (WebConfigBatch::classifyPost(bstate, reqid_matches, count, reboot_after) ==
+      WebConfigBatch::PostOutcome::NoChanges) {
     req->send(400, "application/json", "{\"error\":\"no changes\"}");
     return;
   }
@@ -735,7 +760,9 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
   // fires but no branch print follows, the handler is blocked on _mux.
   Serial.printf("WC: result entry mode=%d state=%d\n", (int)_mode, (int)_batch_state);
   WCLock lock(_mux);
-  if (_batch_state == BATCH_IDLE) {
+  const WebConfigBatch::ResultOutcome outcome = WebConfigBatch::classifyResult(
+      toSpecState(_batch_state), strcmp(requested_reqid.c_str(), _batch_reqid) == 0);
+  if (outcome == WebConfigBatch::ResultOutcome::Idle) {
     Serial.println("WC: result read -> idle");
     StaticJsonDocument<64> idle;
     idle["state"] = "idle";
@@ -745,11 +772,11 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
     req->send(200, "application/json", out);
     return;
   }
-  if (strcmp(requested_reqid.c_str(), _batch_reqid) != 0) {
+  if (outcome == WebConfigBatch::ResultOutcome::Unknown) {
     req->send(404, "application/json", "{\"error\":\"unknown request\"}");
     return;
   }
-  if (_batch_state == BATCH_PENDING) {
+  if (outcome == WebConfigBatch::ResultOutcome::Pending) {
     StaticJsonDocument<96> pd;
     pd["state"] = "pending";
     pd["reqid"] = (const char*)_batch_reqid;
@@ -764,7 +791,7 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
   doc["state"] = "done";
   // Only advertise a reboot when it will actually happen: a partially-failed
   // batch is not rebooted (see below), so the UI must not show a reboot screen.
-  doc["reboot"] = _batch_reboot && _batch_all_ok;
+  doc["reboot"] = WebConfigBatch::doneReportsReboot(_batch_reboot, _batch_all_ok);
   doc["all_ok"] = _batch_all_ok;
   doc["reqid"] = (const char*)_batch_reqid;
   JsonArray results = doc.createNestedArray("results");
@@ -774,15 +801,15 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
     r["reply"] = (const char*)_batch[i].reply;
   }
   // State stays DONE (re-readable) until the next POST claims the slot.
-  if (_batch_reboot && _batch_all_ok && !_batch_reboot_armed) {
+  if (WebConfigBatch::shouldArmConfirmReboot(toSpecState(_batch_state), _batch_reboot,
+                                             _batch_all_ok, _batch_reboot_armed)) {
     // Confirmation delivered and every command succeeded — reboot 3 s from now
     // (replaces the 30 s drain-time fallback) so the UI can show its countdown
     // first. Armed once; re-reads must not keep pushing the deadline out. A
     // partially-failed batch is deliberately left running so the operator can
     // correct and retry instead of rebooting into a broken config.
     _batch_reboot_armed = true;
-    _reboot_at = millis() + 3000;
-    if (_reboot_at == 0) _reboot_at = 1;
+    _reboot_at = WebConfigBatch::confirmRebootAt(millis());
   }
 
   AsyncResponseStream* res = req->beginResponseStream("application/json");
