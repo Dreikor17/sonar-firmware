@@ -468,12 +468,19 @@ into the pure policy seams and covered:
 - `MQTTPublicationType` values frozen in `test_mqtt_topic_router`; the
   bridge-side `MQTTMessageType` alignment was already a compile-time `static_assert`.
 
-Still open (each a good follow-up PR): the **WebConfig POST/result/reboot/stop
-state machine** (largest gap — all inline in `WebConfigServer.cpp`; natural to
-extract a pure `WebConfigBatch` seam mirroring `MQTTLifecycle.h`) and the
-**queue-orchestration** behaviors (FIFO ordering, evict/requeue-failure interplay,
-the two adapters' drop-vs-keep-head divergence), which need a fake-queue harness.
-The original scope list follows.
+The **WebConfig POST/result/reboot/stop state machine** (the largest gap) now
+has a pure, host-tested SPEC — `src/helpers/WebConfigBatch.h` +
+`test/test_webconfig_batch/` on branch `phase6/webconfig-batch-seam` — that
+faithfully characterizes the accept/drain/result/reboot/stop decisions currently
+inline in `WebConfigServer.cpp`. Like Phase 4's `MQTTLifecycle.h`, it is
+**spec-first and NOT yet wired**: rewiring the hardware-tuned server to consume it
+(so it becomes load-bearing and non-drifting) is a deliberately separate,
+hardware-validated follow-up.
+
+Still open (each a good follow-up PR): wiring `WebConfigServer.cpp` to the
+`WebConfigBatch` spec above, and the **queue-orchestration** behaviors (FIFO
+ordering, evict/requeue-failure interplay, the two adapters' drop-vs-keep-head
+divergence), which need a fake-queue harness. The original scope list follows.
 
 After lifecycle ownership is stable, broaden deterministic integration coverage:
 
