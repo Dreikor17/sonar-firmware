@@ -7,11 +7,14 @@ for each. It is paired with the fork-owned lifecycle test seam
 (`src/helpers/MQTTLifecycle.h`, `test/test_mqtt_lifecycle/`).
 
 **Status:** ownership model documented and the lifecycle/teardown test seam
-landed. The production rewiring it describes (publishing a plain-data snapshot,
-replacing the `volatile` handshakes, cooperative shutdown) is **deferred to
-Phase 5** — this document is the plan Phase 5 executes, not a description of
-current behavior. Line references are against the tree at the time of writing
-and should be re-verified before editing.
+landed (Phase 4). **Phase 5 (branch `phase5/cooperative-mqtt-shutdown`) has now
+implemented the cooperative shutdown and the OTA barrier — hazard §4 below.**
+Still **deferred** (carried to Phase 5b / Phase 6): publishing a plain-data
+snapshot and repointing the §1/§2 consumers, and replacing the §3 `volatile`
+handshakes with a command channel. This document is the plan; §1–§3 still
+describe current behavior, while §4 is now resolved (see its note). Line
+references are against the tree at the time of writing and should be re-verified
+before editing.
 
 ## Execution contexts
 
@@ -98,15 +101,31 @@ clears/processes and writes a "done" flag last, Core 1 spins:
 The two blocking waiters (`requestForcedNtpSync` `:3298`, `ntpDiag` `:3344`) spin
 on Core 1 while `end()` could tear down the singleton/task concurrently.
 
-### 4. Abrupt teardown, no start guard
+### 4. Abrupt teardown, no start guard — RESOLVED in Phase 5
 
-- `end()` uses `vTaskDelete(_mqtt_task_handle)` (`MQTTBridge.cpp:862`) — the task
-  is killed wherever it is (possibly mid-`_slots[]` mutation, or inside
-  mbedTLS); slot/client cleanup then runs *after* deletion on the caller's
-  context (`:902-905`). This is the OTA teardown heap-panic path.
-- `begin()` (`:626`) has **no double-call guard** — a second `begin()` re-runs
-  allocation and `xTaskCreatePinnedToCore`, leaking the prior queue/task.
-- Lifecycle state is a single `_initialized` bool; there is no state enum.
+Original hazard (retained for context): `end()` used
+`vTaskDelete(_mqtt_task_handle)` to kill the task wherever it was (possibly
+mid-`_slots[]` mutation or inside mbedTLS), then ran slot/client cleanup *after*
+deletion on the caller's context — the OTA teardown heap-panic path. `begin()`
+had no double-call guard, and lifecycle state was a single `_initialized` bool.
+
+**Phase 5 resolution** (branch `phase5/cooperative-mqtt-shutdown`):
+
+- `end()` now requests a cooperative stop through `MQTTLifecycle::Coordinator`.
+  The MQTT task (Core 0) tears down its own clients where the mbedTLS contexts
+  live, acknowledges via `_stop_acked`, and self-terminates; `end()` waits for
+  the ack before freeing the queue/buffers. The blind `vTaskDelete` survives
+  only as the bounded-timeout fallback, which sets a dirty latch that withholds
+  OTA flashing (`canFlashAfterStop()`).
+- `begin()` has an idempotent double-call guard and drives the Coordinator to
+  `Running`; the lifecycle state now lives in the tested state machine, not a
+  bare bool.
+- The OTA barrier gates `simple_repeater`'s deferred flash on a clean stop.
+
+Not hardware-validated yet (Phase 7); `MQTT_STOP_TIMEOUT_MS` is a Phase-0
+placeholder. Note the residual §1/§2 instance-pointer reads remain deferred, so
+consumers can still (as before) touch a torn-down bridge — that is unchanged by
+Phase 5 and tracked above.
 
 ## Target primitives (Phase 5)
 

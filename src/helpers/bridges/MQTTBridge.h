@@ -9,6 +9,7 @@
 #include <Timezone.h>
 #include "helpers/JWTHelper.h"
 #include "helpers/MQTTPresets.h"
+#include "helpers/MQTTLifecycle.h"
 
 #ifdef WITH_SNMP
 class MeshSNMPAgent;  // Forward declaration
@@ -221,6 +222,16 @@ private:
   NtpDiagResult _ntp_diag_results[kMaxNtpServers];
   int _ntp_diag_count;
 
+  // Cooperative-shutdown handshake (Phase 5). The loop task (Core 1) raises
+  // _stop_requested through the lifecycle Coordinator; the MQTT task (Core 0)
+  // sees it, tears down its own clients on Core 0 (where the mbedTLS contexts
+  // live), sets _stop_acked LAST, and self-terminates. end() waits for the ack
+  // before freeing the queue/buffers. Plain volatile matches the existing
+  // NTP/reconfigure handshake idiom above; replacing all of these with a command
+  // channel / task notifications is explicitly deferred (see MQTT_OWNERSHIP.md).
+  volatile bool _stop_requested = false;
+  volatile bool _stop_acked = false;
+
   // Timezone handling.
   // _timezone_storage is inline class storage (zero heap) that is reconfigured
   // via setRules() whenever the preferred timezone string changes. _timezone
@@ -382,6 +393,27 @@ private:
   void allocateRuntimeBuffers();
   void releaseRuntimeBuffers();
 
+  // --- Cooperative lifecycle (Phase 5) ---------------------------------------
+  // The pure state machine, bounded stop timeout, and OTA barrier live in
+  // src/helpers/MQTTLifecycle.h and are host-tested by test/test_mqtt_lifecycle/.
+  // This nested Ops binds that spec to FreeRTOS/PsychicMqttClient. The
+  // Coordinator is owned and driven ONLY by the loop task (Core 1) from
+  // begin()/end(); the MQTT task (Core 0) communicates solely through the
+  // _stop_requested/_stop_acked flags above. Methods are defined in the .cpp.
+  class LifecycleOps : public MQTTLifecycle::Ops {
+   public:
+    explicit LifecycleOps(MQTTBridge* bridge) : _b(bridge) {}
+    uint32_t nowMs() override;
+    void startTask() override;
+    void deliverStop() override;
+    void releaseResources() override;
+    void onStopComplete(bool clean) override;
+   private:
+    MQTTBridge* _b;
+  };
+  LifecycleOps _lifecycle_ops;
+  MQTTLifecycle::Coordinator _lifecycle;
+
   // Observer config (MQTT/WiFi/timezone/SNMP/alert), persisted to /mqtt_prefs.
   // _prefs (held by BridgeBase) still provides upstream fields (freq/sf/node_name…).
   MQTTPrefs* _obs = nullptr;
@@ -430,6 +462,11 @@ public:
   int getConnectedBrokers() const;
   int getQueueSize() const;
   bool isReady() const;
+  /** True only after a CLEAN cooperative stop — end() received the MQTT task's
+   *  acknowledgment within the timeout. A timed-out/forced stop returns false so
+   *  OTA flashing is withheld until a clean start/stop cycle. Mirrors
+   *  MQTTLifecycle::mayBeginFlash(); read on the loop task (Core 1). */
+  bool canFlashAfterStop() const { return _lifecycle.mayBeginFlash(); }
 
   static unsigned long getWifiConnectedAtMillis();
 

@@ -26,10 +26,10 @@ index.
 | 1 | PR CI smoke builds + ArduinoJson pin enforcement | Done (build-size gate and ASan/UBSan still pending) |
 | 2 | PSRAM restart resource symmetry | Done |
 | 3 | MQTT preference migration fixtures | Done (filesystem adapter still lives in `CommonCLI`) |
-| 0 | Pre-change lifecycle characterization | Not started — deterministic behavior encoded in Phase 4; hardware items pending |
+| 0 | Pre-change lifecycle characterization | Deterministic behavior encoded in Phase 4/5; hardware items pending (stop-timeout value is a placeholder) |
 | 4 | Ownership and teardown test seams | Seams + ownership doc + teardown tests done; production rewiring deferred to Phase 5 |
-| 5 | Cooperative MQTT shutdown | Not started (fixes the OTA teardown panic) |
-| — | OTA teardown barrier | Not started — release-critical |
+| 5 | Cooperative MQTT shutdown | Minimal cooperative `end()` + `begin()` guard + OTA barrier implemented on branch `phase5/cooperative-mqtt-shutdown` (native green, firmware smoke build green); NOT hardware-validated. Volatile-handshake replacement + snapshot-consumer repointing deferred |
+| — | OTA teardown barrier | Implemented — flash gated on a clean MQTT stop in `simple_repeater`; not hardware-validated |
 | 6 | Request/queue/connection/publication integration tests | Not started |
 | 7 | Uptime, memory, and fault-injection gates | Not started |
 
@@ -387,15 +387,44 @@ to bridge teardown, OTA sequencing, MQTT client lifetime, or task ownership.
 
 ### Phase 5: Implement cooperative MQTT shutdown
 
-**Status: Not started.** Verified premise: `end()` stops the MQTT task with a
-direct `vTaskDelete` mid-operation and no handshake, and lifecycle state is a
-single `_initialized` bool (no state enum). Note also that `begin()` is not
-currently guarded against a double-call — it re-creates the queue and task,
-leaking the prior ones — so fold that guard into the idempotent-start requirement
-below rather than leaving it to caller discipline.
+**Status: Minimal cooperative shutdown implemented on branch
+`phase5/cooperative-mqtt-shutdown` (scope: "the smallest change that fixes the
+OTA teardown panic as one reviewable unit"). Native suite green; the non-PSRAM
+observer firmware smoke build compiles. NOT yet hardware-validated — that is the
+Phase 7 gate — and the stop timeout is a Phase-0 placeholder (see below).**
 
-With Phase 0 behavior recorded and Phase 4 tests in place, replace direct task
-deletion with an explicit lifecycle such as:
+What landed (wiring the Phase 4 `MQTTLifecycle` state machine into the bridge):
+
+- `MQTTBridge` owns a `MQTTLifecycle::Coordinator` driven **only** by the loop
+  task (Core 1) from `begin()`/`end()`. A nested `LifecycleOps` binds the pure,
+  host-tested `Ops` spec to FreeRTOS/PsychicMqttClient.
+- `end()` no longer blind-`vTaskDelete`s. It requests a cooperative stop; the
+  MQTT task (Core 0) sees a new `volatile _stop_requested`, tears down its own
+  clients **on Core 0 where the mbedTLS contexts live**, sets `_stop_acked`
+  last, and self-terminates. `end()` waits (bounded) for the ack, then frees the
+  queue/buffers. This removes the "kill the task mid-mbedTLS, then free client
+  buffers on a corrupted heap" teardown path.
+- Bounded stop timeout → reviewed fallback: on timeout the task is force-killed
+  and torn down on Core 1 (the old behavior), but a **dirty latch** is set so
+  `canFlashAfterStop()` is false and OTA flashing is withheld.
+- `begin()` has a double-call guard and syncs the Coordinator to `Running`.
+- OTA teardown barrier: `simple_repeater`'s deferred-OTA fire site aborts and
+  resumes the bridge unless the preceding `end()` reported a clean stop.
+
+Deferred (kept out of this reviewable unit; carried to a Phase 5b / Phase 6):
+replacing the `volatile` NTP/reconfigure handshakes with a command channel, and
+publishing a plain-data status snapshot to repoint the §1/§2 consumers in
+`MQTT_OWNERSHIP.md` (the `AlertReporter`/`buildStatsJson` instance-pointer reads
+that can still touch a torn-down bridge). Those are not required to fix the OTA
+panic and would enlarge the merge-sensitive diff.
+
+**Phase 0 dependency still open:** `MQTT_STOP_TIMEOUT_MS` is a conservative 8 s
+placeholder. It must be characterized against real mbedTLS teardown over `wss`
+with a down broker (Phase 0) before this ships; it is a single named constant so
+that change is trivial.
+
+The original plan of record follows. Replace direct task deletion with an
+explicit lifecycle such as:
 
 `Stopped -> Starting -> Running -> StopRequested -> Stopping -> Stopped`
 

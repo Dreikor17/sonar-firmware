@@ -473,6 +473,15 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
   }
 }
 
+// Bounded cooperative-stop timeout for end() (see MQTTLifecycle::Coordinator).
+// Phase 0 TODO: characterize on hardware — mbedTLS teardown over wss with a
+// DOWN broker — before this ships. The placeholder is chosen conservatively:
+// long enough for a real cooperative client teardown (per-slot disconnect + the
+// existing 50 ms settle delays across RUNTIME_MQTT_SLOTS), short enough to bound
+// the loop-task stall and the OTA/restart wait. A stop that exceeds this is
+// treated as dirty: the task is force-killed and OTA flashing is withheld.
+static const uint32_t MQTT_STOP_TIMEOUT_MS = 8000;
+
 // ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
@@ -514,6 +523,9 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #else
       , _queue_head(0), _queue_tail(0)
 #endif
+      // Cooperative lifecycle: _lifecycle_ops must be constructed before
+      // _lifecycle (declaration order guarantees this) so the reference binds.
+      , _lifecycle_ops(this), _lifecycle(_lifecycle_ops, MQTT_STOP_TIMEOUT_MS)
 {
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
@@ -625,6 +637,14 @@ void MQTTBridge::releaseRuntimeBuffers() {
 // ---------------------------------------------------------------------------
 void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("Initializing MQTT Bridge...");
+
+  // Idempotent start (Phase 5): a second begin() on an already-running bridge
+  // would re-run allocation and re-create the task, leaking the previous
+  // queue/task. Guard here instead of relying on caller discipline.
+  if (_initialized) {
+    MQTT_DEBUG_PRINTLN("MQTT Bridge already running — begin() ignored");
+    return;
+  }
 
   // PSRAM diagnostic - helps debug memory fragmentation on boards with external RAM
   #ifdef BOARD_HAS_PSRAM
@@ -805,6 +825,11 @@ void MQTTBridge::begin() {
   // causes resets on some boards (e.g. Heltec V4) when the task runs from PSRAM stack.
   _mqtt_task_stack = nullptr;
   _mqtt_task_handle = nullptr;
+  // Clear the cooperative-stop handshake before the new task starts reading it.
+  // deliverStop() leaves _stop_requested latched true after a stop cycle, so a
+  // restart must reset it or the fresh task would self-terminate immediately.
+  _stop_requested = false;
+  _stop_acked = false;
   BaseType_t create_result = xTaskCreatePinnedToCore(
     mqttTask,
     "MQTTBridge",
@@ -845,6 +870,14 @@ void MQTTBridge::begin() {
   // instead of churning ~40 KB of internal heap per cycle.
   initSlotClients();
 
+  // Sync the lifecycle Coordinator to Running now that all resources exist and
+  // the task is created. Driven only on the success path: the failure rollbacks
+  // above already free what they acquired and leave the bridge Stopped, so we
+  // must not also fire the state machine's release effect there (double free).
+  // A fresh start also clears any dirty-stop latch (re-enabling OTA flashing).
+  _lifecycle.requestStart();    // Stopped -> Starting (startTask() is a no-op here)
+  _lifecycle.onTaskStarted();   // Starting -> Running
+
   _initialized = true;
   s_mqtt_bridge_instance = this;
   MQTT_DEBUG_PRINTLN("MQTT Bridge initialized");
@@ -855,65 +888,140 @@ void MQTTBridge::begin() {
 // ---------------------------------------------------------------------------
 void MQTTBridge::end() {
   MQTT_DEBUG_PRINTLN("Stopping MQTT Bridge...");
+
+  // Idempotent stop: nothing to tear down if we never started (or already stopped).
+  if (!_initialized) {
+    MQTT_DEBUG_PRINTLN("MQTT Bridge already stopped — end() ignored");
+    return;
+  }
+
+  // Stop new diagnostic reads through the singleton before teardown begins.
   s_mqtt_bridge_instance = nullptr;
 
-  #ifdef ESP_PLATFORM
-  // Delete FreeRTOS task first (it will clean up WiFi/MQTT connections)
-  if (_mqtt_task_handle != nullptr) {
-    vTaskDelete(_mqtt_task_handle);
-    _mqtt_task_handle = nullptr;
-  }
-  // Free PSRAM task stack
-  psram_free(_mqtt_task_stack);
-  _mqtt_task_stack = nullptr;
+  // Cooperative shutdown (Phase 5). Request the stop, then let the lifecycle
+  // Coordinator drive it. On ESP32 the MQTT task (Core 0) tears down its own
+  // clients where the mbedTLS contexts live and acknowledges via _stop_acked;
+  // the queue/buffer release happens inside LifecycleOps::releaseResources()
+  // once the Coordinator reaches Stopped (clean ack OR the reviewed timeout
+  // fallback). This replaces the former blind vTaskDelete that could kill the
+  // task mid-mbedTLS and then free client buffers on a corrupted heap.
+  _lifecycle.requestStop();  // Running -> StopRequested; deliverStop() sets _stop_requested
 
-  // Clean up queued packets from FreeRTOS queue
-  // Packets are value-copied in the queue, so no external pointers to clean up.
-  if (_packet_queue_handle != nullptr) {
-    QueuedPacket queued;
-    while (xQueueReceive(_packet_queue_handle, &queued, 0) == pdTRUE) {
-      _queue_count--;
+#ifdef ESP_PLATFORM
+  // Wait (bounded) for the task to acknowledge. tick() synthesizes the timeout
+  // fallback if the task never acks. Checking the ack first each iteration means
+  // a stop that completes right as the timeout expires is still treated as clean.
+  while (_lifecycle.isStopInProgress()) {
+    if (_stop_acked) {
+      _lifecycle.onTaskStopped();   // StopRequested -> Stopped (clean): releaseResources()
+      break;
     }
-    vQueueDelete(_packet_queue_handle);
-    _packet_queue_handle = nullptr;
+    _lifecycle.tick();              // may fire StopTimedOut -> Stopped (dirty): releaseResources()
+    if (!_lifecycle.isStopInProgress()) break;
+    vTaskDelay(pdMS_TO_TICKS(20));
   }
-  #if defined(BOARD_HAS_PSRAM)
-  psram_free(_packet_queue_storage);
-  #endif
-  _packet_queue_storage = nullptr;
+#else
+  // Non-ESP32: the bridge runs cooperatively in loop(); there is no separate
+  // task to signal. Drive straight to a clean Stopped and let releaseResources()
+  // perform the (unchanged) synchronous teardown.
+  _stop_acked = true;
+  _lifecycle.onTaskStopped();
+#endif
 
-  #else
-  // Clean up queued packet references
-  // Packets are value-copied in the queue, so no external pointers to clean up.
-  for (int i = 0; i < _queue_count; i++) {
-    int index = (_queue_head + i) % MAX_QUEUE_SIZE;
-    memset(&_packet_queue[index], 0, sizeof(QueuedPacket));
-  }
-
-  _queue_count = 0;
-  _queue_head = 0;
-  _queue_tail = 0;
-  memset(_packet_queue, 0, sizeof(_packet_queue));
-  #endif
-
-  // Disconnect and delete persistent MQTT clients. teardownSlot() intentionally
-  // only disconnects; destruction happens here so the mbedTLS contexts survive
-  // the reconfigure/reconnect hot path.
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    teardownSlot(i);
-  }
-  destroySlotClients();
-
-  // Timezone is inline class storage (_timezone_storage) since Phase 3 of
-  // the MQTT memory-defrag work — nothing to delete. _timezone always
-  // points at &_timezone_storage and stays valid for the bridge lifetime.
-
-  releaseRuntimeBuffers();
-  // JSON documents are StaticJsonDocument inline members — no heap allocation to free.
-
+  // Timezone is inline class storage (_timezone_storage) — nothing to delete.
+  // JSON documents are StaticJsonDocument inline members — no heap to free.
   _initialized = false;
   _slots_setup_done = false;  // Reset so deferred setup runs again on next begin()
-  MQTT_DEBUG_PRINTLN("MQTT Bridge stopped");
+  MQTT_DEBUG_PRINTLN("MQTT Bridge stopped (%s)",
+                     _lifecycle.stopTimedOut() ? "forced/timeout — OTA blocked" : "clean");
+}
+
+// ---------------------------------------------------------------------------
+// LifecycleOps — binds MQTTLifecycle::Ops (the pure, host-tested spec) to the
+// FreeRTOS / PsychicMqttClient runtime. Every method runs on the loop task
+// (Core 1): the Coordinator that calls them is driven only from begin()/end().
+// ---------------------------------------------------------------------------
+uint32_t MQTTBridge::LifecycleOps::nowMs() {
+  return (uint32_t)millis();
+}
+
+void MQTTBridge::LifecycleOps::startTask() {
+  // No-op: begin() owns task/queue/buffer creation and its rollback paths. The
+  // Coordinator is synced to Running there via requestStart()/onTaskStarted().
+}
+
+void MQTTBridge::LifecycleOps::deliverStop() {
+  // Clear any stale ack before raising the request (same ordering as the NTP
+  // handshake: clear the done-flag, then set the request). The MQTT task polls
+  // _stop_requested at the top of mqttTaskLoop().
+  _b->_stop_acked = false;
+  _b->_stop_requested = true;
+}
+
+void MQTTBridge::LifecycleOps::releaseResources() {
+  MQTTBridge* b = _b;
+#ifdef ESP_PLATFORM
+  // stopTimedOut() is set before this effect fires (Coordinator::dispatch), so
+  // it reliably distinguishes a clean ack from the timeout fallback.
+  const bool dirty = b->_lifecycle.stopTimedOut();
+  if (dirty && !b->_stop_acked) {
+    // Reviewed fallback: the task never acknowledged (likely wedged in mbedTLS).
+    // Force-kill it and tear down clients here on Core 1 — the pre-cooperative
+    // behavior — accepting the heap risk. The dirty latch keeps OTA flashing
+    // blocked (canFlashAfterStop() == false) so firmware is never written after
+    // this path.
+    if (b->_mqtt_task_handle != nullptr) {
+      vTaskDelete(b->_mqtt_task_handle);
+    }
+    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) b->teardownSlot(i);
+    b->destroySlotClients();
+  }
+  // Clean path (or a task that acked right at the deadline): the MQTT task
+  // already disconnected/deleted its clients on Core 0 and self-terminated, so
+  // we must NOT touch slots here (that would be a cross-core double-delete).
+  // Just drop our handle reference; FreeRTOS reclaims the self-deleted task's
+  // dynamically-allocated stack/TCB in the idle task.
+  b->_mqtt_task_handle = nullptr;
+
+  // Free the PSRAM task stack (nullptr for dynamic tasks — no-op).
+  psram_free(b->_mqtt_task_stack);
+  b->_mqtt_task_stack = nullptr;
+
+  // Drain and delete the FreeRTOS packet queue (value-copied packets, no
+  // external pointers to clean up). Safe on Core 1: not a TLS resource.
+  if (b->_packet_queue_handle != nullptr) {
+    QueuedPacket queued;
+    while (xQueueReceive(b->_packet_queue_handle, &queued, 0) == pdTRUE) {
+      b->_queue_count--;
+    }
+    vQueueDelete(b->_packet_queue_handle);
+    b->_packet_queue_handle = nullptr;
+  }
+  #if defined(BOARD_HAS_PSRAM)
+  psram_free(b->_packet_queue_storage);
+  #endif
+  b->_packet_queue_storage = nullptr;
+#else
+  // Non-ESP32 circular buffer + synchronous client teardown (unchanged behavior).
+  for (int i = 0; i < b->_queue_count; i++) {
+    int index = (b->_queue_head + i) % MAX_QUEUE_SIZE;
+    memset(&b->_packet_queue[index], 0, sizeof(QueuedPacket));
+  }
+  b->_queue_count = 0;
+  b->_queue_head = 0;
+  b->_queue_tail = 0;
+  memset(b->_packet_queue, 0, sizeof(b->_packet_queue));
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) b->teardownSlot(i);
+  b->destroySlotClients();
+#endif
+
+  b->releaseRuntimeBuffers();
+}
+
+void MQTTBridge::LifecycleOps::onStopComplete(bool clean) {
+  MQTT_DEBUG_PRINTLN("MQTT stop %s", clean
+                     ? "acknowledged (clean)"
+                     : "TIMED OUT (dirty; OTA flashing withheld)");
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,6 +1108,22 @@ void MQTTBridge::mqttTaskLoop() {
   static unsigned long last_agent_log = 0;
   #endif
   while (true) {
+    // Cooperative stop (Phase 5). end() on the loop task (Core 1) set this flag.
+    // Tear down our own clients HERE on Core 0 — where the mbedTLS/transport
+    // state lives — instead of letting Core 1 free them after a blind
+    // vTaskDelete. Acknowledge LAST so end() only frees the queue/buffers once
+    // this teardown has completed, then self-terminate via the mqttTask()
+    // trampoline (vTaskDelete(nullptr)).
+    if (_stop_requested) {
+      MQTT_DEBUG_PRINTLN("MQTT task: cooperative stop — tearing down clients on Core 0");
+      for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+        teardownSlot(i);
+      }
+      destroySlotClients();
+      _stop_acked = true;   // release semantics: set only after teardown is done
+      return;
+    }
+
     #ifdef MQTT_MEMORY_DEBUG
     // #region agent log
     unsigned long now_loop = millis();

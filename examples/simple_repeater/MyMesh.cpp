@@ -1569,7 +1569,14 @@ void MyMesh::loop() {
     Serial.println("OTA: starting update");
     setBridgeState(false);
     char ota_reply[160];
-    if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+    // OTA teardown barrier (Phase 5): only flash after a CLEAN MQTT shutdown.
+    // A timed-out/forced stop leaves mbedTLS/heap ownership uncertain — writing
+    // firmware then is the observed teardown heap-panic path — so abort and
+    // resume the bridge instead of flashing under uncertain ownership.
+    if (bridge && !bridge->canFlashAfterStop()) {
+      Serial.println("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge");
+      setBridgeState(true);
+    } else if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
       Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
       setBridgeState(true);
     }
