@@ -86,6 +86,35 @@ static inline bool circuitBreakerProbeDue(uint32_t now, uint32_t last_attempt) {
   return elapsedMs(now, last_attempt) >= kCircuitBreakerProbeMs;
 }
 
+// WiFi station reconnect backoff. The bridge drives its own STA reconnect loop
+// separate from the per-slot MQTT reconnects, with a slightly longer first rung
+// (15 s vs the slot ladder's 10 s). Extracted from handleWiFiConnection() so the
+// ladder and its wrap-safe timing are exercised by host tests instead of a
+// second inline copy of the backoff math.
+static inline uint32_t wifiReconnectBackoffMs(uint8_t attempt) {
+  static const uint32_t kBackoffMs[] = {
+    15000UL, 30000UL, 60000UL, 120000UL, 300000UL
+  };
+  const uint8_t index = attempt < 5 ? attempt : 4;
+  return kBackoffMs[index];
+}
+
+// A reconnect is due only once the link has been down for the current rung AND
+// no attempt has been made within that rung (both measured wrap-safely). This
+// mirrors the two-part guard the bridge applied inline.
+static inline bool wifiReconnectDue(uint32_t now, uint32_t disconnected_since,
+                                    uint32_t last_attempt, uint8_t attempt) {
+  const uint32_t delay = wifiReconnectBackoffMs(attempt);
+  return elapsedMs(now, disconnected_since) >= delay &&
+         elapsedMs(now, last_attempt) >= delay;
+}
+
+// The attempt counter climbs to 5 and then saturates; the index clamp in
+// wifiReconnectBackoffMs() holds it at the 300 s rung.
+static inline uint8_t nextWifiBackoffAttempt(uint8_t attempt) {
+  return attempt < 5 ? static_cast<uint8_t>(attempt + 1) : attempt;
+}
+
 // Each later slot expires up to five percent of the base lifetime earlier,
 // capped at five minutes per slot. Runtime slot indexes are bounded by the
 // persisted MQTT slot count; the final clamp also prevents underflow if this

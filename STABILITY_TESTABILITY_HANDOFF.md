@@ -30,7 +30,7 @@ index.
 | 4 | Ownership and teardown test seams | Seams + ownership doc + teardown tests done; production rewiring deferred to Phase 5 |
 | 5 | Cooperative MQTT shutdown | Minimal cooperative `end()` + `begin()` guard + OTA barrier implemented on branch `phase5/cooperative-mqtt-shutdown` (native green, firmware smoke build green); NOT hardware-validated. Volatile-handshake replacement + snapshot-consumer repointing deferred |
 | — | OTA teardown barrier | Implemented — flash gated on a clean MQTT stop in `simple_repeater`; not hardware-validated |
-| 6 | Request/queue/connection/publication integration tests | Not started |
+| 6 | Request/queue/connection/publication integration tests | Partial: WiFi-backoff + publish-outcome + enum-alignment gaps extracted and host-tested on branch `phase6/integration-tests`; WebConfig batch/reboot/stop state machine and queue-orchestration coverage still open |
 | 7 | Uptime, memory, and fault-injection gates | Not started |
 
 Forward plan, in execution order: **Phase 0 → Phase 4 → Phase 5 (with the OTA
@@ -454,7 +454,26 @@ Acceptance criteria:
 
 ### Phase 6: Expand request, queue, connection, and publication integration tests
 
-**Status: Not started.** Depends on Phase 4/5 lifecycle ownership being stable.
+**Status: Partial — branch `phase6/integration-tests` (draft PR, base `phase5`).**
+The remaining *inline* decision points that were host-testable have been extracted
+into the pure policy seams and covered:
+
+- WiFi STA reconnect backoff moved out of `handleWiFiConnection()` into
+  `MQTTConnectionPolicy::{wifiReconnectBackoffMs,wifiReconnectDue,
+  nextWifiBackoffAttempt}` (behavior-preserving; adversarially reviewed for
+  rollover/boundary equivalence) with `test_mqtt_connection_policy` cases.
+- The (packet, raw) publication-outcome pairing named as
+  `MQTTPacketQueuePolicy::queuedPacketPublished()` and wired at both queue-drain
+  sites, with `test_mqtt_packet_queue_policy` cases (partial success = completed).
+- `MQTTPublicationType` values frozen in `test_mqtt_topic_router`; the
+  bridge-side `MQTTMessageType` alignment was already a compile-time `static_assert`.
+
+Still open (each a good follow-up PR): the **WebConfig POST/result/reboot/stop
+state machine** (largest gap — all inline in `WebConfigServer.cpp`; natural to
+extract a pure `WebConfigBatch` seam mirroring `MQTTLifecycle.h`) and the
+**queue-orchestration** behaviors (FIFO ordering, evict/requeue-failure interplay,
+the two adapters' drop-vs-keep-head divergence), which need a fake-queue harness.
+The original scope list follows.
 
 After lifecycle ownership is stable, broaden deterministic integration coverage:
 

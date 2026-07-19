@@ -171,6 +171,18 @@ TEST(MQTTTopicRouter, RejectsInvalidStyleTypeSlotAndOutput) {
   EXPECT_FALSE(mqttTopicSlotIndexValid(0, 0));
 }
 
+TEST(MQTTTopicRouter, PublicationTypeEnumValuesAreFrozen) {
+  // The bridge passes MQTTBridge::MQTTMessageType to mqttBuildPublicationTopic
+  // as an int; a compile-time static_assert in the bridge ties the two enums
+  // together. Freeze the router side here so its values can't drift on their own.
+  EXPECT_EQ(0, MQTT_PUBLICATION_STATUS);
+  EXPECT_EQ(1, MQTT_PUBLICATION_PACKETS);
+  EXPECT_EQ(2, MQTT_PUBLICATION_RAW);
+  EXPECT_STREQ("status", mqttPublicationTypeName(MQTT_PUBLICATION_STATUS));
+  EXPECT_STREQ("packets", mqttPublicationTypeName(MQTT_PUBLICATION_PACKETS));
+  EXPECT_STREQ("raw", mqttPublicationTypeName(MQTT_PUBLICATION_RAW));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
