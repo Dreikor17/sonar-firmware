@@ -32,9 +32,14 @@ env:
   # The channel itself. Firmware fetches <OTA_MANIFEST_BASE>/<OTA_VARIANT>.json,
   # so this URL is what keeps beta nodes on beta.
   OTA_MANIFEST_BASE_URL: https://observer.gessaman.com/beta/v
-  # Marks the embedded version, e.g. v1.16.0.3-observer-beta-abc1234, so `ver`
-  # identifies the channel. Does not affect OTA version parsing.
-  OTA_CHANNEL_TAG: beta
+  # Marks the embedded version, e.g. v1.16.0.3-observer-beta-dev-abc1234, so `ver`
+  # (and the MQTT firmware_version / SNMP) identify BOTH the channel and its
+  # provenance: this channel is built from the upstream-dev-merged line, so "dev"
+  # is carried in the string rather than left to be inferred from the branch name.
+  # Does not affect OTA version parsing: ota_parseVersion() reads to the first '-'
+  # and ota_extractHash() takes the token after the last, so tags in between are
+  # transparent.
+  OTA_CHANNEL_TAG: beta-dev
 
   # Beta's own build counter, so the two channels' build numbers never interleave.
   COUNTER_URL: https://observer.gessaman.com/observer-beta-build-counter.json
@@ -210,28 +215,30 @@ jobs:
         env:
           BUILD_NUMBER: ${{ needs.enumerate.outputs.build_number }}
         run: |
-          # config-beta.json is derived here and NOT committed: it would otherwise
-          # be a 56-entry duplicate of config.json that silently goes stale as
-          # devices are added. Deriving it per build keeps the beta device list
-          # identical to production by construction. Only the slim manifests are
-          # published.
+          # config-beta.json is DERIVED from config.json on every beta build, never
+          # hand-maintained: that keeps the dev/beta device list identical to
+          # production by construction, so adding a board upstream cannot leave the
+          # beta list behind. It is published (not ephemeral) because the flasher
+          # SPA loads it directly for ?config=config-beta.
+          #
+          # Only staticPath differs, pointing downloads at the beta release proxy.
           python3 - <<'PY'
           import json, os, pathlib
           src = pathlib.Path("flasher/config.json")
           cfg = json.loads(src.read_text())
           old = cfg["staticPath"]
           cfg["staticPath"] = os.environ["STATIC_PATH"]
-          pathlib.Path("config-beta.json").write_text(json.dumps(cfg, indent=2))
+          pathlib.Path("flasher/config-beta.json").write_text(json.dumps(cfg, indent=2) + "\n")
           print(f"derived config-beta.json: staticPath {old} -> {cfg['staticPath']}")
           PY
 
           python3 flasher/scripts/update-firmware.py \
             "${{ steps.sha.outputs.short }}" \
-            --config config-beta.json
+            --config flasher/config-beta.json
 
           mkdir -p "flasher/$MANIFEST_DIR"
           python3 flasher/scripts/gen-slim-manifests.py \
-            --config config-beta.json \
+            --config flasher/config-beta.json \
             --out-dir "flasher/$MANIFEST_DIR" \
             --base-version "$FIRMWARE_VERSION" \
             --build "$BUILD_NUMBER" \
@@ -258,10 +265,11 @@ jobs:
       - name: Commit & Push Beta Artifacts
         working-directory: flasher
         run: |
-          # Scoped add: beta only ever touches its manifest dir and its counter, so
-          # a stray edit elsewhere in the flasher checkout can never be published
-          # by this workflow.
-          git add -A "$MANIFEST_DIR" "$COUNTER_FILE"
+          # Scoped add: beta only ever touches its own manifest dir, config, and
+          # counter, so a stray edit elsewhere in the flasher checkout (in
+          # particular production's config.json) can never be published by this
+          # workflow.
+          git add -A "$MANIFEST_DIR" "$COUNTER_FILE" config-beta.json
           if git diff --cached --quiet; then
             echo "No beta changes to commit."
             exit 0
