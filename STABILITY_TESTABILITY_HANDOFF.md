@@ -30,12 +30,24 @@ index.
 | 4 | Ownership and teardown test seams | Seams + ownership doc + teardown tests done; production rewiring deferred to Phase 5 |
 | 5 | Cooperative MQTT shutdown | Minimal cooperative `end()` + `begin()` guard + OTA barrier implemented on branch `phase5/cooperative-mqtt-shutdown` (native green, firmware smoke build green); NOT hardware-validated. Volatile-handshake replacement + snapshot-consumer repointing deferred |
 | — | OTA teardown barrier | Implemented — flash gated on a clean MQTT stop in `simple_repeater`; not hardware-validated |
-| 6 | Request/queue/connection/publication integration tests | Partial: WiFi-backoff + publish-outcome + enum-alignment gaps extracted and host-tested on branch `phase6/integration-tests`; WebConfig batch/reboot/stop state machine has a pure host-tested spec (`WebConfigBatch.h`, not yet wired); queue-orchestration coverage still open |
+| 6 | Request/queue/connection/publication integration tests | Partial: WiFi-backoff + publish-outcome + enum-alignment gaps extracted and host-tested; WebConfig batch/reboot/stop spec (`WebConfigBatch.h`) **now wired into `WebConfigServer.cpp`** (2026-07-19) so the host tests cover production; queue-orchestration coverage still open, and the wired path is not yet exercised over real HTTP |
 | 7 | Uptime, memory, and fault-injection gates | Representative HW matrix run 2026-07-19: V3 non-PSRAM + V4 PSRAM done (no leak/crash; forced-path OTA-withhold + ~15–27 s loop stall observed). Multi-day soak + stack-HWM build pending |
+| — | Upstream merge | `upstream/dev` merged 2026-07-19 on `merge/upstream-dev-20260719` (191 commits, 14 conflicted files). See "Upstream Merge Record". Not yet merged into `webconfig` |
 
-Forward plan, in execution order: **Phase 0 → Phase 4 → Phase 5 (with the OTA
-teardown barrier) → Phase 6 → Phase 7.** Do not reopen a "Done" phase without a
-deliberate reason (see "Change-Control Discipline").
+Phases 0, 4, and 5 (with the OTA teardown barrier) are landed and
+hardware-validated. **Remaining work, in execution order:**
+
+1. Exercise the wired WebConfig batch machine over real HTTP (Phase 6) — the
+   only untested part of a change that is already in the branch.
+2. Drive the live `ota update` deferred-flash path on a bench node (OTA barrier
+   action; the latch input is already hardware-verified).
+3. Close the remaining Phase 6 queue-orchestration coverage.
+4. Phase 7 multi-day soak + task-stack-HWM build.
+5. Land `merge/upstream-dev-20260719` into `webconfig`, then keep merging
+   upstream after each phase rather than batching (see "Upstream Merge Record").
+
+Do not reopen a "Done" phase without a deliberate reason (see
+"Change-Control Discipline").
 
 ## Hardware Characterization Results (Phase 0 & Phase 7) — 2026-07-19
 
@@ -191,8 +203,10 @@ The current branch has:
 
 - Native tests (GoogleTest, `[env:native]`) for MQTT presets, validation, topic
   templates and routing, connection policy, packet-queue policy, payload
-  construction, WebConfig keys, the `/mqtt_prefs` codec, the atomic prefs store,
-  the runtime-buffer lifecycle, and upstream `Utils::toHex` behavior.
+  construction, WebConfig keys, the WebConfig batch state machine, the MQTT
+  lifecycle/teardown seam, the `/mqtt_prefs` codec, the atomic prefs store, the
+  runtime-buffer lifecycle, and upstream `Utils::toHex` and mesh-table behavior.
+  15 suites as of the 2026-07-19 upstream merge.
 - ArduinoJson pinned to 7.4.3 across the native and all firmware environments,
   enforced in CI by `scripts/check_arduinojson_pin.py`.
 - PR CI (`.github/workflows/`) that runs the native suite and compiles both
@@ -212,10 +226,16 @@ The current branch has:
   by an asynchronous request.
 - Pure MQTT policy helpers that reduce decision duplication while leaving the
   production bridge as the integration point.
+- A **wired** WebConfig batch/reboot/stop state machine: `WebConfigServer.cpp`
+  calls `WebConfigBatch.h` directly for POST classification, drain pacing and
+  all-ok accumulation, reboot scheduling/firing, result classification,
+  confirm-reboot arming, and stop gating; `MAX_BATCH`/`STOP_WARN_MS` alias the
+  spec constants. The host tests therefore cover production, not a parallel copy.
 
 This is a solid guardrail and unit-test foundation, but it does not yet validate
-the MQTT task/client lifecycle, cross-core state ownership, the OTA teardown
-barrier, or long-running heap behavior. Those are the remaining phases.
+cross-core state ownership beyond the Phase 5 stop path, the WebConfig batch
+machine over real HTTP, or long-running heap behavior. Those are the remaining
+phases.
 
 ## Constraints
 
@@ -622,19 +642,40 @@ into the pure policy seams and covered:
 - `MQTTPublicationType` values frozen in `test_mqtt_topic_router`; the
   bridge-side `MQTTMessageType` alignment was already a compile-time `static_assert`.
 
-The **WebConfig POST/result/reboot/stop state machine** (the largest gap) now
-has a pure, host-tested SPEC — `src/helpers/WebConfigBatch.h` +
-`test/test_webconfig_batch/` on branch `phase6/webconfig-batch-seam` — that
-faithfully characterizes the accept/drain/result/reboot/stop decisions currently
-inline in `WebConfigServer.cpp`. Like Phase 4's `MQTTLifecycle.h`, it is
-**spec-first and NOT yet wired**: rewiring the hardware-tuned server to consume it
-(so it becomes load-bearing and non-drifting) is a deliberately separate,
-hardware-validated follow-up.
+The **WebConfig POST/result/reboot/stop state machine** (the largest gap) has a
+pure, host-tested spec — `src/helpers/WebConfigBatch.h` +
+`test/test_webconfig_batch/` — and as of 2026-07-19 it is **wired**:
+`WebConfigServer.cpp` calls it at every decision point, so the spec is
+load-bearing and cannot drift from production. `MAX_BATCH` and `STOP_WARN_MS`
+alias `kMaxBatch`/`kStopWarnMs` for the same reason.
 
-Still open (each a good follow-up PR): wiring `WebConfigServer.cpp` to the
-`WebConfigBatch` spec above, and the **queue-orchestration** behaviors (FIFO
-ordering, evict/requeue-failure interplay, the two adapters' drop-vs-keep-head
-divergence), which need a fake-queue harness. The original scope list follows.
+Two asymmetries between spec and caller are deliberate, and are documented in
+the header so a future reader does not "simplify" them back:
+
+1. `finishRebootAt()` returns 0 for "no reboot scheduled", but the caller only
+   ASSIGNS `_reboot_at` when the result is non-zero. `_reboot_at` is not solely
+   batch-owned — the manual `/api/reboot` route arms it from the async_tcp task,
+   possibly while a batch is still draining — so an unconditional assign would
+   silently cancel a manual reboot. This was caught during the wiring, not by a
+   test; the host suite does not model the two owners of `_reboot_at`, which is a
+   coverage gap worth closing.
+2. `classifyPost()` is consulted in two phases, because the change count is only
+   known after the `set` map is parsed, and parsing must not precede the
+   Replay/Busy answer (a replayed POST carrying a bad key must still get its 202).
+
+**Verification status of the wiring:** native suite and both smoke builds green;
+V3 hardware shows a clean WebConfig AP start/stop (the rewired `stopStep` path
+takes the Finalize branch with no handler-wait warning). **Not verified: the
+POST → drain → result → reboot sequence over real HTTP.** LAN mode needs an
+admin-password login and the setup AP needs a client associated to the device's
+SoftAP; neither was driven. Given that this server was originally tuned against
+real iOS captive-portal behavior, HTTP caching, and route ordering, treat an
+end-to-end portal save as a required check before this ships.
+
+Still open (each a good follow-up PR): the end-to-end HTTP exercise above, and
+the **queue-orchestration** behaviors (FIFO ordering, evict/requeue-failure
+interplay, the two adapters' drop-vs-keep-head divergence), which need a
+fake-queue harness. The original scope list follows.
 
 After lifecycle ownership is stable, broaden deterministic integration coverage:
 
@@ -692,6 +733,78 @@ Recommended gates are a 72-hour fault-injection run followed by a seven-day
 stable run. Store machine-readable time series and a concise summary artifact.
 Avoid enabling high-volume diagnostic logging in production builds.
 
+## Upstream Merge Record — 2026-07-19 (`merge/upstream-dev-20260719`)
+
+First `upstream/dev` merge since the v1.16.0 base (`8c0d5c5b`, 2026-06-06):
+**191 upstream commits, 14 conflicted files, ~18 hunks.** The fork was 349
+commits ahead. Recorded here because the next merge starts from these
+resolutions (all captured in `rerere`).
+
+### The finding that matters most: `/com_prefs` is safe to reorder
+
+Upstream moved `rx_boosted_gain` and `path_hash_mode` to the tail of
+`struct NodePrefs`, while the fork holds them mid-struct. This *looks* like a
+fleet-critical layout divergence (Constraint 1) and was analyzed as one before
+resolving. It is not:
+
+**`/com_prefs` is serialized field-by-field at explicit byte offsets, not as a
+struct dump.** `NodePrefs` member order is in-memory only and has no effect on
+the file. The fork's extracted `writeCommonPrefsImage()` was verified
+byte-identical to upstream's inline writer at every offset — 79 (pad), 121, 122,
+and 290–294 — so either struct order produces the same image. No migration was
+needed, and none should be invented for this in future merges.
+
+Corrected while here: a comment claiming `rx_boosted_gain` lives at
+`/com_prefs` offset 79. Offset 79 is a pad; the field is written at 290. The
+comment would have misled exactly the analysis above.
+
+Note the asymmetry this creates: `/mqtt_prefs` (fork-owned) IS layout-critical
+and versioned; `/com_prefs` is offset-addressed and tolerant of struct
+reordering. Do not generalize one file's rules to the other.
+
+### Resolutions
+
+- `CommonCLI.h` — kept the fork's `NodePrefs` (a superset) and adopted upstream's
+  **`setRxBoostedGain(bool)` → `bool`** signature change, which upstream's
+  `CommonCLI.cpp` now uses to report "unsupported". A real semantic API change,
+  exactly the kind the discipline list warns can hide behind a clean merge.
+- `CommonCLI.cpp` — kept the fork's legacy `/com_prefs` migration block and the
+  `writeCommonPrefsImage()` call.
+- `UITask.cpp` — genuine three-way merge: upstream's `drawTextCentered` and
+  powering-off screen, plus the fork's `WITH_WEBCONFIG` portal/reboot screens.
+- `ESP32Board.cpp`, `MeshCore.h`, `platformio.ini` — keep-both (fork OTA additions
+  alongside upstream `powerOff`/`enterDeepSleep` and `Packet.cpp`).
+- `MicroNMEALocationProvider.h` — took upstream's `claim()`/`release()` and added
+  the `_claims` member they depend on.
+- `MyMesh.cpp`/`.h` (repeater + room server) — kept the fork's superset defaults.
+- Removed duplicate declarations that auto-merge produced without conflicting:
+  `RadioLibWrapper::_cad_enabled` and `MyMesh::getCADEnabled()`. **These compiled
+  only after being caught by the build, not by Git** — a reminder that a
+  conflict-free merge is not a correct merge.
+
+### Verification
+
+Native 15/15 (including upstream's new `test_mesh_tables`), both MQTT smoke
+builds, ArduinoJson pin check. On V3 hardware (non-PSRAM, 1 wss slot): clean
+boot with `/com_prefs` values intact across the flash (the end-to-end proof of
+the `NodePrefs` resolution), WiFi → NTP → MQTT1 connect → status published,
+`Free=137612 Max=124916` matching the pre-merge healthy baseline, and a clean
+cooperative teardown — `1 enabled slot(s), timeout 13000 ms` → `cooperative
+stop` → `stop acknowledged (clean)` → `Bridge stopped (clean)`. Phase 5 and the
+slot-scaled timeout both survive the merge.
+
+Not verified: the V4/PSRAM path, and the WebConfig HTTP batch machine (see
+Phase 6).
+
+### Cost signal for scheduling the next merge
+
+Upstream's deltas to the hot files were small (`CommonCLI.cpp` 165 lines,
+`MyMesh.cpp` 70, `CommonCLI.h` 26) against 107 and 61 fork commits on those same
+files. **The fork is the churn source, not upstream** — so merge cost scales
+with how much fork work accumulates between merges, not with upstream velocity.
+Six weeks of drift cost roughly a half-day. Merge after each phase lands rather
+than batching.
+
 ## Continuous Upstream-Merge Discipline
 
 Apply these practices throughout every phase:
@@ -710,6 +823,9 @@ Apply these practices throughout every phase:
   conflict; upstream signature, lifetime, and task-context changes can invalidate
   fork assumptions silently.
 - Reuse resolutions only after revalidating them against the new upstream code.
+- A conflict-free merge is not a correct merge: the 2026-07-19 merge produced two
+  duplicate declarations that Git resolved silently and only the compiler caught.
+  Always build both smoke targets before treating a merge as done.
 - Extract repeater/room-server WebConfig ownership into a shared fork helper when
   that integration next requires material change; do not perform a standalone
   broad move solely for aesthetics.
