@@ -26,8 +26,8 @@ index.
 | 1 | PR CI smoke builds + ArduinoJson pin enforcement | Done (build-size gate and ASan/UBSan still pending) |
 | 2 | PSRAM restart resource symmetry | Done |
 | 3 | MQTT preference migration fixtures | Done (filesystem adapter still lives in `CommonCLI`) |
-| 0 | Pre-change lifecycle characterization | Not started — next actionable step |
-| 4 | Ownership and teardown test seams | Not started |
+| 0 | Pre-change lifecycle characterization | Not started — deterministic behavior encoded in Phase 4; hardware items pending |
+| 4 | Ownership and teardown test seams | Seams + ownership doc + teardown tests done; production rewiring deferred to Phase 5 |
 | 5 | Cooperative MQTT shutdown | Not started (fixes the OTA teardown panic) |
 | — | OTA teardown barrier | Not started — release-critical |
 | 6 | Request/queue/connection/publication integration tests | Not started |
@@ -268,11 +268,35 @@ Acceptance criteria:
 
 ### Phase 4: Establish ownership and teardown test seams
 
-**Status: Not started.** Verified premise: the loop task, WebConfig, CLI, and
+**Status: Seams, ownership doc, and teardown tests landed; production rewiring
+deferred to Phase 5 by explicit decision (scope: "seams + tests only").** The
+fork-owned pure lifecycle state machine and narrow dependency seam
+(`src/helpers/MQTTLifecycle.h`), the teardown-focused test matrix
+(`test/test_mqtt_lifecycle/`), and the ownership model (`MQTT_OWNERSHIP.md`) are
+in place. `MQTTBridge.cpp` was intentionally left untouched to keep the
+merge-sensitive file free of churn until the Phase 5 change lands as one
+reviewable unit. The invasive production work — publishing the plain-data
+snapshot and repointing consumers at it, replacing the `volatile` handshakes
+with a command queue / task notifications, and the cooperative-shutdown `end()`
+rewrite with a `begin()` double-call guard — is carried into Phase 5.
+
+Verified premise (with Phase 4 refinements): the loop task, WebConfig, CLI, and
 `AlertReporter` currently read the MQTT task's live, mutable slot objects and
 client counters cross-core without a lock or a published snapshot.
 `getSlotStatusSnapshot()` is built on demand from live state despite its name —
 the refactor must actually publish a plain-data snapshot, not assume one exists.
+Refinements found while mapping the code (see `MQTT_OWNERSHIP.md` for
+file:line references):
+
+- The snapshot's `name`/`state` `const char*`s point at static rodata, so they
+  are not dangling; the real hazards are reading the mutable `slot.preset`
+  pointer value (Core 0 can null/reassign it) and `slot.client->getPublishOk()`
+  (a client pointer Core 0 can `delete` during teardown).
+- The live-bridge web reads are in the `MyMesh.cpp` app layer (`buildStatsJson`),
+  not `WebConfigServer.cpp`, which reads only a compile-time constant.
+- `end()` clears only the `s_mqtt_bridge_instance` singleton; the app's `bridge`
+  pointer and `AlertReporter::_bridge` are not cleared, so instance reads can
+  touch a torn-down bridge.
 
 This phase is the safety net for cooperative shutdown. It must land before the
 shutdown state machine.
