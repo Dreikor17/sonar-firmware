@@ -150,6 +150,15 @@ build_firmware() {
     *observer*) VARIANT_TAG="-observer" ;;
   esac
 
+  # Optional release-channel marker (e.g. OTA_CHANNEL_TAG=beta -> "-observer-beta"),
+  # so `ver` / MQTT firmware_version / SNMP identify which channel a node runs
+  # without having to infer it from log behavior. Safe for the OTA version logic:
+  # ota_parseVersion() reads only up to the first '-' and ota_extractHash() takes
+  # the token after the LAST '-', so extra tags in between change neither.
+  if [ -n "$OTA_CHANNEL_TAG" ]; then
+    VARIANT_TAG="${VARIANT_TAG}-${OTA_CHANNEL_TAG}"
+  fi
+
   # Observer build number: when CI provides FIRMWARE_BUILD_NUMBER (the per-base
   # published-build counter), append it as a 4th version component so the node
   # reports e.g. v1.16.0.5-observer-abcdef and `ota check` can show how many
