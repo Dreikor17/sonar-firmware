@@ -32,7 +32,8 @@ index.
 | — | OTA teardown barrier | Implemented — flash gated on a clean MQTT stop in `simple_repeater`; not hardware-validated |
 | 6 | Request/queue/connection/publication integration tests | Partial: WiFi-backoff + publish-outcome + enum-alignment gaps extracted and host-tested; WebConfig batch/reboot/stop spec (`WebConfigBatch.h`) **now wired into `WebConfigServer.cpp`** (2026-07-19) so the host tests cover production; queue-orchestration coverage still open, and the wired path is not yet exercised over real HTTP |
 | 7 | Uptime, memory, and fault-injection gates | Representative HW matrix run 2026-07-19: V3 non-PSRAM + V4 PSRAM done (no leak/crash; forced-path OTA-withhold + ~15–27 s loop stall observed). Multi-day soak + stack-HWM build pending |
-| — | Upstream merge | `upstream/dev` merged 2026-07-19 on `merge/upstream-dev-20260719` (191 commits, 14 conflicted files). See "Upstream Merge Record". Not yet merged into `webconfig` |
+| — | Upstream merge | `upstream/dev` merged 2026-07-19 on `observer-firmware-dev` (191 commits, 14 conflicted files). See "Upstream Merge Record". Not yet promoted to `webconfig` |
+| — | Dev release channel | `observer-firmware-dev` publishes the dev/beta firmware channel (see "Release Channels"). Manual dispatch; separate from production |
 
 Phases 0, 4, and 5 (with the OTA teardown barrier) are landed and
 hardware-validated. **Remaining work, in execution order:**
@@ -43,8 +44,9 @@ hardware-validated. **Remaining work, in execution order:**
    action; the latch input is already hardware-verified).
 3. Close the remaining Phase 6 queue-orchestration coverage.
 4. Phase 7 multi-day soak + task-stack-HWM build.
-5. Land `merge/upstream-dev-20260719` into `webconfig`, then keep merging
-   upstream after each phase rather than batching (see "Upstream Merge Record").
+5. Promote `observer-firmware-dev` into `webconfig` once the items above are
+   met, then keep merging upstream after each phase rather than batching (see
+   "Upstream Merge Record").
 
 Do not reopen a "Done" phase without a deliberate reason (see
 "Change-Control Discipline").
@@ -733,7 +735,35 @@ Recommended gates are a 72-hour fault-injection run followed by a seven-day
 stable run. Store machine-readable time series and a concise summary artifact.
 Avoid enabling high-volume diagnostic logging in production builds.
 
-## Upstream Merge Record — 2026-07-19 (`merge/upstream-dev-20260719`)
+## Branch and Release Channels
+
+`observer-firmware-dev` is the standing development line, not a one-off merge
+branch. It is where upstream merges land and where the dev/beta firmware channel
+is built from; it is promoted into `webconfig` (and onward to the flex mainline)
+when its contents are ready to ship. Future upstream merges land ON this branch
+rather than creating a new dated branch each time.
+
+Two firmware channels are published, fully separated so a node cannot cross
+between them by accident:
+
+| | Production | Dev/Beta |
+|---|---|---|
+| Source branch | flex mainline | `observer-firmware-dev` |
+| Workflow | `build-observer-firmwares.yml` (push-triggered) | `build-observer-firmwares-beta.yml` (manual dispatch) |
+| Release tag | `observer-mqtt-latest` | `observer-mqtt-beta-latest` |
+| OTA manifest base | `observer.gessaman.com/v` | `observer.gessaman.com/beta/v` |
+| Download host | `observer-fw.gessaman.com` | `observer-fw-beta.gessaman.com` |
+| Flasher config | `config.json` (default) | `config-beta.json` (`?config=config-beta`) |
+| Embedded version | `v1.16.0.N-observer-<hash>` | `v1.16.0.N-observer-beta-dev-<hash>` |
+
+The channel is baked into each binary as `OTA_MANIFEST_BASE` (injected by
+`build.sh`, overridable via `OTA_MANIFEST_BASE_URL`), so a node only ever
+receives OTA updates from the channel it was flashed from. Both channels
+deliberately share `FIRMWARE_VERSION`: the OTA logic treats a differing base
+version as "always an update", so channels must separate by manifest URL, never
+by base version.
+
+## Upstream Merge Record — 2026-07-19 (`observer-firmware-dev`)
 
 First `upstream/dev` merge since the v1.16.0 base (`8c0d5c5b`, 2026-06-06):
 **191 upstream commits, 14 conflicted files, ~18 hunks.** The fork was 349

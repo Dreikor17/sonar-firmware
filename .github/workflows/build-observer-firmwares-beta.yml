@@ -3,10 +3,12 @@ name: Build MQTT Observer Firmwares (BETA channel)
 permissions:
   contents: write
 
-# Manual dispatch only, deliberately. Unlike the production workflow this has no
-# push trigger: the beta channel exists to publish a specific branch on purpose,
-# and dispatching lets you pick that branch in the Actions UI without this file
-# hardcoding an (often short-lived) branch name.
+# Manual dispatch only, deliberately. The dev channel is normally built from
+# `observer-firmware-dev`, but unlike production this has no push trigger:
+# publishing firmware that real nodes will pull over the air should be an
+# explicit act, not a side effect of every commit to a development branch.
+# Dispatching also lets you build any branch from the Actions UI without this
+# file pinning one.
 on:
   workflow_dispatch:
 
