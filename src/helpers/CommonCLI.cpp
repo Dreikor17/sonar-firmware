@@ -3,6 +3,7 @@
 #include "TxtDataHelpers.h"
 #include "AdvertDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch()
+#include "MQTTPrefsAtomicStore.h"
 #include <RTClib.h>
 #include <Utils.h>
 
@@ -18,6 +19,7 @@
 #ifdef WITH_MQTT_BRIDGE
 #include "bridges/MQTTBridge.h"
 #include "MQTTDefaults.h"
+#include "MQTTPrefsCodec.h"
 #endif
 
 // Believe it or not, this std C function is busted on some platforms!
@@ -59,14 +61,30 @@ static const size_t COM_PREFS_TAIL_BYTES = 5;
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   bool is_fresh_install = false;
   bool is_upgrade = false;
+#ifdef WITH_MQTT_BRIDGE
+  bool node_prefs_needs_migration = false;
+#endif
   
   if (fs->exists("/com_prefs")) {
     loadPrefsInt(fs, "/com_prefs");   // new filename
   } else if (fs->exists("/node_prefs")) {
     loadPrefsInt(fs, "/node_prefs");
     is_upgrade = true;  // Migrating from old filename
-    savePrefs(fs);  // save to new filename
-    fs->remove("/node_prefs");  // remove old
+#ifdef WITH_MQTT_BRIDGE
+    // Wait for loadMQTTPrefs() to persist any observer tail captured from this
+    // old file before replacing or removing its only on-flash copy.
+    node_prefs_needs_migration = true;
+#else
+    if (saveCommonPrefsImageAtomically(fs)) {
+      fs->remove("/node_prefs");  // remove old only after the rename commits
+    } else {
+      MESH_DEBUG_PRINTLN("Prefs: preserving legacy /node_prefs until /com_prefs migration commits");
+    }
+    // This boot has either completed the filename handoff or deliberately
+    // preserved /node_prefs for a retry. Do not follow it with the ordinary
+    // non-atomic legacy compaction path below.
+    _com_prefs_needs_upgrade = false;
+#endif
   } else {
     // File doesn't exist - set default bridge settings for fresh installs
     is_fresh_install = true;
@@ -76,28 +94,70 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   // Load observer preferences (MQTT/WiFi/timezone/SNMP/alert) from /mqtt_prefs.
   // Readers (MQTTBridge, AlertReporter, observer CLI) use _mqtt_prefs directly —
   // these fields no longer exist in NodePrefs, so there is nothing to sync.
-  loadMQTTPrefs(fs);
+  MQTTPrefsAtomicStore::LegacyUpgradeGate legacy_upgrade(
+      _com_prefs_needs_upgrade || node_prefs_needs_migration);
+  loadMQTTPrefs(fs, &legacy_upgrade);
+  if (_mqtt_prefs_hold) legacy_upgrade.holdMqttSource();
 
   // For MQTT bridge, migrate bridge.source to RX (logRx) only on fresh installs or upgrades
   // so legacy "tx" is not the default. mqtt.rx / mqtt.tx are separate (fresh default: advert for TX)
   if ((is_fresh_install || is_upgrade) && _prefs->bridge_pkt_src == 0) {
-    MESH_DEBUG_PRINTLN("MQTT Bridge: Migrating bridge.source from tx to rx (MQTT bridge default)");
-    _prefs->bridge_pkt_src = 1;  // Set to RX (logRx)
-    savePrefs(fs);  // Save the updated preference
+    if (legacy_upgrade.blocksComPrefsRewrite()) {
+      MESH_DEBUG_PRINTLN("MQTT Bridge: deferring bridge.source migration until legacy prefs are preserved");
+    } else {
+      MESH_DEBUG_PRINTLN("MQTT Bridge: Migrating bridge.source from tx to rx (MQTT bridge default)");
+      _prefs->bridge_pkt_src = 1;  // Set to RX (logRx)
+      if (node_prefs_needs_migration) {
+        // The atomic /node_prefs -> /com_prefs handoff below persists this
+        // in-memory change. Do not publish /com_prefs before that transaction.
+        MESH_DEBUG_PRINTLN("MQTT Bridge: bridge.source will be saved with node prefs migration");
+      } else {
+        savePrefs(fs);  // Save the updated preference
+      }
+    }
   }
   // mqtt_rx_enabled: new field appended to end of MQTTPrefs. On upgrade from older firmware,
   // the shorter /mqtt_prefs file won't contain it, so it keeps the default value (1 = on)
   // set by setMQTTPrefsDefaults(). No explicit migration needed.
 #endif
 
-  if (_com_prefs_needs_upgrade) {
+#ifdef WITH_MQTT_BRIDGE
+  if (node_prefs_needs_migration) {
+    if (legacy_upgrade.mayRewriteComPrefs()) {
+      // The MQTT image (and any tail from /node_prefs) is committed, so it is
+      // now safe to publish the replacement name. Keep /node_prefs until the
+      // complete /com_prefs image is closed and atomically renamed into place.
+      if (saveCommonPrefsImageAtomically(fs)) {
+        fs->remove("/node_prefs");
+        legacy_upgrade.recordComPrefsRewrite();
+        _com_prefs_needs_upgrade = false;
+      } else {
+        MESH_DEBUG_PRINTLN("MQTT: preserving legacy /node_prefs until /com_prefs migration commits");
+      }
+    } else {
+      MESH_DEBUG_PRINTLN("MQTT: preserving legacy /node_prefs until /mqtt_prefs migration commits");
+    }
+  } else if (_com_prefs_needs_upgrade) {
     // Old-format /com_prefs (legacy MQTT gap + trailing observer block) was detected:
     // rewrite the prefs files in the current layout, one time. This persists the
     // recovered rx_boosted_gain/flood_max_* values and (on MQTT builds) the observer
     // settings that loadMQTTPrefs carried over into /mqtt_prefs.
+    if (legacy_upgrade.mayRewriteComPrefs()) {
+      // loadMQTTPrefs has already committed the full MQTT payload (including
+      // any recovered observer tail), so compact only /com_prefs now.
+      savePrefs(fs, false);
+      legacy_upgrade.recordComPrefsRewrite();
+      _com_prefs_needs_upgrade = false;
+    } else {
+      MESH_DEBUG_PRINTLN("MQTT: preserving legacy /com_prefs until /mqtt_prefs migration commits");
+    }
+  }
+#else
+  if (_com_prefs_needs_upgrade) {
     savePrefs(fs);
     _com_prefs_needs_upgrade = false;
   }
+#endif
 }
 
 void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
@@ -311,7 +371,81 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
   }
 }
 
-void CommonCLI::savePrefs(FILESYSTEM* fs) {
+// Keep the byte layout in one place so ordinary saves and the atomic legacy
+// rename path write exactly the same /com_prefs image. The Writer interface is
+// deliberately just write(bytes, size), which lets the transaction helper test
+// every short-write boundary without an Arduino filesystem.
+template <typename Writer>
+static bool writeCommonPrefsImage(Writer& writer, const NodePrefs* prefs) {
+  uint8_t pad[8];
+  memset(pad, 0, sizeof(pad));
+
+#define WRITE_COMMON_PREFS(value) \
+  do { \
+    if (writer.write((const uint8_t *)(value), sizeof(*(value))) != sizeof(*(value))) return false; \
+  } while (0)
+#define WRITE_COMMON_PREFS_BYTES(value, size) \
+  do { \
+    if (writer.write((const uint8_t *)(value), (size)) != (size)) return false; \
+  } while (0)
+
+  WRITE_COMMON_PREFS(&prefs->airtime_factor);    // 0
+  WRITE_COMMON_PREFS(&prefs->node_name);         // 4
+  WRITE_COMMON_PREFS_BYTES(pad, 4);               // 36
+  WRITE_COMMON_PREFS(&prefs->node_lat);           // 40
+  WRITE_COMMON_PREFS(&prefs->node_lon);           // 48
+  WRITE_COMMON_PREFS_BYTES(prefs->password, sizeof(prefs->password)); // 56
+  WRITE_COMMON_PREFS(&prefs->freq);               // 72
+  WRITE_COMMON_PREFS(&prefs->tx_power_dbm);       // 76
+  WRITE_COMMON_PREFS(&prefs->disable_fwd);        // 77
+  WRITE_COMMON_PREFS(&prefs->advert_interval);    // 78
+  WRITE_COMMON_PREFS_BYTES(pad, 1);               // 79
+  WRITE_COMMON_PREFS(&prefs->rx_delay_base);      // 80
+  WRITE_COMMON_PREFS(&prefs->tx_delay_factor);    // 84
+  WRITE_COMMON_PREFS_BYTES(prefs->guest_password, sizeof(prefs->guest_password)); // 88
+  WRITE_COMMON_PREFS(&prefs->direct_tx_delay_factor); // 104
+  WRITE_COMMON_PREFS_BYTES(pad, 4);               // 108
+  WRITE_COMMON_PREFS(&prefs->sf);                 // 112
+  WRITE_COMMON_PREFS(&prefs->cr);                 // 113
+  WRITE_COMMON_PREFS(&prefs->allow_read_only);    // 114
+  WRITE_COMMON_PREFS(&prefs->multi_acks);         // 115
+  WRITE_COMMON_PREFS(&prefs->bw);                 // 116
+  WRITE_COMMON_PREFS(&prefs->agc_reset_interval); // 120
+  WRITE_COMMON_PREFS(&prefs->path_hash_mode);     // 121
+  WRITE_COMMON_PREFS(&prefs->loop_detect);        // 122
+  WRITE_COMMON_PREFS_BYTES(pad, 1);               // 123
+  WRITE_COMMON_PREFS(&prefs->flood_max);          // 124
+  WRITE_COMMON_PREFS(&prefs->flood_advert_interval); // 125
+  WRITE_COMMON_PREFS(&prefs->interference_threshold); // 126
+  WRITE_COMMON_PREFS(&prefs->bridge_enabled);     // 127
+  WRITE_COMMON_PREFS(&prefs->bridge_delay);       // 128
+  WRITE_COMMON_PREFS(&prefs->bridge_pkt_src);     // 130
+  WRITE_COMMON_PREFS(&prefs->bridge_baud);        // 131
+  WRITE_COMMON_PREFS(&prefs->bridge_channel);     // 135
+  WRITE_COMMON_PREFS_BYTES(prefs->bridge_secret, sizeof(prefs->bridge_secret)); // 136
+  WRITE_COMMON_PREFS(&prefs->powersaving_enabled); // 152
+  WRITE_COMMON_PREFS_BYTES(pad, 3);               // 153
+  WRITE_COMMON_PREFS(&prefs->gps_enabled);        // 156
+  WRITE_COMMON_PREFS(&prefs->gps_interval);       // 157
+  WRITE_COMMON_PREFS(&prefs->advert_loc_policy);  // 161
+  WRITE_COMMON_PREFS(&prefs->discovery_mod_timestamp); // 162
+  WRITE_COMMON_PREFS(&prefs->adc_multiplier);     // 166
+  WRITE_COMMON_PREFS_BYTES(prefs->owner_info, sizeof(prefs->owner_info)); // 170
+  // MQTT/observer settings are stored in /mqtt_prefs, not here. No zero-gap is
+  // written anymore — /com_prefs holds only the (non-observer) fields below.
+  // These trailing writes are COM_PREFS_TAIL_BYTES; keep the two in sync.
+  WRITE_COMMON_PREFS(&prefs->rx_boosted_gain);      // 290
+  WRITE_COMMON_PREFS(&prefs->flood_max_unscoped);   // 291
+  WRITE_COMMON_PREFS(&prefs->flood_max_advert);     // 292
+  WRITE_COMMON_PREFS(&prefs->radio_fem_rxgain);     // 293
+  WRITE_COMMON_PREFS(&prefs->cad_enabled);          // 294
+
+#undef WRITE_COMMON_PREFS_BYTES
+#undef WRITE_COMMON_PREFS
+  return true;
+}
+
+void CommonCLI::savePrefs(FILESYSTEM* fs, bool save_mqtt) {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
   fs->remove("/com_prefs");
   File file = fs->open("/com_prefs", FILE_O_WRITE);
@@ -321,66 +455,13 @@ void CommonCLI::savePrefs(FILESYSTEM* fs) {
   File file = fs->open("/com_prefs", "w", true);
 #endif
   if (file) {
-    uint8_t pad[8];
-    memset(pad, 0, sizeof(pad));
-
-    file.write((uint8_t *)&_prefs->airtime_factor, sizeof(_prefs->airtime_factor));    // 0
-    file.write((uint8_t *)&_prefs->node_name, sizeof(_prefs->node_name));              // 4
-    file.write(pad, 4);                                                                // 36
-    file.write((uint8_t *)&_prefs->node_lat, sizeof(_prefs->node_lat));                // 40
-    file.write((uint8_t *)&_prefs->node_lon, sizeof(_prefs->node_lon));                // 48
-    file.write((uint8_t *)&_prefs->password[0], sizeof(_prefs->password));             // 56
-    file.write((uint8_t *)&_prefs->freq, sizeof(_prefs->freq));                        // 72
-    file.write((uint8_t *)&_prefs->tx_power_dbm, sizeof(_prefs->tx_power_dbm));        // 76
-    file.write((uint8_t *)&_prefs->disable_fwd, sizeof(_prefs->disable_fwd));          // 77
-    file.write((uint8_t *)&_prefs->advert_interval, sizeof(_prefs->advert_interval));  // 78
-    file.write(pad, 1);                                                                // 79 : 1 byte unused (rx_boosted_gain moved to end)
-    file.write((uint8_t *)&_prefs->rx_delay_base, sizeof(_prefs->rx_delay_base));      // 80
-    file.write((uint8_t *)&_prefs->tx_delay_factor, sizeof(_prefs->tx_delay_factor));  // 84
-    file.write((uint8_t *)&_prefs->guest_password[0], sizeof(_prefs->guest_password)); // 88
-    file.write((uint8_t *)&_prefs->direct_tx_delay_factor, sizeof(_prefs->direct_tx_delay_factor)); // 104
-    file.write(pad, 4);                                                                             // 108
-    file.write((uint8_t *)&_prefs->sf, sizeof(_prefs->sf));                                         // 112
-    file.write((uint8_t *)&_prefs->cr, sizeof(_prefs->cr));                                         // 113
-    file.write((uint8_t *)&_prefs->allow_read_only, sizeof(_prefs->allow_read_only));               // 114
-    file.write((uint8_t *)&_prefs->multi_acks, sizeof(_prefs->multi_acks));                         // 115
-    file.write((uint8_t *)&_prefs->bw, sizeof(_prefs->bw));                                         // 116
-    file.write((uint8_t *)&_prefs->agc_reset_interval, sizeof(_prefs->agc_reset_interval));         // 120
-    file.write((uint8_t *)&_prefs->path_hash_mode, sizeof(_prefs->path_hash_mode));                 // 121
-    file.write((uint8_t *)&_prefs->loop_detect, sizeof(_prefs->loop_detect));                       // 122
-    file.write(pad, 1);                                                                             // 123
-    file.write((uint8_t *)&_prefs->flood_max, sizeof(_prefs->flood_max));                           // 124
-    file.write((uint8_t *)&_prefs->flood_advert_interval, sizeof(_prefs->flood_advert_interval));   // 125
-    file.write((uint8_t *)&_prefs->interference_threshold, sizeof(_prefs->interference_threshold)); // 126
-    file.write((uint8_t *)&_prefs->bridge_enabled, sizeof(_prefs->bridge_enabled));                 // 127
-    file.write((uint8_t *)&_prefs->bridge_delay, sizeof(_prefs->bridge_delay));                     // 128
-    file.write((uint8_t *)&_prefs->bridge_pkt_src, sizeof(_prefs->bridge_pkt_src));                 // 130
-    file.write((uint8_t *)&_prefs->bridge_baud, sizeof(_prefs->bridge_baud));                       // 131
-    file.write((uint8_t *)&_prefs->bridge_channel, sizeof(_prefs->bridge_channel));                 // 135
-    file.write((uint8_t *)&_prefs->bridge_secret, sizeof(_prefs->bridge_secret));                   // 136
-    file.write((uint8_t *)&_prefs->powersaving_enabled, sizeof(_prefs->powersaving_enabled));       // 152
-    file.write(pad, 3);                                                                             // 153
-    file.write((uint8_t *)&_prefs->gps_enabled, sizeof(_prefs->gps_enabled));                       // 156
-    file.write((uint8_t *)&_prefs->gps_interval, sizeof(_prefs->gps_interval));                     // 157
-    file.write((uint8_t *)&_prefs->advert_loc_policy, sizeof(_prefs->advert_loc_policy));           // 161
-    file.write((uint8_t *)&_prefs->discovery_mod_timestamp, sizeof(_prefs->discovery_mod_timestamp)); // 162
-    file.write((uint8_t *)&_prefs->adc_multiplier, sizeof(_prefs->adc_multiplier));                 // 166
-    file.write((uint8_t *)_prefs->owner_info, sizeof(_prefs->owner_info));                          // 170
-    // MQTT/observer settings are stored in /mqtt_prefs, not here. No zero-gap is
-    // written anymore — /com_prefs holds only the (non-observer) fields below.
-    // These trailing writes are COM_PREFS_TAIL_BYTES; keep the two in sync.
-    file.write((uint8_t *)&_prefs->rx_boosted_gain, sizeof(_prefs->rx_boosted_gain));      // 290
-    file.write((uint8_t *)&_prefs->flood_max_unscoped, sizeof(_prefs->flood_max_unscoped)); // 291
-    file.write((uint8_t *)&_prefs->flood_max_advert, sizeof(_prefs->flood_max_advert));    // 292
-    file.write((uint8_t *)&_prefs->radio_fem_rxgain, sizeof(_prefs->radio_fem_rxgain));    // 293
-    file.write((uint8_t *)&_prefs->cad_enabled, sizeof(_prefs->cad_enabled));              // 294
-
+    writeCommonPrefsImage(file, _prefs);
     file.close();
   }
 #ifdef WITH_MQTT_BRIDGE
   // Observer config (MQTT/WiFi/timezone/SNMP/alert) is persisted separately. The
   // observer CLI writes _mqtt_prefs directly, so no NodePrefs->MQTTPrefs sync runs.
-  saveMQTTPrefs(fs);
+  if (save_mqtt) saveMQTTPrefs(fs);
 #endif
 }
 
@@ -398,228 +479,307 @@ static File openMqttPrefsRead(FILESYSTEM* fs) {
 #endif
 }
 
-void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
-  // Initialize with defaults first
-  setMQTTPrefsDefaults(&_mqtt_prefs);
-  _mqtt_prefs_hold = false;
+// Filesystem adapter for MQTTPrefsAtomicStore. It writes the new image only to
+// /mqtt_prefs.tmp, then relies on the filesystem's atomic rename to publish it
+// over /mqtt_prefs. It never removes the current source file itself.
+class MQTTPrefsFileStore {
+public:
+  explicit MQTTPrefsFileStore(FILESYSTEM* fs) : _fs(fs) {}
 
-  // Whether the loaded /mqtt_prefs already contained the observer fields (snmp/
-  // watchdog/alert) appended in Phase 2 — if not, they may be carried over from an
-  // old-format /com_prefs trailing block below.
-  bool has_observer_fields = false;
-
-  bool file_existed = fs->exists("/mqtt_prefs");
-  if (file_existed) {
-    // First, peek the header to see if this is a versioned file.
-    File file = openMqttPrefsRead(fs);
-    bool versioned = false;
-    if (file) {
-      size_t file_size = file.size();
-      if (file_size >= sizeof(MQTTPrefsHeader)) {
-        MQTTPrefsHeader hdr;
-        if (file.read((uint8_t *)&hdr, sizeof(hdr)) == sizeof(hdr)
-            && memcmp(hdr.magic, MQTT_PREFS_MAGIC, sizeof(hdr.magic)) == 0) {
-          versioned = true;
-          if (hdr.version == MQTT_PREFS_VERSION) {
-            // Current version: the payload follows the header. Read up to
-            // sizeof(MQTTPrefs); a shorter payload (an earlier v1 firmware that
-            // hadn't appended a tail field) leaves the trailing fields at their
-            // defaults, and a longer one (a future append) is truncated harmlessly.
-            size_t payload_avail = file_size - sizeof(hdr);
-            size_t to_read = payload_avail < sizeof(_mqtt_prefs) ? payload_avail : sizeof(_mqtt_prefs);
-            size_t got = file.read((uint8_t *)&_mqtt_prefs, to_read);
-            if (got != to_read) {
-              setMQTTPrefsDefaults(&_mqtt_prefs);
-            } else {
-              has_observer_fields = true;  // observer tail is part of the v1 payload
-            }
-          } else {
-            // Unknown (newer) version: don't risk misreading a layout we don't know.
-            // Keep defaults for this boot and hold the file so later savePrefs()
-            // calls can't overwrite the newer config (no downgrade).
-            _mqtt_prefs_hold = true;
-            MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs version unsupported, using defaults (file preserved)");
-          }
-        }
-      }
-      file.close();
-    }
-
-    if (!versioned) {
-      // Headerless (legacy) file. Detect the historical on-disk layout by size,
-      // migrate it into the compact versioned struct, and re-save — which adds the
-      // header and drops the vestigial `_legacy_*` fields. Reopen because the peek
-      // above advanced the read cursor past the (non-matching) leading bytes.
-      File file = openMqttPrefsRead(fs);
-      if (file) {
-        size_t file_size = file.size();
-
-        // Detect old (pre-slot) format by file size.
-        // Old MQTTPrefs was ~472 bytes (no slot fields).
-        // If the file is smaller than the new struct but close to OldMQTTPrefs size,
-        // read it with the old layout and migrate.
-        if (file_size > 0 && file_size <= sizeof(OldMQTTPrefs)) {
-          OldMQTTPrefs old_prefs;
-          memset(&old_prefs, 0, sizeof(old_prefs));
-          size_t bytes_read = file.read((uint8_t *)&old_prefs, file_size < sizeof(old_prefs) ? file_size : sizeof(old_prefs));
-          file.close();
-
-          if (bytes_read > 0) {
-            MESH_DEBUG_PRINTLN("MQTT: Migrating old-format prefs to versioned layout");
-
-            // Copy common fields (identical layout at start of both structs)
-            memcpy(_mqtt_prefs.mqtt_origin, old_prefs.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
-            memcpy(_mqtt_prefs.mqtt_iata, old_prefs.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
-            _mqtt_prefs.mqtt_status_enabled = old_prefs.mqtt_status_enabled;
-            _mqtt_prefs.mqtt_packets_enabled = old_prefs.mqtt_packets_enabled;
-            _mqtt_prefs.mqtt_raw_enabled = old_prefs.mqtt_raw_enabled;
-            _mqtt_prefs.mqtt_tx_enabled = old_prefs.mqtt_tx_enabled;
-            _mqtt_prefs.mqtt_status_interval = old_prefs.mqtt_status_interval;
-            memcpy(_mqtt_prefs.wifi_ssid, old_prefs.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
-            memcpy(_mqtt_prefs.wifi_password, old_prefs.wifi_password, sizeof(_mqtt_prefs.wifi_password));
-            _mqtt_prefs.wifi_power_save = old_prefs.wifi_power_save;
-            memcpy(_mqtt_prefs.timezone_string, old_prefs.timezone_string, sizeof(_mqtt_prefs.timezone_string));
-            _mqtt_prefs.timezone_offset = old_prefs.timezone_offset;
-
-            // Migrate shared auth fields
-            memcpy(_mqtt_prefs.mqtt_owner_public_key, old_prefs.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
-            memcpy(_mqtt_prefs.mqtt_email, old_prefs.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
-
-            // Migrate analyzer presets to slots
-            if (old_prefs.mqtt_analyzer_us_enabled == 1) {
-              strncpy(_mqtt_prefs.mqtt_slot_preset[0], "analyzer-us", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
-            } else {
-              strncpy(_mqtt_prefs.mqtt_slot_preset[0], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[0]) - 1);
-            }
-            if (old_prefs.mqtt_analyzer_eu_enabled == 1) {
-              strncpy(_mqtt_prefs.mqtt_slot_preset[1], "analyzer-eu", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
-            } else {
-              strncpy(_mqtt_prefs.mqtt_slot_preset[1], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[1]) - 1);
-            }
-
-            // Migrate custom server to slot 3
-            if (old_prefs.mqtt_server[0] != '\0' && old_prefs.mqtt_port > 0) {
-              strncpy(_mqtt_prefs.mqtt_slot_preset[2], "custom", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
-              strncpy(_mqtt_prefs.mqtt_slot_host[2], old_prefs.mqtt_server, sizeof(_mqtt_prefs.mqtt_slot_host[2]) - 1);
-              _mqtt_prefs.mqtt_slot_port[2] = old_prefs.mqtt_port;
-              strncpy(_mqtt_prefs.mqtt_slot_username[2], old_prefs.mqtt_username, sizeof(_mqtt_prefs.mqtt_slot_username[2]) - 1);
-              strncpy(_mqtt_prefs.mqtt_slot_password[2], old_prefs.mqtt_password, sizeof(_mqtt_prefs.mqtt_slot_password[2]) - 1);
-            } else {
-              strncpy(_mqtt_prefs.mqtt_slot_preset[2], "none", sizeof(_mqtt_prefs.mqtt_slot_preset[2]) - 1);
-            }
-
-            // Save migrated prefs in the versioned format
-            saveMQTTPrefs(fs);
-          }
-        } else if (file_size > 0 && file_size <= sizeof(ThreeSlotMQTTPrefs)) {
-          // 3-slot format → compact 6-slot migration
-          // Array sizes changed from [3] to [6], shifting all field offsets.
-          // Read into old layout struct and field-copy to new layout.
-          ThreeSlotMQTTPrefs old3;
-          memset(&old3, 0, sizeof(old3));
-          size_t bytes_to_read = file_size < sizeof(old3) ? file_size : sizeof(old3);
-          size_t bytes_read = file.read((uint8_t *)&old3, bytes_to_read);
-          file.close();
-
-          if (bytes_read > 0) {
-            MESH_DEBUG_PRINTLN("MQTT: Migrating 3-slot prefs to versioned layout");
-
-            // Copy non-slot fields (identical layout)
-            memcpy(_mqtt_prefs.mqtt_origin, old3.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
-            memcpy(_mqtt_prefs.mqtt_iata, old3.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
-            _mqtt_prefs.mqtt_status_enabled = old3.mqtt_status_enabled;
-            _mqtt_prefs.mqtt_packets_enabled = old3.mqtt_packets_enabled;
-            _mqtt_prefs.mqtt_raw_enabled = old3.mqtt_raw_enabled;
-            _mqtt_prefs.mqtt_tx_enabled = old3.mqtt_tx_enabled;
-            _mqtt_prefs.mqtt_status_interval = old3.mqtt_status_interval;
-            memcpy(_mqtt_prefs.wifi_ssid, old3.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
-            memcpy(_mqtt_prefs.wifi_password, old3.wifi_password, sizeof(_mqtt_prefs.wifi_password));
-            _mqtt_prefs.wifi_power_save = old3.wifi_power_save;
-            memcpy(_mqtt_prefs.timezone_string, old3.timezone_string, sizeof(_mqtt_prefs.timezone_string));
-            _mqtt_prefs.timezone_offset = old3.timezone_offset;
-
-            // Copy slot fields for indices 0-2 from old layout
-            for (int i = 0; i < 3; i++) {
-              memcpy(_mqtt_prefs.mqtt_slot_preset[i], old3.mqtt_slot_preset[i], sizeof(_mqtt_prefs.mqtt_slot_preset[i]));
-              memcpy(_mqtt_prefs.mqtt_slot_host[i], old3.mqtt_slot_host[i], sizeof(_mqtt_prefs.mqtt_slot_host[i]));
-              _mqtt_prefs.mqtt_slot_port[i] = old3.mqtt_slot_port[i];
-              memcpy(_mqtt_prefs.mqtt_slot_username[i], old3.mqtt_slot_username[i], sizeof(_mqtt_prefs.mqtt_slot_username[i]));
-              memcpy(_mqtt_prefs.mqtt_slot_password[i], old3.mqtt_slot_password[i], sizeof(_mqtt_prefs.mqtt_slot_password[i]));
-              memcpy(_mqtt_prefs.mqtt_slot_token[i], old3.mqtt_slot_token[i], sizeof(_mqtt_prefs.mqtt_slot_token[i]));
-              memcpy(_mqtt_prefs.mqtt_slot_topic[i], old3.mqtt_slot_topic[i], sizeof(_mqtt_prefs.mqtt_slot_topic[i]));
-            }
-            // Slots 3-5 keep defaults ("none") from setMQTTPrefsDefaults()
-
-            // Copy shared auth fields
-            memcpy(_mqtt_prefs.mqtt_owner_public_key, old3.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
-            memcpy(_mqtt_prefs.mqtt_email, old3.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
-
-            // Save migrated prefs in the versioned format
-            saveMQTTPrefs(fs);
-          }
-        } else if (file_size > 0) {
-          // Headerless 6-slot layout as shipped on mqtt-bridge-implementation-flex
-          // (the deployed fleet). Same field order as the compact struct but with the
-          // vestigial `_legacy_*` block mid-struct and no observer tail — so read it
-          // into Legacy6SlotMQTTPrefs and field-copy across, dropping `_legacy_*`.
-          Legacy6SlotMQTTPrefs old6;
-          memset(&old6, 0, sizeof(old6));
-          size_t bytes_to_read = file_size < sizeof(old6) ? file_size : sizeof(old6);
-          size_t bytes_read = file.read((uint8_t *)&old6, bytes_to_read);
-          file.close();
-
-          if (bytes_read > 0) {
-            MESH_DEBUG_PRINTLN("MQTT: Migrating headerless 6-slot prefs to versioned layout");
-
-            memcpy(_mqtt_prefs.mqtt_origin, old6.mqtt_origin, sizeof(_mqtt_prefs.mqtt_origin));
-            memcpy(_mqtt_prefs.mqtt_iata, old6.mqtt_iata, sizeof(_mqtt_prefs.mqtt_iata));
-            _mqtt_prefs.mqtt_status_enabled = old6.mqtt_status_enabled;
-            _mqtt_prefs.mqtt_packets_enabled = old6.mqtt_packets_enabled;
-            _mqtt_prefs.mqtt_raw_enabled = old6.mqtt_raw_enabled;
-            _mqtt_prefs.mqtt_tx_enabled = old6.mqtt_tx_enabled;
-            _mqtt_prefs.mqtt_status_interval = old6.mqtt_status_interval;
-            memcpy(_mqtt_prefs.wifi_ssid, old6.wifi_ssid, sizeof(_mqtt_prefs.wifi_ssid));
-            memcpy(_mqtt_prefs.wifi_password, old6.wifi_password, sizeof(_mqtt_prefs.wifi_password));
-            _mqtt_prefs.wifi_power_save = old6.wifi_power_save;
-            memcpy(_mqtt_prefs.timezone_string, old6.timezone_string, sizeof(_mqtt_prefs.timezone_string));
-            _mqtt_prefs.timezone_offset = old6.timezone_offset;
-            memcpy(_mqtt_prefs.mqtt_slot_preset, old6.mqtt_slot_preset, sizeof(_mqtt_prefs.mqtt_slot_preset));
-            memcpy(_mqtt_prefs.mqtt_slot_host, old6.mqtt_slot_host, sizeof(_mqtt_prefs.mqtt_slot_host));
-            memcpy(_mqtt_prefs.mqtt_slot_port, old6.mqtt_slot_port, sizeof(_mqtt_prefs.mqtt_slot_port));
-            memcpy(_mqtt_prefs.mqtt_slot_username, old6.mqtt_slot_username, sizeof(_mqtt_prefs.mqtt_slot_username));
-            memcpy(_mqtt_prefs.mqtt_slot_password, old6.mqtt_slot_password, sizeof(_mqtt_prefs.mqtt_slot_password));
-            memcpy(_mqtt_prefs.mqtt_owner_public_key, old6.mqtt_owner_public_key, sizeof(_mqtt_prefs.mqtt_owner_public_key));
-            memcpy(_mqtt_prefs.mqtt_email, old6.mqtt_email, sizeof(_mqtt_prefs.mqtt_email));
-            // `_legacy_*` fields are intentionally dropped here.
-            memcpy(_mqtt_prefs.mqtt_slot_token, old6.mqtt_slot_token, sizeof(_mqtt_prefs.mqtt_slot_token));
-            memcpy(_mqtt_prefs.mqtt_slot_topic, old6.mqtt_slot_topic, sizeof(_mqtt_prefs.mqtt_slot_topic));
-            memcpy(_mqtt_prefs.mqtt_slot_audience, old6.mqtt_slot_audience, sizeof(_mqtt_prefs.mqtt_slot_audience));
-            _mqtt_prefs.mqtt_rx_enabled = old6.mqtt_rx_enabled;
-            memcpy(_mqtt_prefs.mqtt_ntp_server, old6.mqtt_ntp_server, sizeof(_mqtt_prefs.mqtt_ntp_server));
-            // Observer tail (snmp/watchdog/alert) keeps defaults; if this device is
-            // also upgrading across the NodePrefs split, loadPrefsInt captured those
-            // values from /com_prefs and they are applied below.
-
-            saveMQTTPrefs(fs);
-          }
-        } else {
-          file.close();
-          setMQTTPrefsDefaults(&_mqtt_prefs);
-        }
-      }
-    }
-  } else {
-    // No /mqtt_prefs file — defaults already set. (MQTT slot/WiFi settings from
-    // pre-/mqtt_prefs-split fork firmware are NOT recovered from /com_prefs — that
-    // offset-based migration was fragile and was removed; those users re-enter
-    // their MQTT config. The observer trailing block IS recovered, below.)
+  bool begin() {
+    _finished = false;
+    _open = false;
+    _bytes_written = 0;
+    _fs->remove("/mqtt_prefs.tmp");  // clear only a stale, unpublished transaction
+    if (_fs->exists("/mqtt_prefs.tmp")) return false;
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+    _file = _fs->open("/mqtt_prefs.tmp", FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+    _file = _fs->open("/mqtt_prefs.tmp", "w");
+#else
+    _file = _fs->open("/mqtt_prefs.tmp", "w", true);
+#endif
+    _open = _file;
+    return _open;
   }
 
-  // One-time upgrade path: if loadPrefsInt captured the trailing observer block of
-  // an old-format /com_prefs and this /mqtt_prefs predates the appended observer
-  // fields (or doesn't exist), carry the settings over so SNMP, radio-watchdog and
-  // fault-alert config survive the firmware upgrade. loadPrefs() persists both
-  // files in the new layout right after this.
+  size_t write(const uint8_t* bytes, size_t size) {
+    if (!_open) return 0;
+    const size_t written = _file.write(bytes, size);
+    _bytes_written += written;
+    return written;
+  }
+
+  bool finish() {
+    if (!_open) return false;
+    _file.close();
+    _open = false;
+#if defined(RP2040_PLATFORM)
+    File verify = _fs->open("/mqtt_prefs.tmp", "r");
+#else
+    File verify = _fs->open("/mqtt_prefs.tmp");
+#endif
+    if (!verify) return false;
+    const bool complete = verify.size() == _bytes_written;
+    verify.close();
+    if (!complete) return false;
+    _finished = true;
+    return true;
+  }
+
+  bool commit() {
+    return _finished && _fs->rename("/mqtt_prefs.tmp", "/mqtt_prefs");
+  }
+
+  void abort() {
+    if (_open) _file.close();
+    _open = false;
+    _finished = false;
+    _fs->remove("/mqtt_prefs.tmp");
+  }
+
+private:
+  FILESYSTEM* _fs;
+  File _file;
+  bool _open = false;
+  bool _finished = false;
+  size_t _bytes_written = 0;
+};
+
+#endif  // WITH_MQTT_BRIDGE
+
+// The old /node_prefs name is only removed after this transaction has published
+// a complete /com_prefs image. At this migration point /com_prefs is absent, so
+// rename never needs a platform-specific replace-existing implementation.
+class CommonPrefsFileStore {
+public:
+  explicit CommonPrefsFileStore(FILESYSTEM* fs) : _fs(fs) {}
+
+  bool begin() {
+    _finished = false;
+    _open = false;
+    _bytes_written = 0;
+    // The old-name migration only starts when /com_prefs is absent. Refuse to
+    // overwrite a destination that appeared unexpectedly before this handoff.
+    if (_fs->exists("/com_prefs")) return false;
+    _fs->remove("/com_prefs.tmp");  // clear only stale, unpublished output
+    if (_fs->exists("/com_prefs.tmp")) return false;
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+    _file = _fs->open("/com_prefs.tmp", FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+    _file = _fs->open("/com_prefs.tmp", "w");
+#else
+    _file = _fs->open("/com_prefs.tmp", "w", true);
+#endif
+    _open = _file;
+    return _open;
+  }
+
+  size_t write(const uint8_t* bytes, size_t size) {
+    if (!_open) return 0;
+    const size_t written = _file.write(bytes, size);
+    _bytes_written += written;
+    return written;
+  }
+
+  bool finish() {
+    if (!_open) return false;
+    _file.close();
+    _open = false;
+#if defined(RP2040_PLATFORM)
+    File verify = _fs->open("/com_prefs.tmp", "r");
+#else
+    File verify = _fs->open("/com_prefs.tmp");
+#endif
+    if (!verify) return false;
+    const bool complete = verify.size() == _bytes_written;
+    verify.close();
+    if (!complete) return false;
+    _finished = true;
+    return true;
+  }
+
+  bool commit() {
+    return _finished && _fs->rename("/com_prefs.tmp", "/com_prefs");
+  }
+
+  void abort() {
+    if (_open) _file.close();
+    _open = false;
+    _finished = false;
+    _fs->remove("/com_prefs.tmp");
+  }
+
+private:
+  FILESYSTEM* _fs;
+  File _file;
+  bool _open = false;
+  bool _finished = false;
+  size_t _bytes_written = 0;
+};
+
+static const char* commonPrefsSaveResultName(MQTTPrefsAtomicStore::ImageResult result) {
+  switch (result) {
+    case MQTTPrefsAtomicStore::ImageResult::BeginFailed: return "begin";
+    case MQTTPrefsAtomicStore::ImageResult::WriteFailed: return "write";
+    case MQTTPrefsAtomicStore::ImageResult::FinishFailed: return "close";
+    case MQTTPrefsAtomicStore::ImageResult::CommitFailed: return "rename";
+    case MQTTPrefsAtomicStore::ImageResult::Committed: return "committed";
+  }
+  return "unknown";
+}
+
+bool CommonCLI::saveCommonPrefsImageAtomically(FILESYSTEM* fs) {
+  CommonPrefsFileStore store(fs);
+  const MQTTPrefsAtomicStore::ImageResult result = MQTTPrefsAtomicStore::writeImage(
+      store, [this](CommonPrefsFileStore& target) {
+        return writeCommonPrefsImage(target, _prefs);
+      });
+  if (!MQTTPrefsAtomicStore::imageCommitted(result)) {
+    MESH_DEBUG_PRINTLN("Prefs: atomic /com_prefs migration save failed at %s; /node_prefs preserved",
+                       commonPrefsSaveResultName(result));
+    return false;
+  }
+  return true;
+}
+
+#ifdef WITH_MQTT_BRIDGE
+
+static const char* mqttPrefsSaveResultName(MQTTPrefsAtomicStore::Result result) {
+  switch (result) {
+    case MQTTPrefsAtomicStore::Result::BeginFailed: return "begin";
+    case MQTTPrefsAtomicStore::Result::HeaderWriteFailed: return "header write";
+    case MQTTPrefsAtomicStore::Result::PayloadWriteFailed: return "payload write";
+    case MQTTPrefsAtomicStore::Result::FinishFailed: return "close";
+    case MQTTPrefsAtomicStore::Result::CommitFailed: return "rename";
+    case MQTTPrefsAtomicStore::Result::Committed: return "committed";
+  }
+  return "unknown";
+}
+
+void CommonCLI::loadMQTTPrefs(
+    FILESYSTEM* fs, MQTTPrefsAtomicStore::LegacyUpgradeGate* legacy_upgrade) {
+  setMQTTPrefsDefaults(&_mqtt_prefs);
+  _mqtt_prefs_hold = false;
+  bool has_observer_fields = false;
+  bool mqtt_rewrite_pending = false;
+  bool migrated_legacy_mqtt = false;
+
+  if (fs->exists("/mqtt_prefs")) {
+    File file = openMqttPrefsRead(fs);
+    if (file) {
+      const size_t file_size = file.size();
+      uint8_t prefix[sizeof(MQTTPrefsHeader)] = {};
+      const size_t prefix_size = file_size < sizeof(prefix) ? file_size : sizeof(prefix);
+      const size_t prefix_read = file.read(prefix, prefix_size);
+      file.close();
+
+      const MQTTPrefsCodec::DecodePlan plan =
+          MQTTPrefsCodec::classify(prefix, prefix_read, file_size);
+      if (plan.preserve_file) {
+        _mqtt_prefs_hold = true;
+        MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs is unsupported or corrupt, using defaults (file preserved)");
+      } else if (plan.source == MQTTPrefsCodec::Source::Current) {
+        file = openMqttPrefsRead(fs);
+        MQTTPrefsHeader header;
+        if (!file || file.read((uint8_t *)&header, sizeof(header)) != sizeof(header) ||
+            file.read((uint8_t *)&_mqtt_prefs, plan.payload_len) != plan.payload_len) {
+          setMQTTPrefsDefaults(&_mqtt_prefs);
+          _mqtt_prefs_hold = true;
+          MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs read failed, using defaults (file preserved)");
+        } else {
+          has_observer_fields = plan.observer_fields_present;
+        }
+        if (file) file.close();
+      } else if (plan.rewrite_legacy) {
+        bool migrated = false;
+        file = openMqttPrefsRead(fs);
+        if (file) {
+          switch (plan.source) {
+            case MQTTPrefsCodec::Source::LegacyPreSlot: {
+              union {
+                OldMQTTPrefs post_wifi_power;
+                PreWifiPowerOldMQTTPrefs pre_wifi_power;
+              } old_prefs = {};
+              if (file.read((uint8_t *)&old_prefs, sizeof(old_prefs)) == sizeof(old_prefs)) {
+                if (MQTTPrefsCodec::isPlausibleLegacy(plan.source,
+                                                       (const uint8_t *)&old_prefs, sizeof(old_prefs))) {
+                  if (MQTTPrefsCodec::looksLikePreWifiPower((uint8_t *)&old_prefs, sizeof(old_prefs))) {
+                    MQTTPrefsCodec::migratePreWifiPower(old_prefs.pre_wifi_power, &_mqtt_prefs);
+                  } else {
+                    MQTTPrefsCodec::migratePreSlot(old_prefs.post_wifi_power, &_mqtt_prefs);
+                  }
+                  migrated = true;
+                } else {
+                  MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs legacy content failed plausibility checks");
+                }
+              }
+              break;
+            }
+            case MQTTPrefsCodec::Source::LegacyThreeSlotBase: {
+              ThreeSlotBaseMQTTPrefs old_prefs = {};
+              if (file.read((uint8_t *)&old_prefs, sizeof(old_prefs)) == sizeof(old_prefs)) {
+                if (MQTTPrefsCodec::isPlausibleLegacy(plan.source,
+                                                       (const uint8_t *)&old_prefs, sizeof(old_prefs))) {
+                  MQTTPrefsCodec::migrateThreeSlot(old_prefs, &_mqtt_prefs);
+                  migrated = true;
+                } else {
+                  MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs legacy content failed plausibility checks");
+                }
+              }
+              break;
+            }
+            case MQTTPrefsCodec::Source::LegacyThreeSlot: {
+              ThreeSlotMQTTPrefs old_prefs = {};
+              if (file.read((uint8_t *)&old_prefs, sizeof(old_prefs)) == sizeof(old_prefs)) {
+                if (MQTTPrefsCodec::isPlausibleLegacy(plan.source,
+                                                       (const uint8_t *)&old_prefs, sizeof(old_prefs))) {
+                  MQTTPrefsCodec::migrateThreeSlot(old_prefs, &_mqtt_prefs);
+                  migrated = true;
+                } else {
+                  MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs legacy content failed plausibility checks");
+                }
+              }
+              break;
+            }
+            case MQTTPrefsCodec::Source::LegacySixSlotBase:
+            case MQTTPrefsCodec::Source::LegacySixSlotAudience:
+            case MQTTPrefsCodec::Source::LegacySixSlotAudienceRx:
+            case MQTTPrefsCodec::Source::LegacySixSlot: {
+              Legacy6SlotMQTTPrefs old_prefs = {};
+              if (file.read((uint8_t *)&old_prefs, plan.payload_len) == plan.payload_len) {
+                if (MQTTPrefsCodec::isPlausibleLegacy(plan.source,
+                                                       (const uint8_t *)&old_prefs, plan.payload_len)) {
+                  MQTTPrefsCodec::migrateLegacySixSlot(old_prefs, plan.source, &_mqtt_prefs);
+                  migrated = true;
+                } else {
+                  MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs legacy content failed plausibility checks");
+                }
+              }
+              break;
+            }
+            default:
+              break;
+          }
+          file.close();
+        }
+        if (migrated) {
+          // Do not save yet: a legacy /com_prefs observer tail may still need
+          // to be overlaid below. Publish the complete v1 image once, after it.
+          mqtt_rewrite_pending = true;
+          migrated_legacy_mqtt = true;
+        } else {
+          setMQTTPrefsDefaults(&_mqtt_prefs);
+          _mqtt_prefs_hold = true;
+          MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs legacy read failed, using defaults (file preserved)");
+        }
+      }
+    } else {
+      _mqtt_prefs_hold = true;
+      MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs could not be opened, using defaults (file preserved)");
+    }
+  }
+
   if (_legacy_tail.valid && !has_observer_fields) {
     _mqtt_prefs.snmp_enabled = _legacy_tail.snmp_enabled;
     memcpy(_mqtt_prefs.snmp_community, _legacy_tail.snmp_community, sizeof(_mqtt_prefs.snmp_community));
@@ -631,37 +791,52 @@ void CommonCLI::loadMQTTPrefs(FILESYSTEM* fs) {
     _mqtt_prefs.alert_min_interval_min = _legacy_tail.alert_min_interval_min;
     memcpy(_mqtt_prefs.alert_hashtag, _legacy_tail.alert_hashtag, sizeof(_mqtt_prefs.alert_hashtag));
     memcpy(_mqtt_prefs.alert_region, _legacy_tail.alert_region, sizeof(_mqtt_prefs.alert_region));
+    mqtt_rewrite_pending = true;
     MESH_DEBUG_PRINTLN("MQTT: Migrated observer settings from legacy /com_prefs trailing block");
   }
   _legacy_tail.valid = false;
+
+  if (mqtt_rewrite_pending) {
+    legacy_upgrade->requireMqttRewrite();
+    if (migrated_legacy_mqtt) {
+      MESH_DEBUG_PRINTLN("MQTT: Migrating headerless /mqtt_prefs to versioned layout");
+    } else {
+      MESH_DEBUG_PRINTLN("MQTT: Persisting observer tail into /mqtt_prefs before /com_prefs compaction");
+    }
+    if (saveMQTTPrefs(fs)) {
+      legacy_upgrade->recordMqttSave(true);
+    } else {
+      // The legacy source(s) remain intact because the failed transaction never
+      // published its temp file. Hold this boot so loadPrefs leaves /com_prefs
+      // untouched; the next boot can recover the tail and retry the transaction.
+      _mqtt_prefs_hold = true;
+      legacy_upgrade->recordMqttSave(false);
+      MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs migration save failed; legacy files preserved and held");
+    }
+  }
 }
 
-void CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
+bool CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
   if (_mqtt_prefs_hold) {
-    // /mqtt_prefs was written by newer firmware; overwriting it here (v1 header +
-    // this boot's defaults) would destroy that config. Observer settings changed
-    // this boot are not persisted until current-or-older firmware is flashed.
-    MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs from newer firmware, not overwriting");
-    return;
+    // Loading deliberately preserved the source file. Do not replace it with this
+    // boot's defaults after an unsupported, corrupt, or temporarily failed read.
+    MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs held, not overwriting");
+    return false;
   }
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  fs->remove("/mqtt_prefs");
-  File file = fs->open("/mqtt_prefs", FILE_O_WRITE);
-#elif defined(RP2040_PLATFORM)
-  File file = fs->open("/mqtt_prefs", "w");
-#else
-  File file = fs->open("/mqtt_prefs", "w", true);
-#endif
-  if (file) {
-    // Versioned format: 8-byte header followed by the raw MQTTPrefs payload.
-    MQTTPrefsHeader hdr;
-    memcpy(hdr.magic, MQTT_PREFS_MAGIC, sizeof(hdr.magic));
-    hdr.version = MQTT_PREFS_VERSION;
-    hdr.payload_len = (uint16_t)sizeof(_mqtt_prefs);
-    file.write((uint8_t *)&hdr, sizeof(hdr));
-    file.write((uint8_t *)&_mqtt_prefs, sizeof(_mqtt_prefs));
-    file.close();
+
+  // Write header and payload sequentially so the transaction needs no second
+  // full-size (2.8 KiB) staging buffer on constrained targets.
+  const MQTTPrefsHeader header = MQTTPrefsCodec::makeHeader();
+  MQTTPrefsFileStore store(fs);
+  const MQTTPrefsAtomicStore::Result result = MQTTPrefsAtomicStore::write(
+      store, (const uint8_t *)&header, sizeof(header),
+      (const uint8_t *)&_mqtt_prefs, sizeof(_mqtt_prefs));
+  if (!MQTTPrefsAtomicStore::committed(result)) {
+    MESH_DEBUG_PRINTLN("MQTT: atomic /mqtt_prefs save failed at %s; source preserved",
+                       mqttPrefsSaveResultName(result));
+    return false;
   }
+  return true;
 }
 
 #endif
