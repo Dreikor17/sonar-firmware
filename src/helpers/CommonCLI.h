@@ -29,7 +29,8 @@ struct NodePrefs { // persisted to file
   int8_t tx_power_dbm;
   uint8_t disable_fwd;
   uint8_t advert_interval;       // minutes / 2
-  uint8_t rx_boosted_gain;       // power settings (file offset 79)
+  uint8_t rx_boosted_gain;       // power settings (persisted at /com_prefs offset 290;
+                                 // offset 79 is a pad — see writeCommonPrefsImage)
   uint8_t flood_advert_interval; // hours
   float rx_delay_base;
   float tx_delay_factor;
@@ -190,8 +191,8 @@ public:
     return false; // WITH_MQTT_BRIDGE builds override
   };
 
-  virtual void setRxBoostedGain(bool enable) {
-    // no op by default
+  virtual bool setRxBoostedGain(bool enable) {
+    return false; // CommonCLI reports unsupported if not overridden by wrapper
   };
 
   // Fault-alert channel hooks (see NodePrefs::alert_*). The default no-op

@@ -39,14 +39,15 @@ class MicroNMEALocationProvider : public LocationProvider {
     mesh::RTCClock* _clock;
     Stream* _gps_serial;
     RefCountedDigitalPin* _peripher_power;
+    int8_t _claims = 0;
     int _pin_reset;
     int _pin_en;
-    long next_check = 0;
+    unsigned long next_check = 0;
     long time_valid = 0;
 
 public :
     MicroNMEALocationProvider(Stream& ser, mesh::RTCClock* clock = NULL, int pin_reset = GPS_RESET, int pin_en = GPS_EN,RefCountedDigitalPin* peripher_power=NULL) :
-    _gps_serial(&ser), nmea(_nmeaBuffer, sizeof(_nmeaBuffer)), _pin_reset(pin_reset), _pin_en(pin_en), _clock(clock), _peripher_power(peripher_power) {
+    nmea(_nmeaBuffer, sizeof(_nmeaBuffer)), _clock(clock), _gps_serial(&ser), _peripher_power(peripher_power), _pin_reset(pin_reset), _pin_en(pin_en) {
         if (_pin_reset != -1) {
             pinMode(_pin_reset, OUTPUT);
             digitalWrite(_pin_reset, GPS_RESET_FORCE);
@@ -55,6 +56,17 @@ public :
             pinMode(_pin_en, OUTPUT);
             digitalWrite(_pin_en, LOW);
         }
+    }
+
+    void claim() {
+        _claims++;
+        if (_peripher_power) _peripher_power->claim();
+    }
+
+    void release() {
+        if (_claims == 0) return; // avoid negative _claims
+        _claims--;
+        if (_peripher_power) _peripher_power->release();
     }
 
     void begin() override {
@@ -127,7 +139,7 @@ public :
 
         if (!isValid()) time_valid = 0;
 
-        if (millis() > next_check) {
+        if ((long)(millis() - next_check) > 0) {
             next_check = millis() + 1000;
             if (_time_sync_needed && time_valid > 2) {
                 if (_clock != NULL) {

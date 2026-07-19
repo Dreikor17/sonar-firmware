@@ -9,12 +9,12 @@ protected:
   mesh::MainBoard* _board;
   uint32_t n_recv, n_sent, n_recv_errors;
   int16_t _noise_floor, _threshold;
+  bool _cad_enabled;
   uint16_t _num_floor_samples;
   int32_t _floor_sample_sum;
   unsigned long last_recv_millis;
   unsigned long last_radio_interrupt_millis;  // updated on any ISR event, even CRC errors
   uint8_t _preamble_sf;
-  bool _cad_enabled;
 
   void idle() override;
   void startRecv() override;
@@ -77,7 +77,7 @@ public:
 
   float packetScore(float snr, int packet_len) override { return packetScoreInt(snr, 10, packet_len); }  // assume sf=10
 
-  virtual void setRxBoostedGainMode(bool) { }
+  virtual bool setRxBoostedGainMode(bool) { return false; }
   virtual bool getRxBoostedGainMode() const { return false; }
 };
 

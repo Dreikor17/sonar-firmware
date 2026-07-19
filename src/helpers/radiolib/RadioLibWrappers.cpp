@@ -36,6 +36,7 @@ void RadioLibWrapper::begin() {
 
   _noise_floor = 0;
   _threshold = 0;
+  _cad_enabled = false;
 
   // start average out some samples
   _num_floor_samples = 0;
