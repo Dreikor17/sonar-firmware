@@ -26,7 +26,7 @@ index.
 | 1 | PR CI smoke builds + ArduinoJson pin enforcement | Done (build-size gate and ASan/UBSan still pending) |
 | 2 | PSRAM restart resource symmetry | Done |
 | 3 | MQTT preference migration fixtures | Done (filesystem adapter still lives in `CommonCLI`) |
-| 0 | Pre-change lifecycle characterization | Hardware run 2026-07-19 (see "Hardware Characterization Results"): teardown timing measured on V3+V4. **Finding: `MQTT_STOP_TIMEOUT_MS=8000` is too small — trips dirty/OTA-withheld on healthy multi-slot nodes; fix pending review** |
+| 0 | Pre-change lifecycle characterization | Hardware run 2026-07-19 (see "Hardware Characterization Results"): teardown timing measured on V3+V4. Finding: flat `MQTT_STOP_TIMEOUT_MS=8000` too small → **FIXED** with slot-scaled timeout (`5s + 8s×slots`), hardware-verified (2-slot stop now clean) |
 | 4 | Ownership and teardown test seams | Seams + ownership doc + teardown tests done; production rewiring deferred to Phase 5 |
 | 5 | Cooperative MQTT shutdown | Minimal cooperative `end()` + `begin()` guard + OTA barrier implemented on branch `phase5/cooperative-mqtt-shutdown` (native green, firmware smoke build green); NOT hardware-validated. Volatile-handshake replacement + snapshot-consumer repointing deferred |
 | — | OTA teardown barrier | Implemented — flash gated on a clean MQTT stop in `simple_repeater`; not hardware-validated |
@@ -89,18 +89,29 @@ permanently withheld** with the current timeout — the barrier misclassifies
 healthy stops as dirty. This inverts the barrier's intent and must be fixed
 before Phase 5 ships.
 
-**Recommendation (needs review — a Phase 5 code change, not applied here):**
+**FIX APPLIED (slot-count-aware timeout) — verified on hardware.**
 
-- Raise `MQTT_STOP_TIMEOUT_MS` so healthy multi-slot teardowns complete cleanly.
-  Either a single constant sized for the 5-slot PSRAM worst case (**≥ ~35 s**,
-  with headroom), or — preferred — **make it slot-count-aware**, e.g.
-  `base 4 s + 6 s × active_slots` (2→16 s, 3→22 s, 5→34 s).
-- A larger fixed timeout lengthens the loop-task stall on every stop
-  (`ota update`, reconfigure-restart, `set bridge.enabled off`); the slot-aware
-  form avoids penalizing 1-slot nodes.
-- Alternative/complementary (deeper Phase 5 work): shorten the per-slot
-  `esp_mqtt_client_destroy()` wait so total teardown drops under a smaller
-  timeout. Out of scope for this characterization; flagged for decision.
+The flat `MQTT_STOP_TIMEOUT_MS = 8000` is replaced by a slot-scaled budget
+computed per stop in `MQTTBridge::end()`:
+
+```
+timeout = MQTT_STOP_TIMEOUT_BASE_MS (5000) + MQTT_STOP_TIMEOUT_PER_SLOT_MS (8000) × enabled_slots
+```
+
+→ 1 slot 13 s, 2 slots 21 s, 3 slots 29 s, 5 slots 45 s — ~1.5–2× headroom over
+the measured ~5–6 s/slot teardown. `end()` counts enabled slots and calls
+`Coordinator::setStopTimeoutMs()` before `requestStop()`. Headroom is nearly free
+because `end()` returns as soon as the task acks (`_stop_acked` is checked before
+the timeout ticks), so a larger bound does not slow a healthy stop — it only
+lengthens the wait before force-killing a genuinely wedged task. (Files:
+`MQTTBridge.cpp` constants + `end()`; `MQTTLifecycle.h` `setStopTimeoutMs()`.)
+
+**Hardware verification (V3, this fix):** the same 2-slot config that force-timed-
+out at 8 s pre-fix now logs `MQTT stop: 2 enabled slot(s), timeout 21000 ms` and
+acks in ~11.7 s → **`MQTT Bridge stopped (clean)`** (OTA no longer withheld).
+Native suite + both firmware builds green. Complementary future option (not done):
+shorten the per-slot `esp_mqtt_client_destroy()` wait to reduce absolute teardown
+time.
 
 ### Phase 0 — cooperative lifecycle (V3, non-PSRAM, this branch)
 
@@ -555,16 +566,16 @@ publishing a plain-data status snapshot to repoint the §1/§2 consumers in
 that can still touch a torn-down bridge). Those are not required to fix the OTA
 panic and would enlarge the merge-sensitive diff.
 
-**Phase 0 dependency — CHARACTERIZED 2026-07-19, ACTION REQUIRED:**
-`MQTT_STOP_TIMEOUT_MS` = 8 s placeholder is **too small**. Measured per-wss-slot
-teardown is ~5–6 s sequential, so a healthy stop needs ~11–12 s at 2 slots
-(non-PSRAM max) and ~16 s at 3 slots / ~27–30 s at 5 slots (PSRAM). At 8 s these
-healthy stops trip the dirty/timeout fallback and the OTA barrier withholds
-flashing — i.e. multi-slot nodes could never `ota update`. Raise it (single
-constant ≥ ~35 s for the 5-slot worst case, or preferably slot-count-aware,
-e.g. `4 s + 6 s × active_slots`) before this ships. See "Hardware
-Characterization Results (Phase 0 & Phase 7)". It is a single named constant so
-the change is trivial.
+**Phase 0 dependency — CHARACTERIZED + FIXED 2026-07-19:** the flat
+`MQTT_STOP_TIMEOUT_MS` = 8 s placeholder was **too small** (measured per-wss-slot
+teardown ~5–6 s sequential → ~11–12 s at 2 slots, ~16 s at 3, ~27–30 s at 5; at
+8 s healthy multi-slot stops tripped the dirty fallback and the OTA barrier
+withheld flashing). Replaced with a **slot-scaled timeout** set per stop in
+`end()`: `5 s + 8 s × enabled_slots` (`MQTT_STOP_TIMEOUT_BASE_MS` /
+`MQTT_STOP_TIMEOUT_PER_SLOT_MS`, applied via `Coordinator::setStopTimeoutMs()`).
+Hardware-verified: a 2-slot stop that force-timed-out pre-fix now acks clean in
+~11.7 s within the 21 s budget. See "Hardware Characterization Results (Phase 0 &
+Phase 7)".
 
 The original plan of record follows. Replace direct task deletion with an
 explicit lifecycle such as:

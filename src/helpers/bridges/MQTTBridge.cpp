@@ -474,13 +474,30 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
 }
 
 // Bounded cooperative-stop timeout for end() (see MQTTLifecycle::Coordinator).
-// Phase 0 TODO: characterize on hardware — mbedTLS teardown over wss with a
-// DOWN broker — before this ships. The placeholder is chosen conservatively:
-// long enough for a real cooperative client teardown (per-slot disconnect + the
-// existing 50 ms settle delays across RUNTIME_MQTT_SLOTS), short enough to bound
-// the loop-task stall and the OTA/restart wait. A stop that exceeds this is
-// treated as dirty: the task is force-killed and OTA flashing is withheld.
-static const uint32_t MQTT_STOP_TIMEOUT_MS = 8000;
+// Phase 0 hardware characterization (2026-07-19, Heltec V3 non-PSRAM + V4 PSRAM,
+// see STABILITY_TESTABILITY_HANDOFF.md): a real mbedTLS/wss client teardown
+// (disconnect + esp_mqtt_client_destroy) takes ~5-6 s per CONNECTED slot, applied
+// SEQUENTIALLY in destroySlotClients(). So the safe timeout scales with the
+// number of slots being torn down, not a single constant: a flat 8 s tripped the
+// dirty/force-kill fallback on a healthy 2-slot non-PSRAM node (~11-12 s) and a
+// normal 3-slot PSRAM node (~16 s), which withholds OTA on healthy devices.
+//
+// The budget below gives generous headroom (~8 s/slot vs the ~5-6 s measured)
+// plus a fixed base for WiFi/queue/buffer teardown. Headroom is nearly free:
+// end() returns as soon as the task acks (it checks _stop_acked before ticking
+// the timeout), so a larger bound does NOT slow a healthy stop — it only length-
+// ens the wait before force-killing a genuinely wedged task. The timeout is set
+// per stop in end() via computeStopTimeoutMs() based on the enabled-slot count.
+static const uint32_t MQTT_STOP_TIMEOUT_BASE_MS     = 5000;   // fixed teardown overhead
+static const uint32_t MQTT_STOP_TIMEOUT_PER_SLOT_MS = 8000;   // ~5-6 s measured + headroom
+
+// Slot-scaled cooperative-stop timeout. `slots` is the number of MQTT slots that
+// will be torn down (enabled/connected); clamped to >=1 so a zero-slot bridge
+// still budgets for the base teardown.
+static inline uint32_t mqttStopTimeoutForSlots(int slots) {
+  if (slots < 1) slots = 1;
+  return MQTT_STOP_TIMEOUT_BASE_MS + MQTT_STOP_TIMEOUT_PER_SLOT_MS * (uint32_t)slots;
+}
 
 // ---------------------------------------------------------------------------
 // Constructor
@@ -525,7 +542,9 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #endif
       // Cooperative lifecycle: _lifecycle_ops must be constructed before
       // _lifecycle (declaration order guarantees this) so the reference binds.
-      , _lifecycle_ops(this), _lifecycle(_lifecycle_ops, MQTT_STOP_TIMEOUT_MS)
+      // Seed with the worst-case (max runtime slots) budget; end() recomputes the
+      // slot-scaled timeout before each stop via setStopTimeoutMs().
+      , _lifecycle_ops(this), _lifecycle(_lifecycle_ops, mqttStopTimeoutForSlots(RUNTIME_MQTT_SLOTS))
 {
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
@@ -897,6 +916,20 @@ void MQTTBridge::end() {
 
   // Stop new diagnostic reads through the singleton before teardown begins.
   s_mqtt_bridge_instance = nullptr;
+
+  // Size the stop timeout to the work about to happen: each enabled slot's
+  // mbedTLS/wss client takes ~5-6 s to disconnect + destroy, sequentially (Phase
+  // 0 hardware characterization). A flat bound force-killed healthy multi-slot
+  // nodes and withheld OTA; the slot-scaled budget lets a normal teardown ack
+  // cleanly. Count enabled slots (the ones that connect); a disabled slot's
+  // client destroys quickly. Must run BEFORE requestStop() arms the window.
+  int stop_slots = 0;
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].enabled) stop_slots++;
+  }
+  _lifecycle.setStopTimeoutMs(mqttStopTimeoutForSlots(stop_slots));
+  MQTT_DEBUG_PRINTLN("MQTT stop: %d enabled slot(s), timeout %lu ms",
+                     stop_slots, (unsigned long)_lifecycle.stopTimeoutMs());
 
   // Cooperative shutdown (Phase 5). Request the stop, then let the lifecycle
   // Coordinator drive it. On ESP32 the MQTT task (Core 0) tears down its own

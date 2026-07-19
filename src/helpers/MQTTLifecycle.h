@@ -245,9 +245,12 @@ struct Ops {
 // timeout. Idempotent start/stop; safe restart after a completed stop.
 class Coordinator {
  public:
-  // Phase 0 TODO: stop_timeout_ms must be characterized against real mbedTLS
-  // teardown timing over wss with a down broker before Phase 5 ships. It is an
-  // injected parameter precisely so it is not a guessed constant here.
+  // stop_timeout_ms is the bound on how long a requested stop may run before the
+  // reviewed force-kill fallback fires. It is injected (not a constant here) and
+  // may be updated per stop via setStopTimeoutMs(): Phase 0 hardware
+  // characterization (2026-07-19) showed real mbedTLS/wss teardown scales with
+  // the number of connected slots (~5-6 s each, sequential), so the owner sizes
+  // it to the current slot count before each stop. See MQTTBridge::end().
   Coordinator(Ops& ops, uint32_t stop_timeout_ms)
       : _ops(ops), _stop_timeout_ms(stop_timeout_ms) {}
 
@@ -271,6 +274,12 @@ class Coordinator {
   bool mayBeginFlash() const {
     return _state == State::Stopped && !_stop_timed_out;
   }
+
+  // Update the stop-timeout bound. Call before requestStop() to size the window
+  // to the current slot count (see MQTTBridge::end()); the value is read by
+  // tick() against _stop_request_ms, which requestStop() arms afterwards.
+  void setStopTimeoutMs(uint32_t ms) { _stop_timeout_ms = ms; }
+  uint32_t stopTimeoutMs() const { return _stop_timeout_ms; }
 
   bool requestStart() { return dispatch(Event::StartRequested); }
   bool requestStop() { return dispatch(Event::StopRequested); }
