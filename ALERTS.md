@@ -31,6 +31,16 @@ Alert floods ride the **repeater's default scope** by default (the same Transpor
 
 A "recovered" message is sent once when the underlying connection comes back. After firing, a fault is rate-limited by `alert.interval` (default 60 minutes) before it can re-fire - this prevents flapping links from spamming the channel.
 
+## OTA milestone alerts
+
+Key `ota update` milestones are also broadcast on the alert channel (in addition to the Serial log), so an operator who triggered the update via remote management still gets feedback: the real OTA work runs ~2.5 s after the command and reboots on success, both **outside** the command's reply window.
+
+- **Start** - `OTA update starting`, sent when the update is confirmed and scheduled (during the reply window, so it transmits before the flash blocks the loop).
+- **Fail/abort** - `OTA aborted: MQTT stop unclean, bridge resumed` (the teardown barrier withheld flashing) or `OTA aborted: <reason>` (preflight/download error). The bridge is resumed either way.
+- **Success** has no dedicated message: a successful flash reboots into the new image, so the node reappearing on the new version is the success signal.
+
+These share the alert channel, scope (`alert.region`), and the `alert` master switch with fault alerts - if `alert` is `off` or no channel is configured, OTA milestones are silent. Unlike fault alerts they are **not** rate-limited (OTA is operator-initiated and rare), and they are limited to these start/fail milestones - routine MQTT slot connect/disconnect never triggers an OTA alert.
+
 ## Defaults
 
 | Setting | Default | Notes |

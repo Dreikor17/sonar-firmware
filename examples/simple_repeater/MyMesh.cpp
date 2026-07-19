@@ -1575,11 +1575,18 @@ void MyMesh::loop() {
     // resume the bridge instead of flashing under uncertain ownership.
     if (bridge && !bridge->canFlashAfterStop()) {
       Serial.println("OTA: aborted, MQTT stop did not complete cleanly - resuming bridge");
+      otaAlert("OTA aborted: MQTT stop unclean, bridge resumed");
       setBridgeState(true);
     } else if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
       Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
+      char ota_alert_msg[160];
+      snprintf(ota_alert_msg, sizeof(ota_alert_msg), "OTA aborted: %s", ota_reply);
+      otaAlert(ota_alert_msg);
       setBridgeState(true);
     }
+    // Success path: otaFromManifest() flashes and reboots into the new image
+    // (never returns), so there is no in-boot "success" alert — the START alert
+    // plus the node returning on the new version is the success signal.
   }
 #endif
 

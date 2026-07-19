@@ -344,12 +344,32 @@ public:
 #endif
   }
 
+#if defined(WITH_MQTT_BRIDGE)
+  // Broadcast a key OTA milestone (start/fail only) on the configured alert
+  // channel, in addition to the Serial log — so an operator who triggered
+  // `ota update` via remote management still gets feedback that lands well after
+  // the command's reply window. Respects the `alert on/off` master switch and
+  // rides the configured alert scope (sendChannel -> resolveAlertScope); a no-op
+  // when alerts are off or no channel is set. Deliberately NOT wired to routine
+  // slot connect/disconnect — those remain in AlertReporter's fault logic.
+  void otaAlert(const char* msg) {
+    auto* obs = _cli.getObserverPrefs();
+    if (obs && obs->alert_enabled) _alerter.sendText(msg);
+  }
+#endif
+
   // Schedule the pull-OTA flash to run from loop() in ~2.5 s, leaving time for the
   // "Beginning update..." CLI reply (CLI_REPLY_DELAY_MILLIS = 600 ms) to transmit
   // before the flash blocks the loop and reboots.
   bool beginDeferredOtaUpdate() override {
     _ota_update_at = millis() + 2500;
     if (_ota_update_at == 0) _ota_update_at = 1;  // 0 means "none"
+#if defined(WITH_MQTT_BRIDGE)
+    // Broadcast START now, while the loop still runs (the 2.5 s reply window):
+    // the deferred flash blocks the loop and, on success, reboots — so a start
+    // alert queued at fire time could never transmit. See otaAlert().
+    otaAlert("OTA update starting");
+#endif
     return true;
   }
 
