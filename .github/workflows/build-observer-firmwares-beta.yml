@@ -3,14 +3,41 @@ name: Build MQTT Observer Firmwares (BETA channel)
 permissions:
   contents: write
 
-# Manual dispatch only, deliberately. The dev channel is normally built from
-# `observer-firmware-dev`, but unlike production this has no push trigger:
-# publishing firmware that real nodes will pull over the air should be an
-# explicit act, not a side effect of every commit to a development branch.
-# Dispatching also lets you build any branch from the Actions UI without this
-# file pinning one.
+# Push-triggered on the dev line, mirroring build-observer-firmwares.yml.
+#
+# This is NOT the original design — dispatch-only was, so that publishing to real
+# nodes stayed an explicit act. That does not work in this repo: this fork's
+# default branch is `dev` (an upstream mirror that carries none of the observer
+# workflows), and GitHub only surfaces `workflow_dispatch` for workflows present
+# on the DEFAULT branch. A dispatch-only workflow here would never appear in the
+# Actions UI. Adding fork-specific workflows to `dev` would pollute the upstream
+# mirror and conflict on every upstream sync, so the push trigger is the correct
+# mechanism — the same one production already relies on.
+#
+# workflow_dispatch is kept as well: harmless now, and it starts working if the
+# default branch ever changes.
+#
+# Consequence to be aware of: every push to `observer-firmware-dev` publishes a
+# dev-channel build. That is defensible for a channel users opt into, but if you
+# want staging commits without publishing, work on a side branch and fast-forward
+# `observer-firmware-dev` when you intend to release.
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - observer-firmware-dev
+    # Same rationale as production: docs/CI-only changes do not alter binaries.
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'scripts/gen_changelog.py'
+      - '.github/**'
+      - '.gitignore'
+      - '.gitattributes'
+      - '.editorconfig'
+      - 'LICENSE'
+      - '.vscode/**'
+      - '.claude/**'
 
 # Shared with build-observer-firmwares.yml and sync-flasher-content.yml so the
 # workflows never push to the flasher repo at the same time.
