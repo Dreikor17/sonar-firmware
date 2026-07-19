@@ -26,16 +26,153 @@ index.
 | 1 | PR CI smoke builds + ArduinoJson pin enforcement | Done (build-size gate and ASan/UBSan still pending) |
 | 2 | PSRAM restart resource symmetry | Done |
 | 3 | MQTT preference migration fixtures | Done (filesystem adapter still lives in `CommonCLI`) |
-| 0 | Pre-change lifecycle characterization | Deterministic behavior encoded in Phase 4/5; hardware items pending (stop-timeout value is a placeholder) |
+| 0 | Pre-change lifecycle characterization | Hardware run 2026-07-19 (see "Hardware Characterization Results"): teardown timing measured on V3+V4. **Finding: `MQTT_STOP_TIMEOUT_MS=8000` is too small — trips dirty/OTA-withheld on healthy multi-slot nodes; fix pending review** |
 | 4 | Ownership and teardown test seams | Seams + ownership doc + teardown tests done; production rewiring deferred to Phase 5 |
 | 5 | Cooperative MQTT shutdown | Minimal cooperative `end()` + `begin()` guard + OTA barrier implemented on branch `phase5/cooperative-mqtt-shutdown` (native green, firmware smoke build green); NOT hardware-validated. Volatile-handshake replacement + snapshot-consumer repointing deferred |
 | — | OTA teardown barrier | Implemented — flash gated on a clean MQTT stop in `simple_repeater`; not hardware-validated |
 | 6 | Request/queue/connection/publication integration tests | Not started |
-| 7 | Uptime, memory, and fault-injection gates | Not started |
+| 7 | Uptime, memory, and fault-injection gates | Representative HW matrix run 2026-07-19: V3 non-PSRAM + V4 PSRAM done (no leak/crash; forced-path OTA-withhold + ~15–27 s loop stall observed). Multi-day soak + stack-HWM build pending |
 
 Forward plan, in execution order: **Phase 0 → Phase 4 → Phase 5 (with the OTA
 teardown barrier) → Phase 6 → Phase 7.** Do not reopen a "Done" phase without a
 deliberate reason (see "Change-Control Discipline").
+
+## Hardware Characterization Results (Phase 0 & Phase 7) — 2026-07-19
+
+Hardware run of the outstanding Phase 0 (pre-change/cooperative teardown timing)
+and Phase 7 (uptime/memory/fault-injection) items against two live observer
+nodes. **Not yet committed as a plan change — this section records measured
+results and a release-gating recommendation for review.**
+
+### Setup
+
+- **V3** — Heltec WiFi LoRa 32 **V3**, non-PSRAM (max 2 active slots), env
+  `Heltec_v3_repeater_observer_mqtt`, 1 configured slot (`meshmapper`, wss).
+- **V4** — Heltec WiFi LoRa 32 **V4**, **2 MB PSRAM** (max 5 active slots), env
+  `heltec_v4_repeater_observer_mqtt`, 3 configured slots (`analyzer-us`,
+  `cascadiamesh`, `waev`, all wss). mbedTLS + JSON/raw buffers allocate in PSRAM.
+- Both flashed with this branch (`phase5/cooperative-mqtt-shutdown`) via
+  `pio run -t upload` (app-slot flash only; `nvs`+`spiffs` preserved, no erase).
+  Note: `FIRMWARE_VERSION`/`FIRMWARE_BUILD_DATE` are hardcoded in `MyMesh.h` and
+  were not bumped, so `ver` reads "v1.16.0 (6 Jun 2026)" on both old and new
+  builds — confirm the flash by behavior (the `(clean)` / cooperative-stop log
+  lines), not by `ver`.
+- Driven over the serial CLI (`set bridge.enabled off/on` = `end()`/`begin()`;
+  `set mqttN.*` = slot reconfigure; `get mqtt.stats` = `Free`/`Max`(largest
+  block)/queue/outbox/per-slot counters). Host-side timestamped log parsing.
+
+### PRIMARY FINDING — `MQTT_STOP_TIMEOUT_MS = 8000` is too small (release-gating)
+
+Per-wss-slot teardown costs **~5–6 s**, applied **sequentially**
+(`destroySlotClients()`: `disconnect()` → 50 ms → `esp_mqtt_client_destroy()`;
+the ~5 s is the esp-mqtt task/network close, not the 50 ms settle). This is
+unchanged from the pre-change path (same teardown code), so the cooperative
+`end()` ack time scales with the number of connected slots:
+
+| Config | Slots | Measured teardown | vs 8 s timeout | Result |
+|--------|-------|-------------------|----------------|--------|
+| V3 non-PSRAM | 1 wss | ack ~5.3–6.2 s (avg 5.8) | under | **clean** ✅ |
+| V3 non-PSRAM (design max) | 2 wss | ~11–12 s (cut off at 8 s) | **over** | **forced/dirty → OTA withheld** ❌ |
+| V4 PSRAM (normal config) | 3 wss | ~16 s (cut off at 8 s; per-slot disc @2.2/7.8/10.6 s) | **over** | **forced/dirty → OTA withheld** ❌ |
+| V4 PSRAM (design max) | 5 wss | ~27–30 s projected | **far over** | forced/dirty → OTA withheld ❌ |
+
+Pre-change (v1.16.0) reference teardown (same nodes, blocking `end()`): 1 slot
+~6.1 s (V3), 3 slots ~16.4 s (V4) — consistent with the above.
+
+**Consequence:** at the non-PSRAM board's *designed maximum* of 2 wss slots, and
+on a *normal healthy* 3-slot PSRAM node, an ordinary cooperative shutdown exceeds
+8 s → the coordinator fires `StopTimedOut` → sets the dirty latch → force-kills
+the MQTT task (the exact mbedTLS-mid-teardown path Phase 5 exists to avoid) and
+`canFlashAfterStop()` returns false. Because the OTA barrier only flashes after a
+**clean** stop, this means **any multi-slot device would have `ota update`
+permanently withheld** with the current timeout — the barrier misclassifies
+healthy stops as dirty. This inverts the barrier's intent and must be fixed
+before Phase 5 ships.
+
+**Recommendation (needs review — a Phase 5 code change, not applied here):**
+
+- Raise `MQTT_STOP_TIMEOUT_MS` so healthy multi-slot teardowns complete cleanly.
+  Either a single constant sized for the 5-slot PSRAM worst case (**≥ ~35 s**,
+  with headroom), or — preferred — **make it slot-count-aware**, e.g.
+  `base 4 s + 6 s × active_slots` (2→16 s, 3→22 s, 5→34 s).
+- A larger fixed timeout lengthens the loop-task stall on every stop
+  (`ota update`, reconfigure-restart, `set bridge.enabled off`); the slot-aware
+  form avoids penalizing 1-slot nodes.
+- Alternative/complementary (deeper Phase 5 work): shorten the per-slot
+  `esp_mqtt_client_destroy()` wait so total teardown drops under a smaller
+  timeout. Out of scope for this characterization; flagged for decision.
+
+### Phase 0 — cooperative lifecycle (V3, non-PSRAM, this branch)
+
+- 6× and 10× `begin→connect→end→restart` cycles: **all clean**, ack 5.3–6.2 s,
+  end() loop-task block ≤6.9 s, restart→connect ~5.4 s.
+- **No leak across full stop/start cycles:** free heap flat (~137–142 k, varies
+  only with the meshmapper outbox), largest free block stable (~115–129 k). This
+  satisfies Phase 5's "no downward heap/largest-block trend across start/stop
+  cycles" acceptance criterion on the non-PSRAM path.
+
+### OTA teardown barrier
+
+- Barrier **input** validated on hardware in both states: clean stops →
+  `canFlashAfterStop()` true; forced/timeout stops log `OTA blocked` /
+  `OTA flashing withheld` (= `canFlashAfterStop()` false). Confirmed
+  `mayBeginFlash() == (Stopped && !_stop_timed_out)`; a fresh start clears the
+  latch; a dirty stop still permits restart.
+- Barrier **action** (`simple_repeater` aborts+resumes vs. proceeds) is a
+  one-line gate on that latch (`MyMesh.cpp` deferred-OTA site) — validated by
+  code + the Phase 4 host lifecycle tests.
+- **Not exercised end-to-end on hardware:** the live `ota update` deferred-flash
+  path. A plain `pio run` build reports `ERR: OTA not configured (build via
+  build.sh)`, so `otaFromManifest` bails before scheduling; driving it needs a
+  `build.sh` firmware + a controlled manifest, and was not improvised on working
+  fleet nodes (risk of flashing a real fleet build). Recommend a dedicated
+  bench run for this.
+
+### Phase 7 — fault-injection matrix (V3 non-PSRAM; representative, not the soak)
+
+Matrix: 10 clean stop/start + 5 forced 2-slot teardowns + 8 slot-reconfigure +
+4 down-broker (`wss://192.0.2.1`) flaps. Time series of free/largest-block/
+queue/outbox recorded per step; reboot/crash detection on.
+
+- **No crash across the entire matrix** (incl. 5 repeated force-kill fallbacks) —
+  the reviewed dirty-stop fallback is robust on non-PSRAM.
+- **Forced teardown reproducible:** every 2-slot stop timed out (acks 7.4–8.2 s),
+  reinforcing the primary finding.
+- **Bounded fragmentation, fully recoverable:** slot-level reconfigure/flap
+  churn (which keeps a disabled slot's persistent client until a *full* bridge
+  restart) dropped the largest free block from ~125 k to ~72 k and held ~17 k of
+  free heap, but it **plateaued** (stable across 12 churn iterations, not an
+  unbounded leak) and a reboot fully restored ~141 k free / ~125 k largest block.
+  This is pre-existing bridge behavior (TLS-context lifecycle), not a Phase 5
+  regression.
+
+### Phase 7 — forced-teardown stress (V4 PSRAM, 3 wss slots, this branch)
+
+8× `end()`/`begin()` cycles at the node's normal 3-slot config (every stop
+exceeds 8 s → forced/dirty):
+
+- **All 8 forced, no leak, no crash.** Largest free block **rock-stable at
+  139 252 across all 8 cycles** (mbedTLS is PSRAM-allocated, so internal-heap
+  fragmentation is absent on the PSRAM path); free internal heap flat. The
+  force-kill fallback is robust on PSRAM too.
+- **Loop-task stall is severe on the forced path:** `end()` blocked the loop
+  task **~15–27 s** per stop, because the forced path waits the full 8 s timeout
+  and *then* runs a complete redundant teardown on Core 1 (≈ 8 s + ~16 s). During
+  that window the repeater's mesh/CLI/radio servicing is stalled. Sizing the
+  timeout so the cooperative (Core-0) teardown completes cleanly removes both the
+  OTA-withhold and this double-teardown stall.
+- Both nodes left restored to their original config, bridge on, heap healthy.
+
+### Limitations / not covered
+
+- Task stack high-water mark and explicit task/client counts are not exposed by
+  the CLI; a dedicated `MQTT_MEMORY_DEBUG` build is needed for those (heap
+  stability was used as a proxy leak signal, and it held).
+- The 72 h / 7-day soaks were not run (bounded representative cycles per agreed
+  scope); WiFi loss/recovery, TLS-handshake failure, queue saturation, JWT/NTP
+  failure, and `millis()`-rollover scenarios need external network control /
+  time injection and were not driven over serial.
+- Both devices left restored to their original slot config with the bridge on.
 
 ## Current Baseline
 
@@ -418,10 +555,16 @@ publishing a plain-data status snapshot to repoint the §1/§2 consumers in
 that can still touch a torn-down bridge). Those are not required to fix the OTA
 panic and would enlarge the merge-sensitive diff.
 
-**Phase 0 dependency still open:** `MQTT_STOP_TIMEOUT_MS` is a conservative 8 s
-placeholder. It must be characterized against real mbedTLS teardown over `wss`
-with a down broker (Phase 0) before this ships; it is a single named constant so
-that change is trivial.
+**Phase 0 dependency — CHARACTERIZED 2026-07-19, ACTION REQUIRED:**
+`MQTT_STOP_TIMEOUT_MS` = 8 s placeholder is **too small**. Measured per-wss-slot
+teardown is ~5–6 s sequential, so a healthy stop needs ~11–12 s at 2 slots
+(non-PSRAM max) and ~16 s at 3 slots / ~27–30 s at 5 slots (PSRAM). At 8 s these
+healthy stops trip the dirty/timeout fallback and the OTA barrier withholds
+flashing — i.e. multi-slot nodes could never `ota update`. Raise it (single
+constant ≥ ~35 s for the 5-slot worst case, or preferably slot-count-aware,
+e.g. `4 s + 6 s × active_slots`) before this ships. See "Hardware
+Characterization Results (Phase 0 & Phase 7)". It is a single named constant so
+the change is trivial.
 
 The original plan of record follows. Replace direct task deletion with an
 explicit lifecycle such as:
