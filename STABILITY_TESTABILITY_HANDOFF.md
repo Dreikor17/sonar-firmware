@@ -106,12 +106,12 @@ the timeout ticks), so a larger bound does not slow a healthy stop — it only
 lengthens the wait before force-killing a genuinely wedged task. (Files:
 `MQTTBridge.cpp` constants + `end()`; `MQTTLifecycle.h` `setStopTimeoutMs()`.)
 
-**Hardware verification (V3, this fix):** the same 2-slot config that force-timed-
-out at 8 s pre-fix now logs `MQTT stop: 2 enabled slot(s), timeout 21000 ms` and
-acks in ~11.7 s → **`MQTT Bridge stopped (clean)`** (OTA no longer withheld).
-Native suite + both firmware builds green. Complementary future option (not done):
-shorten the per-slot `esp_mqtt_client_destroy()` wait to reduce absolute teardown
-time.
+**Hardware verification (both memory paths):** the same configs that force-timed-
+out at 8 s pre-fix now ack cleanly — V3 non-PSRAM 2-slot logs `timeout 21000 ms`
+and acks in ~11.7 s; V4 PSRAM 3-slot logs `timeout 29000 ms` and acks in ~16.4 s
+→ **`MQTT Bridge stopped (clean)`** (OTA no longer withheld). Native suite + both
+firmware builds green. Complementary future option (not done): shorten the
+per-slot `esp_mqtt_client_destroy()` wait to reduce absolute teardown time.
 
 ### Phase 0 — cooperative lifecycle (V3, non-PSRAM, this branch)
 
