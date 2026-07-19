@@ -490,8 +490,16 @@ public:
     _finished = false;
     _open = false;
     _bytes_written = 0;
-    _fs->remove("/mqtt_prefs.tmp");  // clear only a stale, unpublished transaction
-    if (_fs->exists("/mqtt_prefs.tmp")) return false;
+    // Clear only a stale, unpublished transaction. Guarded on exists(): on the
+    // normal path commit() renames the tmp away, so there is nothing to remove
+    // and an unconditional remove() makes the ESP32 VFS layer log
+    // "[E] vfs_api.cpp remove(): /mqtt_prefs.tmp does not exists" on EVERY save.
+    // Functionally harmless, but it looks like a fault to operators reading the
+    // serial log during a config change.
+    if (_fs->exists("/mqtt_prefs.tmp")) {
+      _fs->remove("/mqtt_prefs.tmp");
+      if (_fs->exists("/mqtt_prefs.tmp")) return false;  // could not clear it
+    }
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
     _file = _fs->open("/mqtt_prefs.tmp", FILE_O_WRITE);
 #elif defined(RP2040_PLATFORM)
@@ -535,7 +543,7 @@ public:
     if (_open) _file.close();
     _open = false;
     _finished = false;
-    _fs->remove("/mqtt_prefs.tmp");
+    if (_fs->exists("/mqtt_prefs.tmp")) _fs->remove("/mqtt_prefs.tmp");
   }
 
 private:
@@ -562,8 +570,13 @@ public:
     // The old-name migration only starts when /com_prefs is absent. Refuse to
     // overwrite a destination that appeared unexpectedly before this handoff.
     if (_fs->exists("/com_prefs")) return false;
-    _fs->remove("/com_prefs.tmp");  // clear only stale, unpublished output
-    if (_fs->exists("/com_prefs.tmp")) return false;
+    // Clear only stale, unpublished output. Guarded on exists() for the same
+    // reason as the /mqtt_prefs store above: remove() on a missing file logs a
+    // spurious VFS error on ESP32.
+    if (_fs->exists("/com_prefs.tmp")) {
+      _fs->remove("/com_prefs.tmp");
+      if (_fs->exists("/com_prefs.tmp")) return false;  // could not clear it
+    }
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
     _file = _fs->open("/com_prefs.tmp", FILE_O_WRITE);
 #elif defined(RP2040_PLATFORM)
@@ -607,7 +620,7 @@ public:
     if (_open) _file.close();
     _open = false;
     _finished = false;
-    _fs->remove("/com_prefs.tmp");
+    if (_fs->exists("/com_prefs.tmp")) _fs->remove("/com_prefs.tmp");
   }
 
 private:
