@@ -313,11 +313,17 @@ canvas{width:100%;height:56px;display:block}
         <span class="tgl"><input type="checkbox" data-k="mqtt.raw"><u></u></span></div>
       <div class="sw"><span><b>Received packets</b><i>Report packets heard over the air</i></span>
         <span class="tgl"><input type="checkbox" data-k="mqtt.rx"><u></u></span></div>
+      <div class="sw"><span><b>Publish neighbors</b><i>Periodic neighbor table + scopes (PSRAM boards only)</i></span>
+        <span class="tgl"><input type="checkbox" data-k="mqtt.neighbors"><u></u></span></div>
       <div class="row" style="margin-top:6px">
         <div class="f"><label>Transmitted packets</label>
           <select data-k="mqtt.tx"><option value="off">Off</option><option value="on">All TX</option><option value="advert">Own adverts only</option></select>
           <div class="hint">Report packets this node sends.</div></div>
         <div class="f"><label>Status interval (min)</label><input type="number" data-k="mqtt.interval" min="1" max="60"></div>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <div class="f"><label>Neighbors interval (hours)</label><input type="number" data-k="mqtt.neighbors.interval" min="12" max="336">
+          <div class="hint">How often to publish the neighbor table (12-336, default 24).</div></div>
       </div>
     </div>
     <div class="card">
@@ -520,7 +526,9 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
     case"mqtt.origin":return q.origin;case"mqtt.iata":return q.iata;
     case"mqtt.status":return q.status?"on":"off";case"mqtt.packets":return q.packets?"on":"off";
     case"mqtt.raw":return q.raw?"on":"off";case"mqtt.tx":return q.tx;case"mqtt.rx":return q.rx?"on":"off";
-    case"mqtt.interval":return String(q.interval);case"mqtt.ntp":return q.ntp;
+    case"mqtt.interval":return String(q.interval);
+    case"mqtt.neighbors":return q.neighbors?"on":"off";case"mqtt.neighbors.interval":return String(q.neighbors_interval);
+    case"mqtt.ntp":return q.ntp;
     case"mqtt.owner":return q.owner;case"mqtt.email":return q.email;
     case"timezone":return q.timezone;case"timezone.offset":return String(q.timezone_offset);
     case"snmp":return q.snmp?"on":"off";case"snmp.community":return q.snmp_community;

@@ -591,6 +591,8 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
                  : _obs->mqtt_tx_enabled == 1 ? "on" : "off";
     mqtt["rx"] = (bool)_obs->mqtt_rx_enabled;
     mqtt["interval"] = _obs->mqtt_status_interval / 60000;  // CLI takes minutes
+    mqtt["neighbors"] = (bool)_obs->mqtt_neighbors_enabled;
+    mqtt["neighbors_interval"] = _obs->mqtt_neighbors_interval / 3600000UL;  // CLI takes hours
     mqtt["timezone"] = (const char*)_obs->timezone_string;
     mqtt["timezone_offset"] = _obs->timezone_offset;
     mqtt["ntp"] = (const char*)_obs->mqtt_ntp_server;
