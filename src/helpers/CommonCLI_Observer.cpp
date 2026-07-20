@@ -405,6 +405,34 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
           } else {
             sprintf(reply, "OK - slot %d preset: %s", slot + 1, preset_name);
           }
+          // Warn when this slot won't actually connect on this hardware. The set
+          // is never blocked — prefs persist so the config carries over if the
+          // device is moved to a board with more slots — but flag it, or the
+          // operator waits for a connection that never comes. Mirrors the bridge
+          // setup loop: slots past the runtime array (RUNTIME_MQTT_SLOTS) are
+          // never iterated; within it, only the first getMaxActiveSlots()
+          // *enabled* slots connect (each WSS/TLS link costs ~40 KB heap).
+          if (strcmp(preset_name, MQTT_PRESET_NONE) != 0) {
+            size_t used = strlen(reply);
+            if (slot >= RUNTIME_MQTT_SLOTS) {
+              if (used < 158) {
+                snprintf(reply + used, 160 - used, " (slot inactive on this hardware)");
+              }
+            } else {
+              const int max_active = MQTTBridge::getMaxActiveSlots();
+              int rank = 0;  // this slot's position among enabled slots, by index
+              for (int s = 0; s <= slot; s++) {
+                if (_mqtt_prefs.mqtt_slot_preset[s][0] != '\0' &&
+                    strcmp(_mqtt_prefs.mqtt_slot_preset[s], MQTT_PRESET_NONE) != 0) {
+                  rank++;
+                }
+              }
+              if (rank > max_active && used < 158) {
+                snprintf(reply + used, 160 - used,
+                         " (won't connect: %d-slot limit on this hardware)", max_active);
+              }
+            }
+          }
         }
       } else {
         strcpy(reply, "Error: unknown preset. Use 'get mqtt.presets'");

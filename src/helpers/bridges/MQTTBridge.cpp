@@ -337,6 +337,18 @@ void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
 uint8_t MQTTBridge::getLastWifiDisconnectReason() { return s_wifi_disconnect_reason; }
 unsigned long MQTTBridge::getLastWifiDisconnectTime() { return s_wifi_disconnect_time; }
 
+// Each WSS/TLS connection needs ~40KB for mbedTLS buffers. Without PSRAM even 3
+// concurrent connections would exhaust internal heap, so cap at 2; with PSRAM
+// cap at 5 (6 configurable but 5 active max). Static so the CLI can report, at
+// config time, that a slot beyond this cap won't connect.
+int MQTTBridge::getMaxActiveSlots() {
+#if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
+  return psramFound() ? 5 : 2;
+#else
+  return 2;
+#endif
+}
+
 unsigned long MQTTBridge::getSlotCurrentOutageStartMs(int slot_index) const {
   if (slot_index < 0 || slot_index >= RUNTIME_MQTT_SLOTS) return 0;
   return _slots[slot_index].current_outage_started_ms;
@@ -627,15 +639,9 @@ void MQTTBridge::begin() {
   MQTT_DEBUG_PRINTLN("PSRAM: not configured for this board (no BOARD_HAS_PSRAM)");
   #endif
 
-  // Limit active slots based on available memory.
-  // Each WSS/TLS connection needs ~40KB for mbedTLS buffers.
-  // Without PSRAM, even 3 concurrent connections would exhaust internal heap.
-  // With PSRAM, cap at 5 for safety (6 configurable but 5 active max).
-  #if defined(ESP_PLATFORM) && defined(BOARD_HAS_PSRAM)
-  _max_active_slots = psramFound() ? 5 : 2;
-  #else
-  _max_active_slots = 2;
-  #endif
+  // Limit active slots based on available memory (single source of truth in
+  // getMaxActiveSlots(), which the CLI also uses to warn about inactive slots).
+  _max_active_slots = getMaxActiveSlots();
   MQTT_DEBUG_PRINTLN("Max active slots: %d", _max_active_slots);
 
   // Check if WiFi credentials are configured first

@@ -498,6 +498,10 @@ public:
   static void formatSlotDiagReply(char* buf, size_t bufsize, int slot_index);
   static uint8_t getLastWifiDisconnectReason();
   static unsigned long getLastWifiDisconnectTime();
+  /** Max slots that can be connected at once on this hardware (each WSS/TLS link
+   *  needs ~40 KB internal heap): 5 with PSRAM, 2 without. Note this is below
+   *  RUNTIME_MQTT_SLOTS, so more slots can be configured than will connect. */
+  static int getMaxActiveSlots();
 
   #if defined(WITH_MQTT_NEIGHBORS)
   void requestPublishNeighbors(const char* json, size_t len);
