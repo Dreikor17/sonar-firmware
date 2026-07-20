@@ -263,6 +263,30 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     } else {
       strcpy(reply, "Error: interval must be between 1-60 minutes");
     }
+#if defined(WITH_MQTT_NEIGHBORS)
+  } else if (memcmp(config, "mqtt.neighbors.interval ", 24) == 0) {
+    // Hours in, milliseconds stored. The 12-336h band keeps the interval under
+    // INT32_MAX so the mesh's wrap-safe signed-delta millis math stays valid.
+    uint32_t hours = _atoi(&config[24]);
+    if (hours >= MQTT_NEIGHBORS_MIN_INTERVAL_HOURS && hours <= MQTT_NEIGHBORS_MAX_INTERVAL_HOURS) {
+      _mqtt_prefs.mqtt_neighbors_interval = hours * 3600000UL;
+      savePrefs();
+      sprintf(reply, "OK - neighbors interval set to %u hours (%lu ms)", (unsigned)hours,
+              (unsigned long)_mqtt_prefs.mqtt_neighbors_interval);
+    } else {
+      strcpy(reply, "Error: neighbors interval must be between 12-336 hours");
+    }
+  } else if (memcmp(config, "mqtt.neighbors ", 15) == 0) {
+    // The mesh loop reads this live, so no bridge restart is needed; enabling it
+    // triggers a discovery on the next eligible loop pass.
+    _mqtt_prefs.mqtt_neighbors_enabled = memcmp(&config[15], "on", 2) == 0;
+    savePrefs();
+    strcpy(reply, "OK");
+#elif defined(WITH_MQTT_BRIDGE)
+  } else if (memcmp(config, "mqtt.neighbors.interval ", 24) == 0 ||
+             memcmp(config, "mqtt.neighbors ", 15) == 0) {
+    strcpy(reply, "Err - not supported (requires PSRAM)");
+#endif
   } else if (memcmp(config, "mqtt.ntp ", 9) == 0) {
     const char* host = &config[9];
     while (*host == ' ') host++;
@@ -738,6 +762,19 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "mqtt.interval", 13) == 0) {
     uint32_t minutes = (_mqtt_prefs.mqtt_status_interval + 29999) / 60000;
     sprintf(reply, "> %u minutes (%lu ms)", minutes, (unsigned long)_mqtt_prefs.mqtt_status_interval);
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Longer token first: a bare "mqtt.neighbors" (14) would otherwise swallow
+  // "mqtt.neighbors.interval" since the GET tokens carry no trailing space.
+  } else if (memcmp(config, "mqtt.neighbors.interval", 23) == 0) {
+    uint32_t hours = (_mqtt_prefs.mqtt_neighbors_interval + 3599999) / 3600000;
+    sprintf(reply, "> %u hours (%lu ms)", (unsigned)hours, (unsigned long)_mqtt_prefs.mqtt_neighbors_interval);
+  } else if (memcmp(config, "mqtt.neighbors", 14) == 0) {
+    sprintf(reply, "> %s", _mqtt_prefs.mqtt_neighbors_enabled ? "on" : "off");
+#elif defined(WITH_MQTT_BRIDGE)
+  } else if (memcmp(config, "mqtt.neighbors.interval", 23) == 0 ||
+             memcmp(config, "mqtt.neighbors", 14) == 0) {
+    strcpy(reply, "Err - not supported (requires PSRAM)");
+#endif
   } else if (memcmp(config, "mqtt.ntp.diag", 13) == 0 && (config[13] == '\0' || config[13] == ' ')) {
 #ifdef ESP_PLATFORM
     // Connectivity probe across all configured NTP servers; never updates the clock.
