@@ -302,6 +302,11 @@ const char* MQTTMessageBuilder::getRouteTypeString(int route_type) {
 }
 
 void MQTTMessageBuilder::bytesToHex(const uint8_t* data, size_t len, char* hex, size_t hex_size) {
+  if (hex == nullptr || hex_size == 0) return;
+  // Guarantee a valid (empty) string even if we bail out below, so a caller's
+  // uninitialized stack buffer is never serialized into the JSON raw/hash fields
+  // when the buffer is too small (A6).
+  hex[0] = '\0';
   if (hex_size < len * 2 + 1) return;
 
   // Nibble lookup instead of a per-byte snprintf("%02X"): same uppercase hex
@@ -315,6 +320,11 @@ void MQTTMessageBuilder::bytesToHex(const uint8_t* data, size_t len, char* hex, 
 }
 
 void MQTTMessageBuilder::packetToHex(mesh::Packet* packet, char* hex, size_t hex_size) {
+  if (hex == nullptr || hex_size == 0) return;
+  // Empty string on any early-out below (serialization returned nothing, or the
+  // hex buffer is too small) so an uninitialized raw_hex[] never reaches the
+  // published JSON (A6).
+  hex[0] = '\0';
   // Serialize full on-air/wire format using Packet::writeTo()
   // This includes header, transport codes (if present), path_len, path, and payload
   uint8_t raw_buf[512];
