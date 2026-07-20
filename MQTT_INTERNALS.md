@@ -81,7 +81,8 @@ default; a newer, longer one is truncated harmlessly.
 - **`/mqtt_prefs`** — if the file has the version header it is read directly. Otherwise
   it is a legacy headerless file and its layout is detected by size: pre-slot
   (`OldMQTTPrefs`), 3-slot (`ThreeSlotMQTTPrefs`), or the 6-slot layout shipped on
-  `mqtt-bridge-implementation-flex` (`Legacy6SlotMQTTPrefs`). Each is field-copied into
+  `observer-firmware` back when it was named `mqtt-bridge-implementation-flex`
+  (`Legacy6SlotMQTTPrefs`). Each is field-copied into
   the current compact `MQTTPrefs` and re-saved with the version header — which also
   drops the vestigial `_legacy_*` fields the flex layout carried mid-struct. This is a
   one-time rewrite; every deployed device performs it on its first boot of versioned
