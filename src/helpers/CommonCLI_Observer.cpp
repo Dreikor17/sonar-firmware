@@ -911,10 +911,13 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     uint8_t ps = _mqtt_prefs.wifi_power_save;
     const char* ps_name = (ps == 1) ? "none" : (ps == 2) ? "max" : "min";
     sprintf(reply, "> %s", ps_name);
+  } else if (memcmp(config, "timezone.offset", 15) == 0) {
+    // Must precede the "timezone" (8-byte) check below — that prefix-matches
+    // "timezone.offset" too, so the more-specific key has to come first or
+    // `get timezone.offset` returns the string and never the offset (A3).
+    sprintf(reply, "> %d", _mqtt_prefs.timezone_offset);
   } else if (memcmp(config, "timezone", 8) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.timezone_string);
-  } else if (memcmp(config, "timezone.offset", 15) == 0) {
-    sprintf(reply, "> %d", _mqtt_prefs.timezone_offset);
   } else if (memcmp(config, "mqtt.analyzer.us", 17) == 0) {
     sprintf(reply, "> %s", strcmp(_mqtt_prefs.mqtt_slot_preset[0], "analyzer-us") == 0 ? "on" : "off");
   } else if (memcmp(config, "mqtt.analyzer.eu", 17) == 0) {
