@@ -814,6 +814,11 @@ void CommonCLI::loadMQTTPrefs(
   if (_mqtt_prefs.mqtt_neighbors_interval < MQTT_NEIGHBORS_MIN_INTERVAL_MS ||
       _mqtt_prefs.mqtt_neighbors_interval > MQTT_NEIGHBORS_MAX_INTERVAL_MS) {
     _mqtt_prefs.mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;
+    // Persist the repair so a corrupt flash value is not re-clamped every boot.
+    // Skip when hold is set so we never overwrite a deliberately preserved file.
+    if (!_mqtt_prefs_hold) {
+      mqtt_rewrite_pending = true;
+    }
     MESH_DEBUG_PRINTLN("MQTT: invalid neighbors interval reset to %u hours",
                        (unsigned)MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS);
   }

@@ -1851,6 +1851,37 @@ static bool neighborPublishEntryComesBefore(
   return strcmp(lhs.pubkey_hex, rhs.pubkey_hex) < 0;
 }
 
+#if defined(ESP_PLATFORM)
+// ArduinoJson v7 JsonDocument has no real capacity cap (DynamicJsonDocument(N)
+// is a no-op shim). Keep the pool off internal DRAM and soft-cap peak growth to
+// the publish buffer size. used only rises on allocate — conservative for this
+// single-shot doc (overflow path removes+breaks, so no further growth after free).
+struct NeighborsDocAllocator : ArduinoJson::Allocator {
+  size_t used = 0;
+  static const size_t kBudget = MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE;
+
+  void* allocate(size_t size) override {
+    if (used >= kBudget || size > kBudget - used) return nullptr;
+    void* p = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p) used += size;
+    return p;
+  }
+
+  void deallocate(void* ptr) override {
+    heap_caps_free(ptr);
+  }
+
+  void* reallocate(void* ptr, size_t new_size) override {
+    size_t old_size = ptr ? heap_caps_get_allocated_size(ptr) : 0;
+    size_t next_used = (used >= old_size) ? (used - old_size) : 0;
+    if (next_used >= kBudget || new_size > kBudget - next_used) return nullptr;
+    void* p = heap_caps_realloc(ptr, new_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (p) used = next_used + new_size;
+    return p;
+  }
+};
+#endif
+
 // Build the neighbors-table JSON and hand it to the bridge, then reschedule.
 void MyMesh::finishNeighborDiscover() {
   getLocalScopes(self_scopes_buf, sizeof(self_scopes_buf));
@@ -1908,7 +1939,12 @@ void MyMesh::finishNeighborDiscover() {
     return;
   }
 
+#if defined(ESP_PLATFORM)
+  NeighborsDocAllocator doc_alloc;
+  JsonDocument doc(&doc_alloc);
+#else
   JsonDocument doc;
+#endif
   int json_len = MQTTMessageBuilder::buildNeighborsMessage(
     doc, origin, self_pubkey_hex, timestamp, self_scopes_buf,
     entries, neighbor_discover_count,
