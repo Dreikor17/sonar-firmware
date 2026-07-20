@@ -3609,8 +3609,6 @@ bool MQTTBridge::syncTimeWithNTP(bool force, bool primary_only) {
       last_timezone[sizeof(last_timezone) - 1] = '\0';
     }
 
-    (void)gmtime((time_t*)&epochTime);
-    (void)localtime((time_t*)&epochTime);
     return true;
   }
 
