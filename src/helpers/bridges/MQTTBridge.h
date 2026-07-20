@@ -10,6 +10,7 @@
 #include "helpers/JWTHelper.h"
 #include "helpers/MQTTPresets.h"
 #include "helpers/MQTTLifecycle.h"
+#include <atomic>
 
 #ifdef WITH_SNMP
 class MeshSNMPAgent;  // Forward declaration
@@ -35,6 +36,14 @@ class MeshSNMPAgent;  // Forward declaration
 #endif
 
 #ifdef WITH_MQTT_BRIDGE
+
+// Periodic neighbors publication is PSRAM-only: it needs a persistent ~10 KB JSON
+// buffer plus a second transient one while the mesh builds the table, and it keys
+// off the mesh neighbor cache (sized by MAX_NEIGHBOURS). Every neighbors-specific
+// member, method, and code block in this bridge is gated on WITH_MQTT_NEIGHBORS.
+#if defined(BOARD_HAS_PSRAM) && defined(MAX_NEIGHBOURS) && MAX_NEIGHBOURS > 0
+#define WITH_MQTT_NEIGHBORS 1
+#endif
 
 /**
  * @brief Bridge implementation using MQTT protocol for packet transport
@@ -276,6 +285,26 @@ private:
   char _status_json_buffer[STATUS_JSON_BUFFER_SIZE];
   #endif
 
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Persistent PSRAM copy of the neighbors-table JSON. The mesh (Core 1) builds
+  // the payload into its own transient buffer, hands it here via
+  // requestPublishNeighbors(), and the MQTT task (Core 0) publishes this copy.
+  // Allocated in allocateRuntimeBuffers()/freed in releaseRuntimeBuffers() like
+  // the other PSRAM buffers (nullptr if the allocation failed).
+  char* _neighbors_json_buffer;
+  size_t _neighbors_publish_len;
+  // Release/acquire handoff from the mesh loop (Core 1) to the MQTT task (Core 0).
+  // A second snapshot is dropped while the current one is still publishing.
+  std::atomic<bool> _neighbors_publish_pending;
+  // Written by the MQTT task (Core 0), read by the CLI (Core 1) for `get mqtt.status`.
+  enum NeighborsResult : uint8_t { NBR_RESULT_NONE, NBR_RESULT_OK, NBR_RESULT_FAIL };
+  std::atomic<uint8_t> _neighbors_last_result;
+  // Written by the mesh loop (Core 1), read by the CLI (Core 1). Cached schedule
+  // summary so the wrap-safe millis math stays on the mesh side that owns the timer.
+  std::atomic<uint8_t> _neighbors_phase;
+  std::atomic<uint32_t> _neighbors_secs_until_next;
+#endif
+
   // JSON document scratch space — inline StaticJsonDocument keeps the pool off the MQTT
   // task stack and eliminates two separate heap allocations (fragmentation reduction).
   StaticJsonDocument<PUBLISH_JSON_BUFFER_SIZE> _packet_json_doc;
@@ -328,7 +357,7 @@ private:
   mesh::MillisecondClock* _ms;    // For uptime
 
   // Topic building
-  enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW };
+  enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW, MSG_NEIGHBORS };
   bool buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size);
   bool substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size);
 
@@ -370,6 +399,11 @@ private:
                      const uint8_t* raw_data = nullptr, int raw_len = 0,
                      float snr = 0.0f, float rssi = 0.0f);
   bool publishRaw(mesh::Packet* packet);
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Publishes the pending _neighbors_json_buffer to every connected slot's
+  // neighbors topic. Runs on the MQTT task (Core 0) only.
+  bool publishNeighbors();
+#endif
   void queuePacket(mesh::Packet* packet, bool is_tx);
   void dequeuePacket();
   bool isAnySlotConnected();
@@ -459,6 +493,29 @@ public:
   void setBuildDate(const char* build_date);
   void storeRawRadioData(const uint8_t* raw_data, int len, float snr, float rssi);
   void setMessageTypes(bool status, bool packets, bool raw);
+
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Single source of truth for the neighbors JSON size, used by both the bridge's
+  // persistent buffer and the mesh's transient build buffer.
+  static const size_t NEIGHBORS_JSON_BUFFER_SIZE = 10240;
+
+  // Called by the mesh (Core 1) once a neighbor-discovery pass has built the
+  // table JSON. Copies it into the persistent PSRAM buffer and raises the
+  // publish-pending flag for the MQTT task; a request is dropped if one is
+  // already in flight or the buffer is unavailable.
+  void requestPublishNeighbors(const char* json, size_t len);
+
+  // Periodic-neighbors schedule, reported by the mesh loop for `get mqtt.status`.
+  // The mesh owns the timer; the bridge only caches the summary so the wrap-safe
+  // millis math stays on the side that already has those helpers.
+  enum NeighborsPhase : uint8_t {
+    NBR_SCHEDULED,  // waiting for the next publish; secs_until_next is valid
+    NBR_ACTIVE,     // zero-hop refresh or scope queries in flight
+    NBR_DUE,        // publish is due, waiting on the bridge/WiFi to come up
+  };
+  void setNeighborsSchedule(NeighborsPhase phase, uint32_t secs_until_next);
+#endif
+
   int getConnectedBrokers() const;
   int getQueueSize() const;
   bool isReady() const;
