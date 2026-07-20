@@ -208,24 +208,60 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Retry wrapper for GitHub API calls. This job runs AFTER ~15 minutes of
+          # building across 14 runners, and every call below is an API write; with
+          # `bash -e`, a single transient 5xx throws all of that away. Observed
+          # 2026-07-19: `gh release create` got HTTP 503 during a GitHub incident
+          # and killed a run whose builds had all passed.
+          # `until` in a condition does not trip `-e`, so this is safe here.
+          gh_retry() {
+            local n=0 max=5 delay=10
+            until "$@"; do
+              n=$((n + 1))
+              if [ "$n" -ge "$max" ]; then
+                echo "::error::gh failed after $max attempts: $*" >&2
+                return 1
+              fi
+              echo "gh call failed (attempt $n/$max), retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              delay=$((delay * 2))
+            done
+          }
+
+          # Deliberately NOT retried: a plain "release does not exist" is the
+          # expected answer on the first run, and retrying it would just burn the
+          # backoff. A 5xx here instead makes us fall through to create, which is
+          # then tolerated below if the release actually did already exist.
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --prerelease \
+            gh_retry gh release create "$RELEASE_TAG" --prerelease \
               --title "MQTT Observer Firmwares (BETA)" \
-              --notes "Rolling BETA build. Separate channel from observer-mqtt-latest; beta nodes only OTA within this channel."
+              --notes "Rolling BETA build. Separate channel from observer-mqtt-latest; beta nodes only OTA within this channel." \
+            || gh release view "$RELEASE_TAG" >/dev/null 2>&1 \
+            || { echo "::error::could not create or confirm $RELEASE_TAG" >&2; exit 1; }
           fi
 
-          gh release upload "$RELEASE_TAG" $(find out -maxdepth 1 -type f ! -name '*.partsig') --clobber
+          gh_retry gh release upload "$RELEASE_TAG" $(find out -maxdepth 1 -type f ! -name '*.partsig') --clobber
 
+          # Pruning is housekeeping and runs AFTER the upload has succeeded. If the
+          # API is flaky here, skip it rather than fail the job — old assets simply
+          # linger until the next run, which is strictly better than reporting
+          # failure for a build whose binaries are already published.
           KEEP_BUILDS=2
-          keep_hashes=$(gh release view "$RELEASE_TAG" --json assets \
-              -q '.assets[] | "\(.createdAt) \(.name)"' \
+          if ! asset_list=$(gh_retry gh release view "$RELEASE_TAG" --json assets \
+                              -q '.assets[] | "\(.createdAt) \(.name)"'); then
+            echo "::warning::could not list assets; skipping prune this run"
+            exit 0
+          fi
+          keep_hashes=$(printf '%s\n' "$asset_list" \
             | sort -r \
             | while read -r _ts name; do
                 printf '%s' "$name" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}'
               done \
             | awk '!seen[$0]++' | head -n "$KEEP_BUILDS")
           echo "Retaining build hashes:"; echo "$keep_hashes"
-          gh release view "$RELEASE_TAG" --json assets -q '.assets[].name' \
+          # Reuse asset_list rather than making a second API call (its lines are
+          # "<createdAt> <name>", so the name is field 2).
+          printf '%s\n' "$asset_list" | awk '{print $2}' \
             | while read -r asset; do
                 ah=$(printf '%s' "$asset" | grep -oiE '[0-9a-f]{7,40}(-merged)?\.bin$' | grep -oiE '^[0-9a-f]{7,40}' || true)
                 if [ -n "$ah" ] && grep -qxF "$ah" <<<"$keep_hashes"; then
