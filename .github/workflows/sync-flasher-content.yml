@@ -14,10 +14,6 @@ on:
   workflow_dispatch:
   push:
     branches:
-      # Both names during the flex -> observer-firmware rename: GitHub does not
-      # rewrite branch filters on rename, so the old name is kept until a
-      # publish is verified on the new one (then it gets dropped).
-      - mqtt-bridge-implementation-flex
       - observer-firmware
     paths:
       - '**.md'
