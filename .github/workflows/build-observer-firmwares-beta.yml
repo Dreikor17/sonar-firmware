@@ -69,6 +69,11 @@ env:
   # and ota_extractHash() takes the token after the last, so tags in between are
   # transparent.
   OTA_CHANNEL_TAG: beta-dev
+  # Marks the asset *filenames*, e.g. <env>-v1.16.0-dev-abc1234.bin, so a
+  # downloaded file identifies its channel at a glance. Lowercase letters only —
+  # the filename parsers (gen-slim ASSET_RE, the /releases Worker, flasher.js)
+  # accept exactly (?:-[a-z]+)? between version and hash.
+  FILENAME_CHANNEL_TAG: "-dev"
 
   # Beta's own build counter, so the two channels' build numbers never interleave.
   COUNTER_URL: https://observer.gessaman.com/observer-beta-build-counter.json

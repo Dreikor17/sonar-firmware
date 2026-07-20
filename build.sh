@@ -134,8 +134,12 @@ build_firmware() {
   fi
 
   # set firmware version string (used for the output filename)
-  # e.g: v1.0.0-abcdef
-  FIRMWARE_VERSION_STRING="${FIRMWARE_VERSION}-${COMMIT_HASH}"
+  # e.g: v1.0.0-abcdef — or v1.0.0-dev-abcdef when FILENAME_CHANNEL_TAG is set
+  # ("-dev" on the dev channel), so downloaded files identify their channel at
+  # a glance. Lowercase-letters-only tag: every filename parser (flasher
+  # gen-slim-manifests ASSET_RE, the /releases Worker, flasher.js stale-URL
+  # recovery) accepts exactly (?:-[a-z]+)? between version and hash.
+  FIRMWARE_VERSION_STRING="${FIRMWARE_VERSION}${FILENAME_CHANNEL_TAG:-}-${COMMIT_HASH}"
 
   # craft filename
   # e.g: RAK_4631_Repeater-v1.0.0-SHA
