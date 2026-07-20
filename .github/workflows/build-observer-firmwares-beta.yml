@@ -303,8 +303,12 @@ jobs:
             --config flasher/config-beta.json
 
           mkdir -p "flasher/$MANIFEST_DIR"
+          # Slim manifests come from the build output in out/ (the assets
+          # actually uploaded to the release), not from config-beta.json — see
+          # gen-slim-manifests.py's --bin-dir mode (flasher repo PR #1).
           python3 flasher/scripts/gen-slim-manifests.py \
-            --config flasher/config-beta.json \
+            --bin-dir out \
+            --static-path "$STATIC_PATH" \
             --out-dir "flasher/$MANIFEST_DIR" \
             --base-version "$FIRMWARE_VERSION" \
             --build "$BUILD_NUMBER" \
