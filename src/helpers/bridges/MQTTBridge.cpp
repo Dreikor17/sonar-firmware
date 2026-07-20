@@ -623,6 +623,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
     _slots[i].last_log_time = 0;
     _slots[i].port = 1883;
     _slot_reconfigure_pending[i] = false;
+    _status_publish_pending[i] = false;
   }
 
   // Reset CLI-requested forced NTP sync handshake (bridge object is reused across restarts)
@@ -1349,6 +1350,19 @@ void MQTTBridge::mqttTaskLoop() {
       }
     }
 
+    // Publish on-connect status for slots whose onConnect callback fired since
+    // the last loop. Raised on the esp-mqtt event task, consumed here on the
+    // bridge task so the shared status doc/buffer/origin are only ever touched
+    // from Core 0 (see the onConnect handler / A2). Clear before publishing so a
+    // reconnect during the publish re-arms for the next loop rather than being
+    // lost; publishStatusToSlot() re-checks slot.connected and no-ops if dropped.
+    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      if (_status_publish_pending[i]) {
+        _status_publish_pending[i] = false;
+        publishStatusToSlot(i);
+      }
+    }
+
     // Maintain slot connections (token renewal, reconnect with backoff)
     maintainSlotConnections();
 
@@ -1518,8 +1532,14 @@ void MQTTBridge::initSlotClients() {
       _slots[index].last_sock_errno = 0;
       _slots[index].last_error_time = 0;
       _slots[index].current_outage_started_ms = 0;  // clear current-outage timer for AlertReporter
-      updateCachedConnectionStatus();
-      publishStatusToSlot(index);
+      updateCachedConnectionStatus();  // bool store — safe from this (esp-mqtt) task
+      // This callback runs on the client's esp-mqtt event task, not the bridge
+      // task. Do NOT build/publish status here: publishStatusToSlot() writes the
+      // shared _status_json_doc/_status_json_buffer/_origin that the periodic
+      // publishStatus() uses on the bridge task, and two slots' callbacks could
+      // race each other over them. Marshal the publish onto the bridge task via a
+      // per-slot flag (see mqttTaskLoop consumer / A2).
+      _status_publish_pending[index] = true;
     });
     slot.client->onDisconnect([this, index](bool sessionPresent) {
       MQTT_DEBUG_PRINTLN("MQTT%d disconnected", index + 1);
@@ -2210,7 +2230,10 @@ void MQTTBridge::publishStatusToSlot(int index) {
   }
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
-  // _status_json_buffer and _last_raw_data are both Core 0-owned; no mutex needed.
+  // _status_json_doc/_status_json_buffer/_origin are shared with publishStatus();
+  // both callers run only on the bridge task (this function is reached solely via
+  // the _status_publish_pending consumer in mqttTaskLoop, never from the onConnect
+  // callback thread — see A2), so the accesses are serialized and need no mutex.
   #if defined(BOARD_HAS_PSRAM)
   char fallback_status_buffer[STATUS_JSON_BUFFER_SIZE];
   char* json_buffer = (_status_json_buffer != nullptr) ? _status_json_buffer : fallback_status_buffer;

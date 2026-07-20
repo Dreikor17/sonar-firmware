@@ -206,6 +206,14 @@ private:
   // Pending slot reconfigure: set from CLI (Core 1), processed by MQTT task (Core 0)
   volatile bool _slot_reconfigure_pending[RUNTIME_MQTT_SLOTS];
 
+  // Pending on-connect status publish: set from the onConnect callback (which
+  // runs on the esp-mqtt event task, NOT this bridge task), consumed by the MQTT
+  // task (Core 0). publishStatusToSlot() touches the shared status doc/buffer/
+  // origin that publishStatus() also uses, so it must run only on the bridge
+  // task — the callback just raises this flag. Same idiom as
+  // _slot_reconfigure_pending; a single-byte volatile store/load is atomic.
+  volatile bool _status_publish_pending[RUNTIME_MQTT_SLOTS];
+
   // CLI-requested forced NTP sync, marshalled onto the MQTT task (Core 0).
   // All NTP I/O (_ntp_client, configTime) must run on Core 0; the CLI thread
   // (Core 1) sets _ntp_force_requested and blocks in requestForcedNtpSync()
