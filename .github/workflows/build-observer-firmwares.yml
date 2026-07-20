@@ -7,7 +7,11 @@ on:
   workflow_dispatch:
   push:
     branches:
+      # Both names during the flex -> observer-firmware rename: GitHub does not
+      # rewrite branch filters on rename, so the old name is kept until a
+      # publish is verified on the new one (then it gets dropped).
       - mqtt-bridge-implementation-flex
+      - observer-firmware
     # Only rebuild firmware when something that affects the binaries changes.
     # Docs, the changelog, the changelog generator, CI files, and repo-meta
     # files do not change firmware output — docs/changelog are handled by
@@ -38,6 +42,10 @@ env:
   FIRMWARE_VERSION: v1.16.0
   # Rolling release tag that hosts the latest observer binaries.
   RELEASE_TAG: observer-mqtt-latest
+  # Download host serving RELEASE_TAG's assets (cloudflare-worker in the flasher
+  # repo). Baked into the slim OTA manifests' file URLs; must stay consistent
+  # with config.json's staticPath.
+  STATIC_PATH: https://observer-fw.gessaman.com
 
 jobs:
 
@@ -233,11 +241,13 @@ jobs:
           BUILD_NUMBER: ${{ needs.enumerate.outputs.build_number }}
         run: |
           # Derive the slim per-variant manifests (flasher/v/<env>.json) that the
-          # firmware fetches for `ota check`/`ota update`, from the just-updated
-          # config.json (single source of truth), stamping this build's number.
-          # Then persist the counter so the next run increments from here.
+          # firmware fetches for `ota check`/`ota update`, from the build output
+          # in out/ — the assets actually uploaded to the release — stamping this
+          # build's number. Then persist the counter so the next run increments
+          # from here.
           python3 flasher/scripts/gen-slim-manifests.py \
-            --config flasher/config.json \
+            --bin-dir out \
+            --static-path "$STATIC_PATH" \
             --out-dir flasher/v \
             --base-version "$FIRMWARE_VERSION" \
             --build "$BUILD_NUMBER" \
