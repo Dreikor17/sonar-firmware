@@ -2,6 +2,7 @@
 #include "../MQTTConnectionPolicy.h"
 #include "../MQTTMessageBuilder.h"
 #include "../MQTTPacketQueuePolicy.h"
+#include "../MQTTReplyFormat.h"
 #include "../MQTTRuntimeBufferLifecycle.h"
 #include "../MQTTTopicRouter.h"
 #include "../TxtDataHelpers.h"
@@ -241,8 +242,11 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
   q = b->_queue_count;
 #endif
 
-  int pos = snprintf(buf, bufsize, "> msgs: %s", msgs);
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS && pos < (int)bufsize - 1; i++) {
+  // replyAppendf clamps pos into the buffer on every call, so no per-append
+  // guard or trailing clamp is needed (see MQTTReplyFormat.h / A1).
+  int pos = 0;
+  replyAppendf(buf, bufsize, &pos, "> msgs: %s", msgs);
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     const MQTTSlot& slot = b->_slots[i];
     const char* name = nullptr;
     const char* state = nullptr;
@@ -265,17 +269,13 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
       name = slot.preset ? slot.preset->name : "custom";
       state = "disc";
     }
-    pos += snprintf(buf + pos, bufsize - pos, ", %d: %s (%s)", i + 1, name, state);
+    replyAppendf(buf, bufsize, &pos, ", %d: %s (%s)", i + 1, name, state);
   }
-  // snprintf returns the would-be length, so a full buffer can push pos past
-  // bufsize; clamp before the remaining appends so bufsize - pos can't underflow.
-  if (pos >= (int)bufsize) pos = (int)bufsize - 1;
-  pos += snprintf(buf + pos, bufsize - pos, ", q:%d", q);
-  if (pos >= (int)bufsize) pos = (int)bufsize - 1;
+  replyAppendf(buf, bufsize, &pos, ", q:%d", q);
 
 #if defined(WITH_MQTT_NEIGHBORS)
   // Periodic neighbors: time to next publish + how the last one went.
-  if (obs && obs->mqtt_neighbors_enabled && pos < (int)bufsize - 1) {
+  if (obs && obs->mqtt_neighbors_enabled) {
     char when[16];
     switch (b->_neighbors_phase.load(std::memory_order_relaxed)) {
       case NBR_ACTIVE: strcpy(when, "active"); break;
@@ -291,7 +291,7 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
       case NBR_RESULT_FAIL: last = "failed"; break;
       default:              last = "none"; break;
     }
-    snprintf(buf + pos, bufsize - pos, ", nbr: %s/%s", when, last);
+    replyAppendf(buf, bufsize, &pos, ", nbr: %s/%s", when, last);
   }
 #endif
 }
@@ -324,14 +324,15 @@ void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
     if (b->_slots[i].client) outbox_total += b->_slots[i].client->getOutboxSize();
   }
 
-  int pos = snprintf(buf, bufsize, "> Free=%d Max=%d q:%d/%d Outbox=%u |",
-                     (int)ESP.getFreeHeap(), (int)ESP.getMaxAllocHeap(),
-                     q, MAX_QUEUE_SIZE, (unsigned)outbox_total);
-  for (int i = 0; i < RUNTIME_MQTT_SLOTS && pos < (int)bufsize - 1; i++) {
+  int pos = 0;
+  replyAppendf(buf, bufsize, &pos, "> Free=%d Max=%d q:%d/%d Outbox=%u |",
+               (int)ESP.getFreeHeap(), (int)ESP.getMaxAllocHeap(),
+               q, MAX_QUEUE_SIZE, (unsigned)outbox_total);
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (!b->_slots[i].enabled || !b->_slots[i].client) continue;
-    pos += snprintf(buf + pos, bufsize - pos, " s%d=%lu/%lu", i + 1,
-                    b->_slots[i].client->getPublishOk(),
-                    b->_slots[i].client->getPublishErr());
+    replyAppendf(buf, bufsize, &pos, " s%d=%lu/%lu", i + 1,
+                 b->_slots[i].client->getPublishOk(),
+                 b->_slots[i].client->getPublishErr());
   }
 }
 
@@ -467,18 +468,21 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
     state = "disc";
   }
 
-  int pos = snprintf(buf, bufsize, "> mqtt%d: %s", slot_index + 1, state);
+  // replyAppendf clamps pos on every call, so the chained appends below can't
+  // walk past the reply buffer even if the accumulated text exceeds it (A1).
+  int pos = 0;
+  replyAppendf(buf, bufsize, &pos, "> mqtt%d: %s", slot_index + 1, state);
   if (slot.disconnect_count > 0) {
-    pos += snprintf(buf + pos, bufsize - pos, ", dc:%lu", (unsigned long)slot.disconnect_count);
+    replyAppendf(buf, bufsize, &pos, ", dc:%lu", (unsigned long)slot.disconnect_count);
     if (slot.first_disconnect_time > 0) {
       unsigned long first_disc_age_sec = (millis() - slot.first_disconnect_time) / 1000;
-      pos += snprintf(buf + pos, bufsize - pos, ", first_disc:%lus", first_disc_age_sec);
+      replyAppendf(buf, bufsize, &pos, ", first_disc:%lus", first_disc_age_sec);
     }
   }
 
   // If connected with no errors, we're done
   if (slot.connected && slot.last_error_time == 0) {
-    snprintf(buf + pos, bufsize - pos, ", no errors");
+    replyAppendf(buf, bufsize, &pos, ", no errors");
     return;
   }
 
@@ -488,30 +492,30 @@ void MQTTBridge::formatSlotDiagReply(char* buf, size_t bufsize, int slot_index) 
     if (slot.last_tls_err != 0) {
       const char* desc = tlsErrorStr(slot.last_tls_err);
       if (desc) {
-        pos += snprintf(buf + pos, bufsize - pos, ", %s (0x%04X)", desc, (unsigned)slot.last_tls_err);
+        replyAppendf(buf, bufsize, &pos, ", %s (0x%04X)", desc, (unsigned)slot.last_tls_err);
       } else {
-        pos += snprintf(buf + pos, bufsize - pos, ", tls:0x%04X", (unsigned)slot.last_tls_err);
+        replyAppendf(buf, bufsize, &pos, ", tls:0x%04X", (unsigned)slot.last_tls_err);
       }
     }
     // mbedTLS stack error (shown as negative hex per convention)
     if (slot.last_tls_stack_err != 0) {
-      pos += snprintf(buf + pos, bufsize - pos, ", mbedtls:-0x%04X", (unsigned)(-slot.last_tls_stack_err));
+      replyAppendf(buf, bufsize, &pos, ", mbedtls:-0x%04X", (unsigned)(-slot.last_tls_stack_err));
     }
     // Socket errno
     if (slot.last_sock_errno != 0) {
-      pos += snprintf(buf + pos, bufsize - pos, ", sock:%d", slot.last_sock_errno);
+      replyAppendf(buf, bufsize, &pos, ", sock:%d", slot.last_sock_errno);
     }
     // Time ago
     unsigned long ago_sec = (millis() - slot.last_error_time) / 1000;
     if (ago_sec < 60) {
-      snprintf(buf + pos, bufsize - pos, ", %lus ago", ago_sec);
+      replyAppendf(buf, bufsize, &pos, ", %lus ago", ago_sec);
     } else if (ago_sec < 3600) {
-      snprintf(buf + pos, bufsize - pos, ", %lum ago", ago_sec / 60);
+      replyAppendf(buf, bufsize, &pos, ", %lum ago", ago_sec / 60);
     } else {
-      snprintf(buf + pos, bufsize - pos, ", %luh ago", ago_sec / 3600);
+      replyAppendf(buf, bufsize, &pos, ", %luh ago", ago_sec / 3600);
     }
   } else if (!slot.connected) {
-    snprintf(buf + pos, bufsize - pos, ", no error info");
+    replyAppendf(buf, bufsize, &pos, ", no error info");
   }
 }
 
