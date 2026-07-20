@@ -195,6 +195,53 @@ TEST(MQTTConnectionPolicy, WifiReconnectDueSurvivesMillisRollover) {
   EXPECT_FALSE(Policy::wifiReconnectDue(down_since + 14999U, down_since, last_attempt, attempt));
 }
 
+// --- classifySlotActivation: the "will this slot connect on this hardware" rule
+// the CLI uses to warn at `set mqttN.preset` time. Non-PSRAM Heltec V3 is the
+// motivating case: RUNTIME_MQTT_SLOTS=3 but only 2 concurrent connections. ---
+
+using Policy::SlotActivation;
+
+TEST(SlotActivation, NonPsramV3FirstTwoConnectThirdIsOverCap) {
+  // slot_count = 3 (runtime array), max_active = 2 (concurrent cap).
+  const bool enabled[6] = {true, true, true, false, false, false};
+  EXPECT_EQ(SlotActivation::Connects,      Policy::classifySlotActivation(0, enabled, 3, 2));
+  EXPECT_EQ(SlotActivation::Connects,      Policy::classifySlotActivation(1, enabled, 3, 2));
+  // slot 3 (index 2) is the case in the field log: iterated, but skipped.
+  EXPECT_EQ(SlotActivation::OverActiveCap, Policy::classifySlotActivation(2, enabled, 3, 2));
+}
+
+TEST(SlotActivation, NonPsramSlotsBeyondRuntimeArrayAreNeverIterated) {
+  const bool enabled[6] = {true, true, true, true, false, false};
+  // mqtt4/5/6 (index 3-5) are outside the 3-slot runtime array on non-PSRAM.
+  EXPECT_EQ(SlotActivation::BeyondArray, Policy::classifySlotActivation(3, enabled, 3, 2));
+  EXPECT_EQ(SlotActivation::BeyondArray, Policy::classifySlotActivation(5, enabled, 3, 2));
+}
+
+TEST(SlotActivation, RankCountsOnlyEnabledLowerSlots) {
+  // Only slot index 2 enabled (1 and 2 disabled): it is the first enabled slot,
+  // so it connects even though its index equals the cap.
+  const bool enabled[6] = {false, false, true, false, false, false};
+  EXPECT_EQ(SlotActivation::Connects, Policy::classifySlotActivation(2, enabled, 3, 2));
+
+  // Gap in the middle: slots 0 and 2 enabled, slot 1 off. Slot 2 is rank 2 <= 2.
+  const bool enabled2[6] = {true, false, true, false, false, false};
+  EXPECT_EQ(SlotActivation::Connects, Policy::classifySlotActivation(2, enabled2, 3, 2));
+}
+
+TEST(SlotActivation, PsramFiveOfSixConnect) {
+  // PSRAM: slot_count = 6, max_active = 5. Sixth enabled slot is over the cap.
+  const bool enabled[6] = {true, true, true, true, true, true};
+  EXPECT_EQ(SlotActivation::Connects,      Policy::classifySlotActivation(4, enabled, 6, 5));
+  EXPECT_EQ(SlotActivation::OverActiveCap, Policy::classifySlotActivation(5, enabled, 6, 5));
+}
+
+TEST(SlotActivation, DisabledAndOutOfRangeSlots) {
+  const bool enabled[6] = {true, false, true, false, false, false};
+  EXPECT_EQ(SlotActivation::Disabled, Policy::classifySlotActivation(1, enabled, 3, 2));
+  EXPECT_EQ(SlotActivation::Disabled, Policy::classifySlotActivation(-1, enabled, 3, 2));
+  EXPECT_EQ(SlotActivation::Disabled, Policy::classifySlotActivation(0, nullptr, 3, 2));
+}
+
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();

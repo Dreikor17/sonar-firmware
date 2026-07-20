@@ -23,6 +23,7 @@
 #endif
 #ifdef WITH_MQTT_BRIDGE
 #include "bridges/MQTTBridge.h"
+#include "MQTTConnectionPolicy.h"  // classifySlotActivation() — "will this slot connect here?"
 #include "MQTTDefaults.h"
 #endif
 
@@ -432,14 +433,32 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
           } else {
             sprintf(reply, "OK - slot %d preset: %s", slot + 1, preset_name);
           }
-          // Slots beyond RUNTIME_MQTT_SLOTS are still stored (so they take effect
-          // if the prefs move to a PSRAM board) but won't connect on this
-          // hardware — say so, or the operator waits for a connection that never
-          // comes (A15).
-          if (slot >= RUNTIME_MQTT_SLOTS) {
+          // Warn when this slot won't actually connect on this hardware. The set
+          // is never blocked — prefs persist so the config carries over if the
+          // device is moved to a board with more slots — but flag it, or the
+          // operator waits for a connection that never comes (A15). Two failure
+          // modes, keyed off the same rule the bridge's setup loop uses
+          // (classifySlotActivation): slots past the runtime array are never
+          // tried; slots within it are skipped once more than getMaxActiveSlots()
+          // are enabled (each WSS/TLS link costs ~40 KB heap).
+          if (strcmp(preset_name, MQTT_PRESET_NONE) != 0) {
+            bool slot_enabled[MAX_MQTT_SLOTS];
+            for (int s = 0; s < MAX_MQTT_SLOTS; s++) {
+              slot_enabled[s] = _mqtt_prefs.mqtt_slot_preset[s][0] != '\0' &&
+                                strcmp(_mqtt_prefs.mqtt_slot_preset[s], MQTT_PRESET_NONE) != 0;
+            }
+            const int max_active = MQTTBridge::getMaxActiveSlots();
+            const MQTTConnectionPolicy::SlotActivation act =
+                MQTTConnectionPolicy::classifySlotActivation(slot, slot_enabled,
+                                                             RUNTIME_MQTT_SLOTS, max_active);
             size_t used = strlen(reply);
             if (used < 158) {
-              snprintf(reply + used, 160 - used, " (slot inactive on this hardware)");
+              if (act == MQTTConnectionPolicy::SlotActivation::BeyondArray) {
+                snprintf(reply + used, 160 - used, " (slot inactive on this hardware)");
+              } else if (act == MQTTConnectionPolicy::SlotActivation::OverActiveCap) {
+                snprintf(reply + used, 160 - used,
+                         " (won't connect: %d-slot limit on this hardware)", max_active);
+              }
             }
           }
         }

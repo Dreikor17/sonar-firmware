@@ -161,4 +161,35 @@ static inline bool jwtClockAvailable(bool ntp_synced, uint32_t current_time) {
   return ntp_synced || current_time >= kJwtClockThreshold;
 }
 
+// How a given MQTT slot fares at bridge setup on this hardware. MQTTBridge's
+// setup loop iterates runtime slots in index order and connects the first
+// `max_active` *enabled* slots, skipping the rest (each WSS/TLS link needs
+// ~40 KB internal heap, so non-PSRAM caps at 2 concurrent, PSRAM at 5). Slots at
+// or beyond the runtime array size (`slot_count`, e.g. 3 on non-PSRAM) are never
+// iterated at all. Extracted so the CLI can tell the operator, at
+// `set mqttN.preset` time, whether a slot will actually come up — and so the
+// exact rule is host-tested rather than hand-reasoned (it is easy to conflate
+// slot_count with max_active).
+enum class SlotActivation : uint8_t {
+  Connects,       // enabled and within the concurrent-connection budget
+  Disabled,       // slot has no preset ("none") — not attempted
+  BeyondArray,    // index >= slot_count: outside the runtime slot array here
+  OverActiveCap,  // enabled, but lower-numbered slots already fill the budget
+};
+
+// `enabled` must have at least `slot_count` entries; `slot` is 0-based. Mirrors
+// the bridge's first-come-by-index activation order exactly.
+static inline SlotActivation classifySlotActivation(int slot, const bool* enabled,
+                                                    int slot_count, int max_active) {
+  if (slot < 0) return SlotActivation::Disabled;
+  if (slot >= slot_count) return SlotActivation::BeyondArray;
+  if (enabled == nullptr || !enabled[slot]) return SlotActivation::Disabled;
+  int rank = 0;  // this slot's position among enabled slots, counting by index
+  for (int i = 0; i <= slot; i++) {
+    if (enabled[i]) rank++;
+  }
+  return (rank <= max_active) ? SlotActivation::Connects
+                              : SlotActivation::OverActiveCap;
+}
+
 } // namespace MQTTConnectionPolicy
