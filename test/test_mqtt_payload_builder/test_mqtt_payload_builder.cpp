@@ -227,6 +227,87 @@ TEST(MQTTPayloadBuilder, MaximumRepresentativePacketAndRawPayloadsRemainValid) {
   EXPECT_EQ(510U, strlen(parsed_raw["data"].as<const char*>()));
 }
 
+TEST(MQTTPayloadBuilder, NeighborsMessageRoundTripsSelfAndEntries) {
+  MQTTPayloadBuilder::NeighborsMessageEntry neighbors[] = {
+      {"0011223344556677", 9.75f, 42, "DEN,APRS", "active"},
+      {"8899AABBCCDDEEFF", -3.5f, 3600, "", "stale"},
+  };
+
+  JsonDocument scratch;
+  char buffer[1024];
+  int len = MQTTPayloadBuilder::buildNeighborsMessage(
+      scratch, "DEN Repeater", "0123456789ABCDEF", kTimestamp, "DEN,APRS",
+      neighbors, 2, buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  EXPECT_EQ(static_cast<size_t>(len), strlen(buffer));
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("2026-07-18T12:34:56.123456+00:00", parsed["timestamp"].as<const char*>());
+  EXPECT_STREQ("DEN Repeater", parsed["origin"].as<const char*>());
+  EXPECT_STREQ("0123456789ABCDEF", parsed["origin_id"].as<const char*>());
+  EXPECT_STREQ("DEN,APRS", parsed["self"]["scopes"].as<const char*>());
+
+  JsonArray arr = parsed["neighbors"].as<JsonArray>();
+  ASSERT_EQ(2U, arr.size());
+  EXPECT_STREQ("0011223344556677", arr[0]["pubkey"].as<const char*>());
+  EXPECT_FLOAT_EQ(9.75f, arr[0]["snr"].as<float>());
+  EXPECT_EQ(42U, arr[0]["heard_secs_ago"].as<uint32_t>());
+  EXPECT_STREQ("DEN,APRS", arr[0]["scopes"].as<const char*>());
+  EXPECT_STREQ("active", arr[0]["status"].as<const char*>());
+  EXPECT_STREQ("8899AABBCCDDEEFF", arr[1]["pubkey"].as<const char*>());
+  EXPECT_STREQ("", arr[1]["scopes"].as<const char*>());
+  EXPECT_STREQ("stale", arr[1]["status"].as<const char*>());
+}
+
+TEST(MQTTPayloadBuilder, NeighborsMessageHandlesEmptyTableAndNullScopes) {
+  JsonDocument scratch;
+  char buffer[256];
+  int len = MQTTPayloadBuilder::buildNeighborsMessage(
+      scratch, "node", "id", kTimestamp, nullptr, nullptr, 0,
+      buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  EXPECT_STREQ("", parsed["self"]["scopes"].as<const char*>());
+  JsonArray arr = parsed["neighbors"].as<JsonArray>();
+  ASSERT_TRUE(arr.isNull() == false);
+  EXPECT_EQ(0U, arr.size());
+}
+
+TEST(MQTTPayloadBuilder, NeighborsMessageDropsTailWhenBufferFills) {
+  // Twenty entries far exceed a tight buffer; the builder must emit a prefix
+  // that still parses as complete JSON rather than truncating mid-document.
+  MQTTPayloadBuilder::NeighborsMessageEntry neighbors[20];
+  static char keys[20][17];
+  for (int i = 0; i < 20; i++) {
+    snprintf(keys[i], sizeof(keys[i]), "%016X", i);
+    neighbors[i].pubkey_hex = keys[i];
+    neighbors[i].snr = static_cast<float>(i);
+    neighbors[i].heard_secs_ago = static_cast<uint32_t>(i) * 10U;
+    neighbors[i].scopes = "DEN";
+    neighbors[i].status = "active";
+  }
+
+  JsonDocument scratch;
+  char buffer[512];
+  int len = MQTTPayloadBuilder::buildNeighborsMessage(
+      scratch, "node", "id", kTimestamp, "DEN", neighbors, 20,
+      buffer, sizeof(buffer));
+
+  ASSERT_GT(len, 0);
+  EXPECT_LT(static_cast<size_t>(len), sizeof(buffer));
+  JsonDocument parsed;
+  ASSERT_FALSE(deserializeJson(parsed, buffer));
+  JsonArray arr = parsed["neighbors"].as<JsonArray>();
+  ASSERT_FALSE(arr.isNull());
+  EXPECT_GT(arr.size(), 0U);
+  EXPECT_LT(arr.size(), 20U);
+  // Kept entries are the head of the input, in order.
+  EXPECT_STREQ(keys[0], arr[0]["pubkey"].as<const char*>());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {

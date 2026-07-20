@@ -2,6 +2,7 @@
 
 #include "MeshCore.h"
 #include <ArduinoJson.h>
+#include "MQTTPayloadBuilder.h"
 #include <Mesh.h>
 #include <Timezone.h>
 
@@ -149,6 +150,22 @@ public:
     const char* origin_id,
     const char* timestamp,
     const char* raw,
+    char* buffer,
+    size_t buffer_size
+  );
+
+  // Neighbors table entry + JSON builder. The layout logic lives in the pure,
+  // host-tested MQTTPayloadBuilder; this is the firmware-facing alias/delegate,
+  // matching the status/packet/raw builders.
+  using NeighborsMessageEntry = MQTTPayloadBuilder::NeighborsMessageEntry;
+  static int buildNeighborsMessage(
+    JsonDocument& doc,
+    const char* origin,
+    const char* origin_id,
+    const char* timestamp,
+    const char* self_scopes,
+    const NeighborsMessageEntry* neighbors,
+    int neighbor_count,
     char* buffer,
     size_t buffer_size
   );

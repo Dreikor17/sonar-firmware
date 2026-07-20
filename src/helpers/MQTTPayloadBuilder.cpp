@@ -184,3 +184,48 @@ int MQTTPayloadBuilder::buildRawMessage(
 
   return serializeComplete(root, buffer, buffer_size);
 }
+
+int MQTTPayloadBuilder::buildNeighborsMessage(
+  JsonDocument& doc,
+  const char* origin,
+  const char* origin_id,
+  const char* timestamp,
+  const char* self_scopes,
+  const NeighborsMessageEntry* neighbors,
+  int neighbor_count,
+  char* buffer,
+  size_t buffer_size
+) {
+  if (!buffer || buffer_size == 0) return 0;
+
+  doc.clear();
+  JsonObject root = doc.to<JsonObject>();
+  root["timestamp"] = timestamp;
+  root["origin"] = origin;
+  root["origin_id"] = origin_id;
+
+  JsonObject self = root["self"].to<JsonObject>();
+  self["scopes"] = self_scopes ? self_scopes : "";
+
+  JsonArray arr = root["neighbors"].to<JsonArray>();
+  if (measureJson(root) >= buffer_size) return 0;
+
+  for (int i = 0; i < neighbor_count; i++) {
+    JsonObject nb = arr.add<JsonObject>();
+    nb["pubkey"] = neighbors[i].pubkey_hex;
+    nb["snr"] = neighbors[i].snr;
+    nb["heard_secs_ago"] = neighbors[i].heard_secs_ago;
+    nb["scopes"] = neighbors[i].scopes ? neighbors[i].scopes : "";
+    nb["status"] = neighbors[i].status;
+
+    // Entries arrive ordered most- to least-useful. Stop as soon as the next
+    // one would fill the fixed publish buffer, dropping the remaining tail so
+    // document growth stays bounded.
+    if (measureJson(root) >= buffer_size) {
+      arr.remove(arr.size() - 1);
+      break;
+    }
+  }
+
+  return serializeComplete(root, buffer, buffer_size);
+}
