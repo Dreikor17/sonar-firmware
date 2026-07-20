@@ -105,6 +105,9 @@ TEST(MQTTPresets, UserpassWithoutEmbeddedCredsNeedsSlotCredentials) {
   ASSERT_NE(nullptr, p);
   EXPECT_EQ(MQTT_AUTH_USERPASS, p->auth_type);
   EXPECT_TRUE(mqttPresetNeedsSlotCredentials(p));
+  EXPECT_TRUE(mqttPresetNeedsSlotUsername(p));
+  EXPECT_TRUE(mqttPresetNeedsSlotPassword(p));
+  EXPECT_FALSE(mqttPresetUsesDevicePubkeyUsername(p));
 }
 
 TEST(MQTTPresets, NonUserpassNeverNeedsSlotCredentials) {
@@ -122,6 +125,34 @@ TEST(MQTTPresets, MeshrankIsTokenStyleNoAuth) {
   ASSERT_NE(nullptr, p);
   EXPECT_EQ(MQTT_TOPIC_MESHRANK, p->topic_style);
   EXPECT_EQ(MQTT_AUTH_NONE, p->auth_type);
+}
+
+TEST(MQTTPresets, MeshChaun14UsesPubkeyUsernameAndNeedsPassword) {
+  const MQTTPresetDef* p = findMQTTPreset("mesh-chaun14");
+  ASSERT_NE(nullptr, p);
+  EXPECT_EQ(MQTT_AUTH_USERPASS, p->auth_type);
+  EXPECT_EQ(MQTT_TOPIC_MESHCORE, p->topic_style);
+  EXPECT_STREQ("mqtt://mqtt.mesh.chaun14.fr:1884", p->server_url);
+  EXPECT_EQ(nullptr, p->ca_cert);
+  EXPECT_EQ(60, p->keepalive);
+  EXPECT_TRUE(mqttPresetUsesDevicePubkeyUsername(p));
+  EXPECT_STREQ(MQTT_USERPASS_USERNAME_PUBKEY, p->userpass_username);
+  EXPECT_FALSE(mqttPresetNeedsSlotUsername(p));
+  EXPECT_TRUE(mqttPresetNeedsSlotPassword(p));
+  EXPECT_TRUE(mqttPresetNeedsSlotCredentials(p));
+}
+
+TEST(MQTTPresets, WcmeshIsJwtWithIsrgRootX1) {
+  const MQTTPresetDef* p = findMQTTPreset("wcmesh");
+  ASSERT_NE(nullptr, p);
+  EXPECT_EQ(MQTT_AUTH_JWT, p->auth_type);
+  EXPECT_EQ(MQTT_TOPIC_MESHCORE, p->topic_style);
+  EXPECT_STREQ("wss://mqtt.wcmesh.com:443", p->server_url);
+  EXPECT_STREQ("mqtt.wcmesh.com", p->jwt_audience);
+  EXPECT_EQ(ISRG_ROOT_X1, p->ca_cert);
+  EXPECT_NE(GTS_ROOT_R4, p->ca_cert);
+  EXPECT_FALSE(mqttPresetNeedsSlotCredentials(p));
+  EXPECT_FALSE(mqttPresetUsesDevicePubkeyUsername(p));
 }
 
 // ---- slot count constants -------------------------------------------------

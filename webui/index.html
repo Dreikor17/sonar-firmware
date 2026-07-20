@@ -639,7 +639,7 @@ function refreshSlotFields(host,i){
   var def=null;st.presets.forEach(function(p){if(p.name===name)def=p});
   var needs=name==="custom"?"custom":(def?def.needs:"none");
   var showMap={token:needs==="token",username:needs==="userpass"||needs==="custom",
-    password:needs==="userpass"||needs==="custom",server:needs==="custom",
+    password:needs==="userpass"||needs==="password"||needs==="custom",server:needs==="custom",
     port:needs==="custom",topic:needs==="custom",audience:needs==="custom"};
   Object.keys(showMap).forEach(function(f){
     var w=card.querySelector(".sf-"+f);if(w)w.classList.toggle("hide",!showMap[f]);

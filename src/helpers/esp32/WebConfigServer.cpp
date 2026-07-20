@@ -878,7 +878,11 @@ void WebConfigServer::handlePresets(AsyncWebServerRequest* req) {
     // What the UI must collect for this preset to connect
     if (p.topic_style == MQTT_TOPIC_MESHRANK) {
       o["needs"] = "token";
-    } else if (mqttPresetNeedsSlotCredentials(&p)) {
+    } else if (mqttPresetNeedsSlotUsername(&p) && mqttPresetNeedsSlotPassword(&p)) {
+      o["needs"] = "userpass";
+    } else if (mqttPresetNeedsSlotPassword(&p)) {
+      o["needs"] = "password";
+    } else if (mqttPresetNeedsSlotUsername(&p)) {
       o["needs"] = "userpass";
     } else {
       o["needs"] = "none";

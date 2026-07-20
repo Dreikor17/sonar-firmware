@@ -415,6 +415,12 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
           } else if (p && p->topic_style == MQTT_TOPIC_MESHCORE &&
                      (strlen(_mqtt_prefs.mqtt_iata) == 0 || strcmp(_mqtt_prefs.mqtt_iata, "XXX") == 0)) {
             sprintf(reply, "OK - slot %d preset: %s (run 'set mqtt.iata <airport_code>' to publish)", slot + 1, preset_name);
+          } else if (p && mqttPresetNeedsSlotPassword(p) &&
+                     _mqtt_prefs.mqtt_slot_password[slot][0] == '\0' &&
+                     !mqttPresetNeedsSlotUsername(p)) {
+            sprintf(reply,
+                    "OK - slot %d preset: %s (run 'set mqtt%d.password <pass>' to connect)",
+                    slot + 1, preset_name, slot + 1);
           } else if (p && mqttPresetNeedsSlotCredentials(p) &&
                      (_mqtt_prefs.mqtt_slot_username[slot][0] == '\0' ||
                       _mqtt_prefs.mqtt_slot_password[slot][0] == '\0')) {

@@ -43,10 +43,32 @@ struct MQTTPresetDef {
   const char* userpass_password; // MQTT_AUTH_USERPASS: embedded password, or nullptr to use mqttN.password
 };
 
-// True when preset uses MQTT_AUTH_USERPASS but credentials come from slot prefs (mqttN.username/password).
-static inline bool mqttPresetNeedsSlotCredentials(const MQTTPresetDef* preset) {
+// Sentinel: resolve MQTT username from device public-key hex at connect time.
+// Braces match topic placeholders ({device}/{iata}); never send this string to the broker.
+static const char MQTT_USERPASS_USERNAME_PUBKEY[] = "{pubkey}";
+
+static inline bool mqttPresetUsesDevicePubkeyUsername(const MQTTPresetDef* preset) {
   return preset && preset->auth_type == MQTT_AUTH_USERPASS &&
-         (!preset->userpass_username || !preset->userpass_password);
+         preset->userpass_username &&
+         strcmp(preset->userpass_username, MQTT_USERPASS_USERNAME_PUBKEY) == 0;
+}
+
+// True when USERPASS username must come from mqttN.username (null embedded username).
+// "{pubkey}" is an embedded sentinel, so it does not need a slot username.
+static inline bool mqttPresetNeedsSlotUsername(const MQTTPresetDef* preset) {
+  return preset && preset->auth_type == MQTT_AUTH_USERPASS &&
+         !preset->userpass_username;
+}
+
+// True when USERPASS password must come from mqttN.password (null embedded password).
+static inline bool mqttPresetNeedsSlotPassword(const MQTTPresetDef* preset) {
+  return preset && preset->auth_type == MQTT_AUTH_USERPASS &&
+         !preset->userpass_password;
+}
+
+// True when preset uses MQTT_AUTH_USERPASS but at least one credential comes from slot prefs.
+static inline bool mqttPresetNeedsSlotCredentials(const MQTTPresetDef* preset) {
+  return mqttPresetNeedsSlotUsername(preset) || mqttPresetNeedsSlotPassword(preset);
 }
 
 // Google Trust Services - GTS Root R4 (used by LetsMesh Analyzer)
@@ -108,7 +130,7 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 26;
+static const int MQTT_PRESET_COUNT = 28;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
@@ -144,6 +166,10 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "ipnt.uk",         "wss://mqtt.ipnt.uk:443",                    "mqtt.ipnt.uk",                    ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "flmesh",       "wss://mcmqtt.jntconnections.com:443",       "mcmqtt.jntconnections.com",       GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "corecomms",     "wss://mqtt.corecomms.net:443/mqtt",       "mqtt.corecomms.net",              GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    // Username is device pubkey hex at connect; password from mqttN.password. No TLS.
+    { "mesh-chaun14",  "mqtt://mqtt.mesh.chaun14.fr:1884",        nullptr,                           nullptr,       MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   60,      MQTT_USERPASS_USERNAME_PUBKEY, nullptr },
+    // LetsMesh-compatible JWT; TLS is Let's Encrypt (ISRG Root X1), not GTS.
+    { "wcmesh",        "wss://mqtt.wcmesh.com:443",               "mqtt.wcmesh.com",                 ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
 };
 
 // Find a preset by name, returns nullptr if not found

@@ -1648,10 +1648,19 @@ void MQTTBridge::setupSlot(int index) {
         slot.client->setCredentials(_jwt_username, slot.auth_token);
       }
     } else if (slot.preset->auth_type == MQTT_AUTH_USERPASS) {
-      if (slot.preset->userpass_username && slot.preset->userpass_password) {
-        slot.client->setCredentials(slot.preset->userpass_username, slot.preset->userpass_password);
-      } else if (strlen(slot.username) > 0) {
-        slot.client->setCredentials(slot.username, slot.password);
+      const char* user = nullptr;
+      const char* pass = slot.preset->userpass_password
+                             ? slot.preset->userpass_password
+                             : slot.password;
+      if (mqttPresetUsesDevicePubkeyUsername(slot.preset)) {
+        user = _device_id;  // never send "{pubkey}" literally
+      } else if (slot.preset->userpass_username) {
+        user = slot.preset->userpass_username;
+      } else if (slot.username[0] != '\0') {
+        user = slot.username;
+      }
+      if (user && user[0] != '\0' && pass && pass[0] != '\0') {
+        slot.client->setCredentials(user, pass);
       }
     }
   } else {
@@ -2507,15 +2516,15 @@ bool MQTTBridge::isSlotReady(int index, char* reason_buf, size_t reason_size) co
         return false;
       }
     }
-    if (mqttPresetNeedsSlotCredentials(slot.preset)) {
-      if (_obs->mqtt_slot_username[index][0] == '\0') {
-        if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt%d.username <user>", index + 1);
-        return false;
-      }
-      if (_obs->mqtt_slot_password[index][0] == '\0') {
-        if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt%d.password <pass>", index + 1);
-        return false;
-      }
+    if (mqttPresetNeedsSlotUsername(slot.preset) &&
+        _obs->mqtt_slot_username[index][0] == '\0') {
+      if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt%d.username <user>", index + 1);
+      return false;
+    }
+    if (mqttPresetNeedsSlotPassword(slot.preset) &&
+        _obs->mqtt_slot_password[index][0] == '\0') {
+      if (reason_buf) snprintf(reason_buf, reason_size, "set mqtt%d.password <pass>", index + 1);
+      return false;
     }
   } else {
     // Custom slot without a topic template uses meshcore format, needs IATA
