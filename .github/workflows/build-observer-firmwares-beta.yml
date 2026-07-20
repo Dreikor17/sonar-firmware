@@ -242,6 +242,17 @@ jobs:
 
           gh_retry gh release upload "$RELEASE_TAG" $(find out -maxdepth 1 -type f ! -name '*.partsig') --clobber
 
+          # Keep the release body in sync with the repo's notes source, with the
+          # dev-channel warning prepended: the /releases feed serves the body as
+          # this channel's dropdown changelog. Non-fatal — stale notes beat a
+          # red build whose binaries are already live.
+          {
+            printf '%s' '<p><b>&#9888; DEV/BETA CHANNEL:</b> pre-release firmware. A node flashed from this channel keeps receiving OTA updates from this channel until re-flashed by cable.</p>'
+            cat firmware-notes.html
+          } > /tmp/beta-notes.html
+          gh_retry gh release edit "$RELEASE_TAG" --notes-file /tmp/beta-notes.html \
+            || echo "WARNING: release notes sync failed" >&2
+
           # Pruning is housekeeping and runs AFTER the upload has succeeded. If the
           # API is flaky here, skip it rather than fail the job — old assets simply
           # linger until the next run, which is strictly better than reporting
@@ -281,27 +292,11 @@ jobs:
         env:
           BUILD_NUMBER: ${{ needs.enumerate.outputs.build_number }}
         run: |
-          # config-beta.json is DERIVED from config.json on every beta build, never
-          # hand-maintained: that keeps the dev/beta device list identical to
-          # production by construction, so adding a board upstream cannot leave the
-          # beta list behind. It is published (not ephemeral) because the flasher
-          # SPA loads it directly for ?config=config-beta.
-          #
-          # Only staticPath differs, pointing downloads at the beta release proxy.
-          python3 - <<'PY'
-          import json, os, pathlib
-          src = pathlib.Path("flasher/config.json")
-          cfg = json.loads(src.read_text())
-          old = cfg["staticPath"]
-          cfg["staticPath"] = os.environ["STATIC_PATH"]
-          pathlib.Path("flasher/config-beta.json").write_text(json.dumps(cfg, indent=2) + "\n")
-          print(f"derived config-beta.json: staticPath {old} -> {cfg['staticPath']}")
-          PY
-
-          python3 flasher/scripts/update-firmware.py \
-            "${{ steps.sha.outputs.short }}" \
-            --config flasher/config-beta.json
-
+          # config-beta.json is no longer derived here: the flasher's Version
+          # dropdown is feed-driven (/releases on the firmware-proxy Worker
+          # lists both channels), so the beta channel needs no config of its
+          # own and this workflow's flasher commit touches only beta/v/ and the
+          # counter.
           mkdir -p "flasher/$MANIFEST_DIR"
           # Slim manifests come from the build output in out/ (the assets
           # actually uploaded to the release), not from config-beta.json — see
@@ -335,11 +330,10 @@ jobs:
       - name: Commit & Push Beta Artifacts
         working-directory: flasher
         run: |
-          # Scoped add: beta only ever touches its own manifest dir, config, and
-          # counter, so a stray edit elsewhere in the flasher checkout (in
-          # particular production's config.json) can never be published by this
-          # workflow.
-          git add -A "$MANIFEST_DIR" "$COUNTER_FILE" config-beta.json
+          # Scoped add: beta only ever touches its own manifest dir and counter,
+          # so a stray edit elsewhere in the flasher checkout (in particular
+          # production's config.json) can never be published by this workflow.
+          git add -A "$MANIFEST_DIR" "$COUNTER_FILE"
           if git diff --cached --quiet; then
             echo "No beta changes to commit."
             exit 0
