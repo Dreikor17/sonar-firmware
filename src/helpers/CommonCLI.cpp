@@ -482,8 +482,11 @@ static File openMqttPrefsRead(FILESYSTEM* fs) {
 }
 
 // Filesystem adapter for MQTTPrefsAtomicStore. It writes the new image only to
-// /mqtt_prefs.tmp, then relies on the filesystem's atomic rename to publish it
-// over /mqtt_prefs. It never removes the current source file itself.
+// /mqtt_prefs.tmp, verifies size, then publishes by renaming over /mqtt_prefs.
+// ESP32 targets use SPIFFS, whose rename refuses an existing destination
+// (SPIFFS_ERR_CONFLICTING_NAME) — so commit() must remove /mqtt_prefs first.
+// That is a brief non-atomic window; the verified tmp remains until rename
+// succeeds, and abort() cleans it up on failure.
 class MQTTPrefsFileStore {
 public:
   explicit MQTTPrefsFileStore(FILESYSTEM* fs) : _fs(fs) {}
@@ -538,7 +541,13 @@ public:
   }
 
   bool commit() {
-    return _finished && _fs->rename("/mqtt_prefs.tmp", "/mqtt_prefs");
+    if (!_finished) return false;
+    // SPIFFS: rename(tmp, dest) fails when dest exists. LittleFS/POSIX replace
+    // in place; remove-then-rename is required on ESP32 and correct elsewhere.
+    if (_fs->exists("/mqtt_prefs") && !_fs->remove("/mqtt_prefs")) {
+      return false;
+    }
+    return _fs->rename("/mqtt_prefs.tmp", "/mqtt_prefs");
   }
 
   void abort() {

@@ -212,6 +212,70 @@ AtomicStore::ImageResult runCommonPrefsImage(InMemoryCommonPrefsStore* store) {
   });
 }
 
+// Models ESP32 SPIFFS rename semantics: rename fails when the destination
+// already exists (SPIFFS_ERR_CONFLICTING_NAME). Production MQTTPrefsFileStore
+// must remove /mqtt_prefs before renaming the verified tmp into place.
+class SpiffsLikeMqttPrefsStore {
+public:
+  SpiffsLikeMqttPrefsStore() {
+    _files["/mqtt_prefs"] = {'o', 'l', 'd', '-', 'p', 'r', 'e', 'f', 's'};
+  }
+
+  bool begin() {
+    _files.erase("/mqtt_prefs.tmp");
+    _staging.clear();
+    _open = true;
+    return true;
+  }
+
+  size_t write(const uint8_t* bytes, size_t size) {
+    if (!_open) return 0;
+    _staging.insert(_staging.end(), bytes, bytes + size);
+    return size;
+  }
+
+  bool finish() {
+    _open = false;
+    _files["/mqtt_prefs.tmp"] = _staging;
+    _finished = true;
+    return true;
+  }
+
+  // Naive POSIX-style replace — wrong for SPIFFS when dest exists.
+  bool commitReplaceInPlace() {
+    if (!_finished || _files.count("/mqtt_prefs.tmp") == 0) return false;
+    if (_files.count("/mqtt_prefs") != 0) return false;  // CONFLICTING_NAME
+    _files["/mqtt_prefs"] = _files["/mqtt_prefs.tmp"];
+    _files.erase("/mqtt_prefs.tmp");
+    return true;
+  }
+
+  // Matches CommonCLI MQTTPrefsFileStore::commit() on ESP32.
+  bool commitRemoveThenRename() {
+    if (!_finished || _files.count("/mqtt_prefs.tmp") == 0) return false;
+    _files.erase("/mqtt_prefs");
+    _files["/mqtt_prefs"] = _files["/mqtt_prefs.tmp"];
+    _files.erase("/mqtt_prefs.tmp");
+    return true;
+  }
+
+  void abort() {
+    _open = false;
+    _finished = false;
+    _staging.clear();
+    _files.erase("/mqtt_prefs.tmp");
+  }
+
+  const std::vector<uint8_t>& source() const { return _files.at("/mqtt_prefs"); }
+  bool tempExists() const { return _files.count("/mqtt_prefs.tmp") != 0; }
+
+private:
+  bool _open = false;
+  bool _finished = false;
+  std::vector<uint8_t> _staging;
+  std::map<std::string, std::vector<uint8_t>> _files;
+};
+
 }  // namespace
 
 TEST(MQTTPrefsAtomicStore, CommitPublishesExactHeaderThenPayload) {
@@ -390,6 +454,39 @@ TEST(MQTTPrefsAtomicStore, NodePrefsMigrationFailurePreservesSourceAndNeverPrefe
     EXPECT_EQ(test_case.finishes, store.finish_calls);
     EXPECT_EQ(test_case.commits, store.commit_calls);
     EXPECT_EQ(1, store.abort_calls);
+  }
+}
+
+TEST(MQTTPrefsAtomicStore, SpiffsRenameRequiresRemoveBeforePublish) {
+  const uint8_t header[] = {0xf5, 'M', 'Q', 'P', 1, 0, 0x09, 0x00};
+  const uint8_t payload[] = {'n', 'e', 'w', '-', 'p', 'r', 'e', 'f', 's'};
+  const std::vector<uint8_t> published = {0xf5, 'M', 'Q', 'P', 1, 0, 0x09, 0x00,
+                                          'n', 'e', 'w', '-', 'p', 'r', 'e', 'f', 's'};
+  const std::vector<uint8_t> previous = {'o', 'l', 'd', '-', 'p', 'r', 'e', 'f', 's'};
+
+  {
+    SpiffsLikeMqttPrefsStore store;
+    ASSERT_TRUE(store.begin());
+    ASSERT_EQ(sizeof(header), store.write(header, sizeof(header)));
+    ASSERT_EQ(sizeof(payload), store.write(payload, sizeof(payload)));
+    ASSERT_TRUE(store.finish());
+    // Dest exists → SPIFFS-style rename must fail (the pre-fix production bug).
+    EXPECT_FALSE(store.commitReplaceInPlace());
+    EXPECT_EQ(previous, store.source());
+    EXPECT_TRUE(store.tempExists());
+    store.abort();
+    EXPECT_FALSE(store.tempExists());
+  }
+
+  {
+    SpiffsLikeMqttPrefsStore store;
+    ASSERT_TRUE(store.begin());
+    ASSERT_EQ(sizeof(header), store.write(header, sizeof(header)));
+    ASSERT_EQ(sizeof(payload), store.write(payload, sizeof(payload)));
+    ASSERT_TRUE(store.finish());
+    EXPECT_TRUE(store.commitRemoveThenRename());
+    EXPECT_EQ(published, store.source());
+    EXPECT_FALSE(store.tempExists());
   }
 }
 
