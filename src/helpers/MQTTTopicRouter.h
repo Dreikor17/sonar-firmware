@@ -14,6 +14,7 @@ enum MQTTPublicationType {
   MQTT_PUBLICATION_STATUS = 0,
   MQTT_PUBLICATION_PACKETS = 1,
   MQTT_PUBLICATION_RAW = 2,
+  MQTT_PUBLICATION_NEIGHBORS = 3,
 };
 
 enum MQTTTopicRouteStyle {
@@ -31,6 +32,7 @@ static inline const char* mqttPublicationTypeName(int type) {
     case MQTT_PUBLICATION_STATUS: return "status";
     case MQTT_PUBLICATION_PACKETS: return "packets";
     case MQTT_PUBLICATION_RAW: return "raw";
+    case MQTT_PUBLICATION_NEIGHBORS: return "neighbors";
     default: return NULL;
   }
 }
@@ -45,7 +47,8 @@ static inline bool mqttWriteTopic(char* buf, size_t buf_size, const char* format
 }
 
 // Build the complete topic for one publication. MeshRank is deliberately
-// packets-only; status and raw are unsupported by the current broker contract.
+// packets-only; status, raw, and neighbors are unsupported by the current
+// broker contract (the type != PACKETS guard below rejects them all).
 // MeshCore routes require a configured IATA and device id. Custom templates may
 // omit either placeholder, so their individual values are allowed to be empty.
 static inline bool mqttBuildPublicationTopic(MQTTTopicRouteStyle style, int type,

@@ -12,6 +12,8 @@ TEST(WebConfigKeys, AllowsKnownScalarKeys) {
   EXPECT_TRUE(wcIsAllowedSetKey("repeat"));
   EXPECT_TRUE(wcIsAllowedSetKey("wifi.ssid"));
   EXPECT_TRUE(wcIsAllowedSetKey("mqtt.iata"));
+  EXPECT_TRUE(wcIsAllowedSetKey("mqtt.neighbors"));
+  EXPECT_TRUE(wcIsAllowedSetKey("mqtt.neighbors.interval"));
   EXPECT_TRUE(wcIsAllowedSetKey("snmp.community"));
   EXPECT_TRUE(wcIsAllowedSetKey("timezone.offset"));
 }

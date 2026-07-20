@@ -205,6 +205,22 @@ unsigned long MQTTBridge::getWifiConnectedAtMillis() {
   return s_wifi_connected_at;
 }
 
+#if defined(WITH_MQTT_NEIGHBORS)
+// Compact "time remaining" for the `get mqtt.status` nbr field: "3h12m" / "12m" / "45s".
+static void formatDuration(char* buf, size_t len, uint32_t secs) {
+  if (!buf || len == 0) return;
+  uint32_t h = secs / 3600;
+  uint32_t m = (secs % 3600) / 60;
+  if (h > 0) {
+    snprintf(buf, len, "%uh%um", (unsigned)h, (unsigned)m);
+  } else if (m > 0) {
+    snprintf(buf, len, "%um", (unsigned)m);
+  } else {
+    snprintf(buf, len, "%us", (unsigned)secs);
+  }
+}
+#endif
+
 void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPrefs* obs) {
   if (buf == nullptr || bufsize == 0) return;
   const char* msgs = (obs && obs->mqtt_status_enabled) ? "on" : "off";
@@ -251,7 +267,33 @@ void MQTTBridge::formatMqttStatusReply(char* buf, size_t bufsize, const MQTTPref
     }
     pos += snprintf(buf + pos, bufsize - pos, ", %d: %s (%s)", i + 1, name, state);
   }
-  snprintf(buf + pos, bufsize - pos, ", q:%d", q);
+  // snprintf returns the would-be length, so a full buffer can push pos past
+  // bufsize; clamp before the remaining appends so bufsize - pos can't underflow.
+  if (pos >= (int)bufsize) pos = (int)bufsize - 1;
+  pos += snprintf(buf + pos, bufsize - pos, ", q:%d", q);
+  if (pos >= (int)bufsize) pos = (int)bufsize - 1;
+
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Periodic neighbors: time to next publish + how the last one went.
+  if (obs && obs->mqtt_neighbors_enabled && pos < (int)bufsize - 1) {
+    char when[16];
+    switch (b->_neighbors_phase.load(std::memory_order_relaxed)) {
+      case NBR_ACTIVE: strcpy(when, "active"); break;
+      case NBR_DUE:    strcpy(when, "due"); break;
+      default:
+        formatDuration(when, sizeof(when),
+                       b->_neighbors_secs_until_next.load(std::memory_order_relaxed));
+        break;
+    }
+    const char* last;
+    switch (b->_neighbors_last_result.load(std::memory_order_relaxed)) {
+      case NBR_RESULT_OK:   last = "ok"; break;
+      case NBR_RESULT_FAIL: last = "failed"; break;
+      default:              last = "none"; break;
+    }
+    snprintf(buf + pos, bufsize - pos, ", nbr: %s/%s", when, last);
+  }
+#endif
 }
 
 // On-demand publish-health + heap snapshot for the `get mqtt.stats` CLI command.
@@ -589,6 +631,17 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
   _ntp_diag_done = false;
   _ntp_diag_count = 0;
 
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Neighbors publish handoff (buffer allocated in begin() after PSRAM probe).
+  // std::atomic has no value-initializing default ctor pre-C++20, so set them here.
+  _neighbors_json_buffer = nullptr;
+  _neighbors_publish_len = 0;
+  _neighbors_publish_pending.store(false, std::memory_order_relaxed);
+  _neighbors_last_result.store(NBR_RESULT_NONE, std::memory_order_relaxed);
+  _neighbors_phase.store(NBR_SCHEDULED, std::memory_order_relaxed);
+  _neighbors_secs_until_next.store(0, std::memory_order_relaxed);
+#endif
+
   // Initialize JWT username
   _jwt_username[0] = '\0';
 
@@ -626,6 +679,13 @@ void MQTTBridge::allocateRuntimeBuffers() {
       _publish_json_buffer, PUBLISH_JSON_BUFFER_SIZE, psram_malloc));
   _status_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
       _status_json_buffer, STATUS_JSON_BUFFER_SIZE, psram_malloc));
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Persistent neighbors JSON buffer. Unlike status/packet there is no stack
+  // fallback: the feature is PSRAM-gated, so a nullptr simply disables publishing
+  // (requestPublishNeighbors/publishNeighbors both no-op on nullptr).
+  _neighbors_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _neighbors_json_buffer, NEIGHBORS_JSON_BUFFER_SIZE, psram_malloc));
+#endif
   MQTT_DEBUG_PRINTLN("Runtime buffers: raw=%s publish=%s status=%s",
       _last_raw_data ? "PSRAM" : "unavailable",
       _publish_json_buffer ? "PSRAM" : "stack fallback",
@@ -641,6 +701,12 @@ void MQTTBridge::releaseRuntimeBuffers() {
       _publish_json_buffer, psram_free));
   _status_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
       _status_json_buffer, psram_free));
+#if defined(WITH_MQTT_NEIGHBORS)
+  _neighbors_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
+      _neighbors_json_buffer, psram_free));
+  _neighbors_publish_len = 0;
+  _neighbors_publish_pending.store(false, std::memory_order_release);
+#endif
   #endif
 
   // Never pair a newly allocated raw buffer with metadata from a prior bridge
@@ -1284,6 +1350,25 @@ void MQTTBridge::mqttTaskLoop() {
 
     // Process packet queue
     processPacketQueue();
+
+#if defined(WITH_MQTT_NEIGHBORS)
+    // Consume a pending neighbors snapshot handed over by the mesh (Core 1).
+    // The pending flag stays raised across the whole publish so a second
+    // request is rejected until this one completes (see requestPublishNeighbors).
+    if (_neighbors_publish_pending.load(std::memory_order_acquire)) {
+      bool ok = publishNeighbors();
+      _neighbors_last_result.store(ok ? NBR_RESULT_OK : NBR_RESULT_FAIL,
+                                   std::memory_order_relaxed);
+      // MQTT_DEBUG_PRINTLN concatenates its format as a string literal, so the
+      // argument must be a literal, not a ternary expression.
+      if (ok) {
+        MQTT_DEBUG_PRINTLN("Neighbors published");
+      } else {
+        MQTT_DEBUG_PRINTLN("Neighbors publish failed");
+      }
+      _neighbors_publish_pending.store(false, std::memory_order_release);
+    }
+#endif
 
 #ifdef WITH_SNMP
     // SNMP agent loop — process incoming UDP requests
@@ -2072,7 +2157,8 @@ bool MQTTBridge::buildTopicForSlot(int index, MQTTMessageType type, char* topic_
   static_assert(
       static_cast<int>(MSG_STATUS) == MQTT_PUBLICATION_STATUS &&
       static_cast<int>(MSG_PACKETS) == MQTT_PUBLICATION_PACKETS &&
-      static_cast<int>(MSG_RAW) == MQTT_PUBLICATION_RAW,
+      static_cast<int>(MSG_RAW) == MQTT_PUBLICATION_RAW &&
+      static_cast<int>(MSG_NEIGHBORS) == MQTT_PUBLICATION_NEIGHBORS,
       "topic router enum drift");
 
   if (!mqttTopicSlotIndexValid(index, RUNTIME_MQTT_SLOTS)) return false;
@@ -2177,7 +2263,12 @@ void MQTTBridge::publishStatusToSlot(int index) {
   );
 
   if (len > 0) {
-    int result = slot.client->publish(status_topic, 1, true, json_buffer, strlen(json_buffer));
+    // Honor the preset's retain policy, matching publishStatus() — brokers that
+    // set allow_retain=false (e.g. waev) reject retained publishes, so this
+    // on-connect status must not force retain=true. Custom slots default to
+    // non-retained here too, keeping both status paths consistent.
+    bool use_retain = slot.preset ? slot.preset->allow_retain : false;
+    int result = slot.client->publish(status_topic, 1, use_retain, json_buffer, strlen(json_buffer));
     if (result <= 0) {
       MQTT_DEBUG_PRINTLN("MQTT%d status publish failed", index + 1);
     }
@@ -3137,6 +3228,54 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet) {
   }
   return false;
 }
+
+#if defined(WITH_MQTT_NEIGHBORS)
+// ---------------------------------------------------------------------------
+// Periodic neighbors publication
+// ---------------------------------------------------------------------------
+
+void MQTTBridge::setNeighborsSchedule(NeighborsPhase phase, uint32_t secs_until_next) {
+  _neighbors_phase.store((uint8_t)phase, std::memory_order_relaxed);
+  _neighbors_secs_until_next.store(secs_until_next, std::memory_order_relaxed);
+}
+
+void MQTTBridge::requestPublishNeighbors(const char* json, size_t len) {
+  if (!_neighbors_json_buffer || !json || len == 0) return;
+  // Drop a new snapshot while one is still being published (Core 0 clears the
+  // flag when done). Acquire pairs with the task loop's release store.
+  if (_neighbors_publish_pending.load(std::memory_order_acquire)) return;
+  if (len >= NEIGHBORS_JSON_BUFFER_SIZE) {
+    len = NEIGHBORS_JSON_BUFFER_SIZE - 1;
+  }
+  memcpy(_neighbors_json_buffer, json, len);
+  _neighbors_json_buffer[len] = '\0';
+  _neighbors_publish_len = len;
+  _neighbors_publish_pending.store(true, std::memory_order_release);
+}
+
+bool MQTTBridge::publishNeighbors() {
+  if (!_neighbors_json_buffer || _neighbors_publish_len == 0) return false;
+  if (!_cached_has_connected_slots) return false;
+
+  refreshOriginFromPrefs();
+
+  bool published = false;
+  char topic[128];
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+    if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
+      // MeshRank slots reject non-packets by contract, so buildTopicForSlot
+      // returns false for them here and the slot is skipped.
+      if (buildTopicForSlot(i, MSG_NEIGHBORS, topic, sizeof(topic))) {
+        bool use_retain = _slots[i].preset ? _slots[i].preset->allow_retain : false;
+        if (publishToSlot(i, topic, _neighbors_json_buffer, use_retain, 1)) {
+          published = true;
+        }
+      }
+    }
+  }
+  return published;
+}
+#endif  // WITH_MQTT_NEIGHBORS
 
 // ---------------------------------------------------------------------------
 // Queue management

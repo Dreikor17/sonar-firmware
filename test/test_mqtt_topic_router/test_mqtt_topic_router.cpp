@@ -24,6 +24,7 @@ const TypeCase kTypes[] = {
   {MQTT_PUBLICATION_STATUS, "status"},
   {MQTT_PUBLICATION_PACKETS, "packets"},
   {MQTT_PUBLICATION_RAW, "raw"},
+  {MQTT_PUBLICATION_NEIGHBORS, "neighbors"},
 };
 
 TEST(MQTTTopicRouter, EveryMeshCorePresetSupportsEveryPublicationType) {
@@ -55,6 +56,9 @@ TEST(MQTTTopicRouter, MeshRankContractIsPacketsOnly) {
                                         nullptr, IATA, DEVICE, TOKEN, topic, sizeof(topic)));
   EXPECT_STREQ("meshrank/uplink/account-token/0123456789ABCDEF/packets", topic);
   EXPECT_FALSE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHRANK, MQTT_PUBLICATION_RAW,
+                                         nullptr, IATA, DEVICE, TOKEN, topic, sizeof(topic)));
+  EXPECT_STREQ("", topic);
+  EXPECT_FALSE(mqttBuildPublicationTopic(MQTT_ROUTE_MESHRANK, MQTT_PUBLICATION_NEIGHBORS,
                                          nullptr, IATA, DEVICE, TOKEN, topic, sizeof(topic)));
   EXPECT_STREQ("", topic);
 }
@@ -178,9 +182,11 @@ TEST(MQTTTopicRouter, PublicationTypeEnumValuesAreFrozen) {
   EXPECT_EQ(0, MQTT_PUBLICATION_STATUS);
   EXPECT_EQ(1, MQTT_PUBLICATION_PACKETS);
   EXPECT_EQ(2, MQTT_PUBLICATION_RAW);
+  EXPECT_EQ(3, MQTT_PUBLICATION_NEIGHBORS);
   EXPECT_STREQ("status", mqttPublicationTypeName(MQTT_PUBLICATION_STATUS));
   EXPECT_STREQ("packets", mqttPublicationTypeName(MQTT_PUBLICATION_PACKETS));
   EXPECT_STREQ("raw", mqttPublicationTypeName(MQTT_PUBLICATION_RAW));
+  EXPECT_STREQ("neighbors", mqttPublicationTypeName(MQTT_PUBLICATION_NEIGHBORS));
 }
 
 }  // namespace

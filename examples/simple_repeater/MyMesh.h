@@ -147,6 +147,44 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   uint8_t _wc_slot_restart_mask = 0;
 #endif
 
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Neighbor-scope discovery: a snapshot of the neighbor table overlaid with an
+  // in-flight anon-regions query per neighbor, published to the MQTT neighbors
+  // topic once every neighbor has responded or the window times out.
+  enum NeighborDiscoverStatus : uint8_t {
+    ND_PENDING = 1,
+    ND_RESPONDED = 2,
+    ND_TIMEOUT = 3,
+    ND_SEND_FAILED = 4,
+  };
+  struct NeighborDiscoverEntry {
+    uint8_t neighbour_idx;   // index into neighbours[]
+    uint32_t tag;            // anon-regions request tag we're waiting on
+    char scopes[96];         // scope names from the response
+    uint8_t status;          // NeighborDiscoverStatus
+  };
+  NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
+  uint8_t neighbor_discover_count;
+  bool neighbor_discover_active;          // scope-query phase in flight
+  bool neighbor_table_refresh_active;     // zero-hop table refresh (stage 1) in flight
+  bool neighbor_table_refresh_periodic;   // that refresh was kicked by the periodic timer
+  unsigned long neighbor_discover_until;  // scope-query timeout deadline
+  unsigned long next_neighbors_publish;   // periodic publish deadline (0 = fire ASAP)
+  char self_scopes_buf[96];
+
+  bool sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag);
+  bool neighborDiscoverReady(char* reply);
+  bool startNeighborDiscover(char* reply);
+  void loopNeighborDiscover();
+  void finishNeighborDiscover();
+  bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
+  void getLocalScopes(char* buf, size_t len);
+  // Overlay peer indices are offset by this base so onPeerDataRecv can tell a
+  // discovery response apart from a normal ACL-client index.
+  static const int NEIGHBOR_DISCOVER_PEER_BASE = 1000;
+  static const unsigned long NEIGHBOR_DISCOVER_TIMEOUT_MS = 30000;
+#endif
+
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
   uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
