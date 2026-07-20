@@ -63,7 +63,7 @@ public:
   virtual void setGpio(uint32_t values) {}
   virtual uint8_t getStartupReason() const = 0;
   virtual bool getBootloaderVersion(char* version, size_t max_len) { return false; }
-  virtual bool startOTAUpdate(const char* id, char reply[]) { return false; }   // not supported
+  virtual bool startOTAUpdate(const char* id, char reply[], bool force_ap = false) { return false; }   // not supported
   // Pull-based OTA: fetch the firmware build for this variant from a baked-in manifest and flash it.
   // current_ver is the running firmware version string (used to skip if already up to date); when
   // dry_run is true the build is only reported, not flashed. Observer (ESP32+WiFi) builds only.
