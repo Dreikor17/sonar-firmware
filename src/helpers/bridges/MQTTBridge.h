@@ -323,6 +323,7 @@ private:
   // the MQTT memory-defrag work — persistent MQTT clients no longer churn
   // the heap, so gray-zone / critical-restart trackers are unnecessary.
   unsigned long _last_memory_check;
+  bool _memory_pressure = false;  // Cached max-alloc verdict; re-sampled at most once per interval in publishPacket() so the heap walk isn't paid per-packet under pressure
   int _skipped_publishes;  // Exposed via SNMP; count of publishes skipped when max_alloc is too low
 
   // Status publish retry tracking
@@ -474,7 +475,7 @@ public:
    * "set mqttN.preset <name>". Handles teardown of old connection and
    * setup of new one.
    *
-   * @param slot_index Slot index (0-2)
+   * @param slot_index Slot index (0 to RUNTIME_MQTT_SLOTS-1)
    * @param preset_name Preset name: "analyzer-us", "analyzer-eu", "nz-analyzer", "meshmapper", "custom", "none"
    */
   void setSlotPreset(int slot_index, const char* preset_name);
@@ -484,7 +485,7 @@ public:
    * Configure custom broker settings for a slot. Only applies when the
    * slot's preset is "custom".
    *
-   * @param slot_index Slot index (0-2)
+   * @param slot_index Slot index (0 to RUNTIME_MQTT_SLOTS-1)
    * @param host Broker hostname
    * @param port Broker port
    * @param username MQTT username (empty for anonymous)

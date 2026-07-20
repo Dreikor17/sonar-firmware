@@ -3,10 +3,12 @@
 // only two small delegation hooks. These are CommonCLI member functions, so they
 // retain full access to _prefs/_callbacks/_board/savePrefs() with no re-plumbing.
 //
-// Behavior is intentionally identical to the previously-inlined branches: MQTT
-// commands keep their WITH_MQTT_BRIDGE guard; alert/SNMP commands remain unguarded.
-// Each handler returns true if it recognized the command, false to fall through to
-// the base get/set parser in CommonCLI.cpp.
+// Behavior is intentionally identical to the previously-inlined branches. NOTE:
+// the entire body of each set/get handler here is compiled under WITH_MQTT_BRIDGE
+// (see the #ifdef at the top of each), so on an observer build without the bridge
+// the WiFi/timezone/alert/SNMP commands compile out too — they are not guarded
+// independently of the MQTT commands. Each handler returns true if it recognized
+// the command, false to fall through to the base get/set parser in CommonCLI.cpp.
 
 #include <Arduino.h>
 #include "CommonCLI.h"
@@ -429,6 +431,16 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
                     slot + 1, preset_name, slot + 1, slot + 1);
           } else {
             sprintf(reply, "OK - slot %d preset: %s", slot + 1, preset_name);
+          }
+          // Slots beyond RUNTIME_MQTT_SLOTS are still stored (so they take effect
+          // if the prefs move to a PSRAM board) but won't connect on this
+          // hardware — say so, or the operator waits for a connection that never
+          // comes (A15).
+          if (slot >= RUNTIME_MQTT_SLOTS) {
+            size_t used = strlen(reply);
+            if (used < 158) {
+              snprintf(reply + used, 160 - used, " (slot inactive on this hardware)");
+            }
           }
         }
       } else {

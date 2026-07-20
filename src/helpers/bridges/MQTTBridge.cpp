@@ -3118,19 +3118,25 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   static const size_t PUBLISH_SKIP_MAX_ALLOC_THRESHOLD = 8000;
   #endif
   unsigned long now = millis();
+  // Re-sample max-alloc at most once per interval and cache the verdict.
+  // getMaxAllocHeap() walks the heap free-list, so it must not run per packet.
+  // The previous code only advanced _last_memory_check on the healthy path, so
+  // under sustained pressure the guard stayed open and it walked the heap on
+  // EVERY packet — the opposite of throttling (A15). Caching the verdict keeps
+  // the "skip publishes while memory is low" protection but pays for the walk
+  // only once per interval; _last_memory_check is now advanced on both paths.
   if (now - _last_memory_check > 5000) {
-    size_t max_alloc = ESP.getMaxAllocHeap();
-    if (max_alloc < PUBLISH_SKIP_MAX_ALLOC_THRESHOLD) {
-      _skipped_publishes++;
-      static unsigned long last_skip_log = 0;
-      if (now - last_skip_log > 60000) {
-        MQTT_DEBUG_PRINTLN("MQTT: Skipping publish due to memory pressure (Max alloc: %d, threshold: %d, skipped: %d)",
-                           max_alloc, (int)PUBLISH_SKIP_MAX_ALLOC_THRESHOLD, _skipped_publishes);
-        last_skip_log = now;
-      }
-      return false;
-    }
     _last_memory_check = now;
+    size_t max_alloc = ESP.getMaxAllocHeap();
+    _memory_pressure = (max_alloc < PUBLISH_SKIP_MAX_ALLOC_THRESHOLD);
+    if (_memory_pressure) {
+      MQTT_DEBUG_PRINTLN("MQTT: memory pressure, skipping publishes (Max alloc: %d, threshold: %d, skipped: %d)",
+                         (int)max_alloc, (int)PUBLISH_SKIP_MAX_ALLOC_THRESHOLD, _skipped_publishes);
+    }
+  }
+  if (_memory_pressure) {
+    _skipped_publishes++;
+    return false;
   }
   #endif
 
@@ -3386,7 +3392,6 @@ void MQTTBridge::queuePacket(mesh::Packet* packet, bool is_tx) {
       MQTTPacketQueuePolicy::enqueueAction(
           static_cast<size_t>(_queue_count), static_cast<size_t>(MAX_QUEUE_SIZE));
   if (action == MQTTPacketQueuePolicy::EnqueueAction::EvictOldestThenEnqueue) {
-    QueuedPacket& oldest = _packet_queue[_queue_head];
     MQTT_DEBUG_PRINTLN("Queue full, dropping oldest packet (queue size: %d)", _queue_count);
     dequeuePacket();
   } else if (action == MQTTPacketQueuePolicy::EnqueueAction::Reject) {
