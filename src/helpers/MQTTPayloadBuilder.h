@@ -68,5 +68,28 @@ public:
     char* buffer,
     size_t buffer_size
   );
+
+  struct NeighborsMessageEntry {
+    const char* pubkey_hex;
+    float snr;
+    uint32_t heard_secs_ago;
+    const char* scopes;
+    const char* status;
+  };
+
+  // Build neighbors-table JSON for the meshcore/{iata}/{device}/neighbors topic.
+  // Callers order entries most- to least-useful; document growth is bounded to
+  // buffer_size and the remaining tail is dropped once the next entry won't fit.
+  static int buildNeighborsMessage(
+    JsonDocument& doc,
+    const char* origin,
+    const char* origin_id,
+    const char* timestamp,
+    const char* self_scopes,
+    const NeighborsMessageEntry* neighbors,
+    int neighbor_count,
+    char* buffer,
+    size_t buffer_size
+  );
 };
 

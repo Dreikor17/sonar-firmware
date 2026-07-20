@@ -102,6 +102,22 @@ int MQTTMessageBuilder::buildRawMessage(
       origin, origin_id, timestamp, raw, buffer, buffer_size);
 }
 
+int MQTTMessageBuilder::buildNeighborsMessage(
+  JsonDocument& doc,
+  const char* origin,
+  const char* origin_id,
+  const char* timestamp,
+  const char* self_scopes,
+  const NeighborsMessageEntry* neighbors,
+  int neighbor_count,
+  char* buffer,
+  size_t buffer_size
+) {
+  return MQTTPayloadBuilder::buildNeighborsMessage(
+      doc, origin, origin_id, timestamp, self_scopes, neighbors, neighbor_count,
+      buffer, buffer_size);
+}
+
 int MQTTMessageBuilder::buildPacketJSON(
   JsonDocument& doc,
   mesh::Packet* packet,

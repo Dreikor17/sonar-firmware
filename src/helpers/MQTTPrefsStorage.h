@@ -108,12 +108,35 @@ struct MQTTPrefs {
   uint16_t alert_min_interval_min;
   char alert_hashtag[24];
   char alert_region[31];
+
+  // Neighbors publishing (PSRAM boards only). Appended at the end of the
+  // observer tail so a shorter (pre-neighbors) /mqtt_prefs payload from earlier
+  // firmware still loads with these defaulting off/24h; keeps the format at
+  // VERSION 1. Field order and sizes are kept byte-identical to the flex
+  // neighbors build so a /mqtt_prefs written by either firmware is
+  // interchangeable (see the offsetof static_asserts below).
+  uint8_t mqtt_neighbors_enabled;
+  uint32_t mqtt_neighbors_interval;
 };
 
-// Version-1 has exactly two layouts this firmware can decode. Never infer a
+// Neighbor discovery is scheduled with the wrap-safe millis() helpers, whose
+// signed-delta comparison requires intervals below INT32_MAX ms. The 336h
+// (two-week) cap stays comfortably inside that range.
+static const uint32_t MQTT_NEIGHBORS_MIN_INTERVAL_HOURS = 12;
+static const uint32_t MQTT_NEIGHBORS_MAX_INTERVAL_HOURS = 336;
+static const uint32_t MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS = 24;
+static const uint32_t MQTT_NEIGHBORS_MIN_INTERVAL_MS = MQTT_NEIGHBORS_MIN_INTERVAL_HOURS * 3600000UL;
+static const uint32_t MQTT_NEIGHBORS_MAX_INTERVAL_MS = MQTT_NEIGHBORS_MAX_INTERVAL_HOURS * 3600000UL;
+static const uint32_t MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS = MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS * 3600000UL;
+
+// Version-1 has three payload layouts this firmware can decode. Never infer a
 // compatible payload from an arbitrary shorter size: raw prefs have no checksum.
+//   - PRE_OBSERVER  (2736): stops before the observer tail (snmp_*/alert_*).
+//   - PRE_NEIGHBORS (2860): full observer tail, no neighbors fields yet.
+//   - FULL          (2864): current baseline, with the neighbors tail.
 static const size_t MQTT_PREFS_V1_PRE_OBSERVER_PAYLOAD_SIZE = 2736;
-static const size_t MQTT_PREFS_V1_FULL_PAYLOAD_SIZE = 2860;
+static const size_t MQTT_PREFS_V1_PRE_NEIGHBORS_PAYLOAD_SIZE = 2860;
+static const size_t MQTT_PREFS_V1_FULL_PAYLOAD_SIZE = 2864;
 
 // /mqtt_prefs starts with a self-describing 8-byte header. Headerless files
 // are deployed legacy layouts and continue to be distinguished by size.
@@ -234,6 +257,15 @@ static_assert(offsetof(MQTTPrefs, snmp_enabled) == MQTT_PREFS_V1_PRE_OBSERVER_PA
               "v1 pre-observer /mqtt_prefs boundary changed");
 static_assert(sizeof(MQTTPrefs) == MQTT_PREFS_V1_FULL_PAYLOAD_SIZE,
               "v1 /mqtt_prefs payload layout changed");
+// Lock the neighbors tail to the flex neighbors build's layout so a /mqtt_prefs
+// written by either firmware is byte-for-byte interchangeable. The enable flag
+// lands in the old struct's zeroed trailing padding (offset 2857), and the
+// interval begins exactly at the pre-neighbors payload size (2860) so a
+// pre-neighbors read stops right before it and the interval keeps its default.
+static_assert(offsetof(MQTTPrefs, mqtt_neighbors_enabled) == 2857,
+              "neighbors enable flag must sit at the flex-compatible offset");
+static_assert(offsetof(MQTTPrefs, mqtt_neighbors_interval) == MQTT_PREFS_V1_PRE_NEIGHBORS_PAYLOAD_SIZE,
+              "neighbors interval offset must equal the pre-neighbors payload size");
 static_assert(sizeof(OldMQTTPrefs) == 472, "frozen pre-slot /mqtt_prefs layout changed");
 static_assert(sizeof(PreWifiPowerOldMQTTPrefs) == 472, "frozen pre-WiFi-power /mqtt_prefs layout changed");
 static_assert(offsetof(OldMQTTPrefs, wifi_power_save) == 144,

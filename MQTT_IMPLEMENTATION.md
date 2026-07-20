@@ -382,6 +382,8 @@ These settings apply across all MQTT slots:
 - `get mqtt.rx` - Get RX packet uplinking setting (on/off)
 - `get mqtt.tx` - Get TX packet uplinking setting (on/off/advert)
 - `get mqtt.interval` - Get status publish interval
+- `get mqtt.neighbors` - Get periodic neighbors publishing setting (on/off; PSRAM only)
+- `get mqtt.neighbors.interval` - Get neighbors publish interval in hours (PSRAM only)
 - `get mqtt.ntp` - Get effective NTP server hostname
 - `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, LoRa shows a compact `<server> ok|fail` list)
 - `get mqtt.owner` - Get owner public key (serial console only)
@@ -399,6 +401,8 @@ These settings apply across all MQTT slots:
   - `advert` - Uplink only this node's own advert packets (self-originated)
   - `off` - Disable TX packet uplinking
 - `set mqtt.interval <minutes>` - Set status publish interval (1-60 minutes)
+- `set mqtt.neighbors on|off` - Enable/disable periodic neighbors publishing (PSRAM only; read live, no restart)
+- `set mqtt.neighbors.interval <hours>` - Set neighbors publish interval (12-336 hours, default 24; PSRAM only)
 - `set mqtt.ntp <hostname>` - Set custom NTP server (validated with immediate sync); `none` reverts to default
 - `set mqtt.owner <64-hex-char-public-key>` - Set owner public key
 - `set mqtt.email <email>` - Set owner email address
@@ -584,6 +588,12 @@ Full packet data with RF characteristics and metadata.
 ### Raw Topic: `meshcore/{IATA}/{DEVICE_PUBLIC_KEY}/raw`
 Minimal raw packet data for map integration.
 
+### Neighbors Topic: `meshcore/{IATA}/{DEVICE_PUBLIC_KEY}/neighbors`
+Periodic snapshot of this node's zero-hop neighbor table plus each neighbor's
+region scopes (PSRAM boards only; disabled by default). Published non-retained at
+QoS 1 on the interval set by `mqtt.neighbors.interval` (12–336 h, default 24 h).
+Like status/raw, this topic is **not** sent to MeshRank slots (packets-only contract).
+
 **Note**: `{DEVICE_PUBLIC_KEY}` is the device's public key in hexadecimal format (64 characters).
 
 ## JSON Message Formats
@@ -661,6 +671,28 @@ Minimal raw packet data for map integration.
   "data": "F5930103807E5F1E..."
 }
 ```
+
+### Neighbors Message
+```json
+{
+  "timestamp": "2024-01-01T12:00:00.000000+00:00",
+  "origin": "MeshCore-HOWL",
+  "origin_id": "A1B2C3D4E5F67890...",
+  "self": { "scopes": "DEN,APRS" },
+  "neighbors": [
+    {
+      "pubkey": "0011223344556677...",
+      "snr": 9.75,
+      "heard_secs_ago": 42,
+      "scopes": "DEN,APRS",
+      "status": "responded"
+    }
+  ]
+}
+```
+Entries are ordered most- to least-useful (most recently heard, then stronger
+SNR); the tail is dropped if the payload would exceed the 10 KB publish buffer.
+`status` is `responded`, `timeout`, or `send_failed` per neighbor.
 
 ## Key Features
 

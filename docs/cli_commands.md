@@ -113,6 +113,20 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
+### Discover neighbor scopes (MQTT observer, PSRAM only)
+
+Refreshes the zero-hop neighbor table, then queries each neighbor for its region
+scopes and publishes the assembled table to the MQTT `neighbors` topic once.
+
+**Usage:**
+- `discover.scopes`
+
+**Note:** Requires a PSRAM board with the MQTT bridge running. On non-PSRAM MQTT
+builds it replies `Err - not supported (requires PSRAM)`. If a `discover.neighbors`
+refresh is already in flight, the scope pass is queued behind it.
+
+---
+
 ## Statistics
 
 ### Clear Stats
@@ -1073,6 +1087,39 @@ region save
 **Default:** `advert`
 
 > **Note:** `mqtt.rx` and `mqtt.tx` take effect immediately — no restart required. Both can be enabled simultaneously.
+
+---
+
+#### View or change periodic neighbors publishing (MQTT observer, PSRAM only)
+**Usage:**
+- `get mqtt.neighbors`
+- `set mqtt.neighbors <on|off>`
+
+**Parameters:**
+- `on`: periodically discover neighbor scopes and publish the neighbor table to the `neighbors` topic
+- `off`: disable periodic neighbors publishing
+
+**Default:** `off`
+
+> **Note:** Requires a PSRAM board. On non-PSRAM MQTT builds this replies
+> `Err - not supported (requires PSRAM)`. The setting is read live by the mesh
+> loop — no restart required; enabling it triggers a discovery on the next pass.
+> While enabled, `get mqtt.status` gains a trailing `nbr: <next>/<last>` field
+> (time to next publish, and how the last publish went).
+
+---
+
+#### View or change the neighbors publish interval (MQTT observer, PSRAM only)
+**Usage:**
+- `get mqtt.neighbors.interval`
+- `set mqtt.neighbors.interval <hours>`
+
+**Parameters:**
+- `hours`: how often to publish the neighbor table (12–336, default 24)
+
+**Default:** `24` (hours)
+
+> **Note:** Out-of-range values are rejected (not clamped). Requires a PSRAM board.
 
 ---
 
