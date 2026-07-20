@@ -946,8 +946,14 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
               (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
               (int)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
     } else if (memcmp(command, "start ota", 9) == 0) {
-      // Manual OTA: bring up the ElegantOTA SoftAP for a hand-uploaded binary.
-      if (!_board->startOTAUpdate(_prefs->node_name, reply)) {
+      // Manual OTA: bring up the ElegantOTA web UI for a hand-uploaded binary.
+      // Plain "start ota" serves on the station IP when joined to WiFi, else
+      // raises the MeshCore-OTA SoftAP. "start ota ap" forces the SoftAP even
+      // when connected, so the UI is reachable when the network applies client
+      // isolation and the station IP can't be reached. (&& short-circuits keep
+      // the [10]/[11] reads in-bounds when command == "start ota".)
+      bool force_ap = (command[9] == ' ' && command[10] == 'a' && command[11] == 'p');
+      if (!_board->startOTAUpdate(_prefs->node_name, reply, force_ap)) {
         strcpy(reply, "Error");
       }
     } else if (memcmp(command, "clock", 5) == 0) {
