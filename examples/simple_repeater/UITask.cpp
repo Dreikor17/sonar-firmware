@@ -135,7 +135,8 @@ void UITask::renderCurrScreen() {
       return;
     }
 #endif
-    // node name    _display->setCursor(0, 0);
+    // node name
+    _display->setCursor(0, 0);
     _display->setTextSize(1);
     _display->setColor(DisplayDriver::GREEN);
     _display->print(_node_prefs->node_name);
