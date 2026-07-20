@@ -1282,7 +1282,7 @@ void MyMesh::formatNeighborsReply(char *reply) {
 
     // add next neighbour
     uint32_t secs_ago = getRTCClock()->getCurrentTime() - neighbour->heard_timestamp;
-    sprintf(dp, "%s:%d:%d", hex, secs_ago, neighbour->snr);
+    sprintf(dp, "%s:%u:%d", hex, secs_ago, neighbour->snr);
     while (*dp)
       dp++; // find end of string
   }

@@ -94,6 +94,13 @@ struct PostInfo {
   char text[MAX_POST_TEXT_LEN+1];
 };
 
+struct NeighbourInfo {
+  mesh::Identity id;
+  uint32_t advert_timestamp;
+  uint32_t heard_timestamp;
+  int8_t snr; // multiplied by 4, user should divide to get float value
+};
+
 class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   FILESYSTEM* _fs;
   uint32_t last_millis;
@@ -123,6 +130,43 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   uint8_t pending_sf;
   uint8_t pending_cr;
   int  matching_peer_indexes[MAX_CLIENTS];
+#if defined(WITH_MQTT_NEIGHBORS)
+  NeighbourInfo neighbours[MAX_NEIGHBOURS];
+  uint32_t pending_discover_tag;
+  unsigned long pending_discover_until;
+  enum NeighborDiscoverStatus : uint8_t {
+    ND_PENDING = 1,
+    ND_RESPONDED = 2,
+    ND_TIMEOUT = 3,
+    ND_SEND_FAILED = 4,
+  };
+  struct NeighborDiscoverEntry {
+    uint8_t neighbour_idx;
+    uint32_t tag;
+    char scopes[96];
+    uint8_t status;
+  };
+  NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
+  uint8_t neighbor_discover_count;
+  bool neighbor_discover_active;
+  bool neighbor_table_refresh_active;
+  bool neighbor_table_refresh_periodic;
+  unsigned long neighbor_discover_until;
+  unsigned long next_neighbors_publish;
+  char self_scopes_buf[96];
+
+  void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
+  void sendNodeDiscoverReq();
+  bool sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag);
+  bool neighborDiscoverReady(char* reply);
+  bool startNeighborDiscover(char* reply);
+  void loopNeighborDiscover();
+  void finishNeighborDiscover();
+  bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
+  void getLocalScopes(char* buf, size_t len);
+  static const int NEIGHBOR_DISCOVER_PEER_BASE = 1000;
+  static const unsigned long NEIGHBOR_DISCOVER_TIMEOUT_MS = 30000;
+#endif
 #ifdef WITH_MQTT_BRIDGE
   MQTTBridge* bridge;
 #endif
@@ -176,6 +220,10 @@ protected:
   void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override;
   bool onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onAckRecv(mesh::Packet* packet, uint32_t ack_crc) override;
+#if defined(WITH_MQTT_NEIGHBORS)
+  void onAdvertRecv(mesh::Packet* packet, const mesh::Identity& id, uint32_t timestamp, const uint8_t* app_data, size_t app_data_len) override;
+  void onControlDataRecv(mesh::Packet* packet) override;
+#endif
 
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {
@@ -226,9 +274,8 @@ public:
   void dumpLogFile() override;
   void setTxPower(int8_t power_dbm) override;
 
-  void formatNeighborsReply(char *reply) override {
-    strcpy(reply, "not supported");
-  }
+  void formatNeighborsReply(char *reply) override;
+  void removeNeighbor(const uint8_t* pubkey, int key_len) override;
   void formatStatsReply(char *reply) override;
   void formatRadioStatsReply(char *reply) override;
   void formatPacketStatsReply(char *reply) override;
