@@ -226,6 +226,8 @@ TEST(MQTTPrefsCodec, CurrentVersionedPayloadRoundTripsExactly) {
   strncpy(source.mqtt_origin, "current-node", sizeof(source.mqtt_origin) - 1);
   strncpy(source.mqtt_slot_password[2], "preserve-me", sizeof(source.mqtt_slot_password[2]) - 1);
   strncpy(source.alert_region, "PNW", sizeof(source.alert_region) - 1);
+  source.mqtt_neighbors_enabled = 1;
+  source.mqtt_neighbors_interval = MQTT_NEIGHBORS_MAX_INTERVAL_MS;
   std::vector<uint8_t> bytes(Codec::kEncodedSize);
   ASSERT_EQ(Codec::kEncodedSize, Codec::encode(source, bytes.data(), bytes.size()));
 
@@ -264,6 +266,44 @@ TEST(MQTTPrefsCodec, CompatibleShortV1PayloadPreservesDefaultsBeyondObserverBoun
   EXPECT_EQ(0, loaded.snmp_enabled);
   EXPECT_STREQ("public", loaded.snmp_community);
   EXPECT_EQ(5, loaded.radio_watchdog_minutes);
+}
+
+TEST(MQTTPrefsCodec, PreNeighborsV1PayloadLoadsObserverFieldsAndDefaultsNeighborsTail) {
+  // A /mqtt_prefs written by observer/webconfig firmware before the neighbors
+  // tail existed: full observer fields, 2860-byte v1 payload. It must still load
+  // as Current (observer fields present) with the neighbors tail defaulted.
+  MQTTPrefs source = defaults();
+  strncpy(source.mqtt_origin, "pre-neighbors-node", sizeof(source.mqtt_origin) - 1);
+  strncpy(source.alert_region, "PNW", sizeof(source.alert_region) - 1);
+  source.snmp_enabled = 1;
+  source.alert_enabled = 1;
+  source.mqtt_neighbors_enabled = 0;            // old struct's byte 2857 was zero padding
+  source.mqtt_neighbors_interval = 0x11223344;  // must NOT survive a 2860-byte read
+
+  std::vector<uint8_t> bytes(sizeof(MQTTPrefsHeader) + Codec::kV1PreNeighborsPayloadSize, 0);
+  writeHeader(&bytes, MQTT_PREFS_VERSION,
+              static_cast<uint16_t>(Codec::kV1PreNeighborsPayloadSize));
+  memcpy(bytes.data() + sizeof(MQTTPrefsHeader), &source, Codec::kV1PreNeighborsPayloadSize);
+
+  const Codec::DecodePlan plan = classify(bytes);
+  ASSERT_EQ(Codec::Source::Current, plan.source);
+  ASSERT_EQ(Codec::kV1PreNeighborsPayloadSize, plan.payload_len);
+  ASSERT_FALSE(plan.preserve_file);
+  ASSERT_TRUE(plan.observer_fields_present);
+
+  MQTTPrefs loaded = defaults();
+  loaded.mqtt_neighbors_enabled = 1;                                   // pretend stale
+  loaded.mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;  // caller's defaulted tail
+  memcpy(&loaded, bytes.data() + sizeof(MQTTPrefsHeader), plan.payload_len);
+
+  EXPECT_STREQ("pre-neighbors-node", loaded.mqtt_origin);
+  EXPECT_STREQ("PNW", loaded.alert_region);
+  EXPECT_EQ(1, loaded.snmp_enabled);
+  EXPECT_EQ(1, loaded.alert_enabled);
+  // Enable flag sits at offset 2857 (inside the 2860 read) -> takes the file's 0.
+  // Interval begins at 2860 (beyond the read) -> keeps the caller's default.
+  EXPECT_EQ(0u, loaded.mqtt_neighbors_enabled);
+  EXPECT_EQ(MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS, loaded.mqtt_neighbors_interval);
 }
 
 TEST(MQTTPrefsCodec, CorruptOrShortVersionedInputsArePreserved) {

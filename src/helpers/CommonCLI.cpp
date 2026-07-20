@@ -807,6 +807,16 @@ void CommonCLI::loadMQTTPrefs(
     mqtt_rewrite_pending = true;
     MESH_DEBUG_PRINTLN("MQTT: Migrated observer settings from legacy /com_prefs trailing block");
   }
+
+  // Keep persisted values inside the signed-delta millis() scheduling window.
+  // This also repairs any manually-written or experimental value from firmware
+  // that briefly accepted intervals longer than the supported two-week cap.
+  if (_mqtt_prefs.mqtt_neighbors_interval < MQTT_NEIGHBORS_MIN_INTERVAL_MS ||
+      _mqtt_prefs.mqtt_neighbors_interval > MQTT_NEIGHBORS_MAX_INTERVAL_MS) {
+    _mqtt_prefs.mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;
+    MESH_DEBUG_PRINTLN("MQTT: invalid neighbors interval reset to %u hours",
+                       (unsigned)MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS);
+  }
   _legacy_tail.valid = false;
 
   if (mqtt_rewrite_pending) {

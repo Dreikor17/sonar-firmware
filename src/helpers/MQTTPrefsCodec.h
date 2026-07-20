@@ -36,6 +36,7 @@ struct DecodePlan {
 };
 
 static const size_t kV1PreObserverPayloadSize = MQTT_PREFS_V1_PRE_OBSERVER_PAYLOAD_SIZE;
+static const size_t kV1PreNeighborsPayloadSize = MQTT_PREFS_V1_PRE_NEIGHBORS_PAYLOAD_SIZE;
 static const size_t kV1BaselinePayloadSize = MQTT_PREFS_V1_FULL_PAYLOAD_SIZE;
 static const size_t kEncodedSize = sizeof(MQTTPrefsHeader) + kV1BaselinePayloadSize;
 
@@ -98,6 +99,12 @@ inline DecodePlan classify(const uint8_t* prefix, size_t prefix_read, size_t fil
       }
       if (header.payload_len == kV1BaselinePayloadSize) {
         return {Source::Current, false, false, true, kV1BaselinePayloadSize};
+      }
+      if (header.payload_len == kV1PreNeighborsPayloadSize) {
+        // Written by observer/webconfig firmware before the neighbors tail
+        // existed. The observer fields ARE present; only the neighbors tail is
+        // missing, so it loads and keeps its defaults (off / 24h).
+        return {Source::Current, false, false, true, kV1PreNeighborsPayloadSize};
       }
       if (header.payload_len == kV1PreObserverPayloadSize) {
         return {Source::Current, false, false, false, kV1PreObserverPayloadSize};
