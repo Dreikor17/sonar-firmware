@@ -320,14 +320,20 @@ void MQTTBridge::formatMqttStatsReply(char* buf, size_t bufsize) {
 #endif
 
   size_t outbox_total = 0;
+  unsigned long outbox_drops = 0;
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-    if (b->_slots[i].client) outbox_total += b->_slots[i].client->getOutboxSize();
+    if (b->_slots[i].client) {
+      outbox_total += b->_slots[i].client->getOutboxSize();
+      outbox_drops += b->_slots[i].client->getOutboxDrops();
+    }
   }
 
+  // drops=<outbox>/<skipped>: outbox-cap drops vs. memory-pressure skips.
   int pos = 0;
-  replyAppendf(buf, bufsize, &pos, "> Free=%d Max=%d q:%d/%d Outbox=%u |",
+  replyAppendf(buf, bufsize, &pos, "> Free=%d Max=%d q:%d/%d Outbox=%u drops=%lu/%d |",
                (int)ESP.getFreeHeap(), (int)ESP.getMaxAllocHeap(),
-               q, MAX_QUEUE_SIZE, (unsigned)outbox_total);
+               q, MAX_QUEUE_SIZE, (unsigned)outbox_total,
+               outbox_drops, b->_skipped_publishes);
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (!b->_slots[i].enabled || !b->_slots[i].client) continue;
     replyAppendf(buf, bufsize, &pos, " s%d=%lu/%lu", i + 1,
