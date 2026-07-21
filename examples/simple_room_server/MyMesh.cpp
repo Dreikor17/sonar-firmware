@@ -1176,6 +1176,10 @@ void MyMesh::formatRadioStatsReply(char *reply) {
   StatsFormatHelper::formatRadioStats(reply, _radio, radio_driver, getTotalAirTime(), getReceiveAirTime());
 }
 
+void MyMesh::formatRadioDiagReply(char *reply) {
+  StatsFormatHelper::formatRadioDiag(reply, _radio, radio_driver, *_ms, _err_flags, hasOutbound());
+}
+
 void MyMesh::formatPacketStatsReply(char *reply) {
   StatsFormatHelper::formatPacketStats(reply, radio_driver, getNumSentFlood(), getNumSentDirect(), 
                                        getNumRecvFlood(), getNumRecvDirect());
@@ -1584,6 +1588,25 @@ void MyMesh::loop() {
       long remaining_ms = (long)(next_neighbors_publish - futureMillis(0));
       uint32_t remaining_secs = remaining_ms > 0 ? (uint32_t)(remaining_ms / 1000) : 0;
       bridge->setNeighborsSchedule(MQTTBridge::NBR_SCHEDULED, remaining_secs);
+    }
+  }
+#endif
+
+#ifdef WITH_SNMP
+  // Push radio stats to SNMP agent every 2 seconds
+  if (_snmp_agent.isRunning()) {
+    static unsigned long last_snmp_stats = 0;
+    if (now - last_snmp_stats >= 2000) {
+      last_snmp_stats = now;
+      _snmp_agent.updateRadioStats(
+        radio_driver.getPacketsRecv(), radio_driver.getPacketsSent(),
+        radio_driver.getPacketsRecvErrors(),
+        (int16_t)_radio->getNoiseFloor(),
+        (int16_t)radio_driver.getLastRSSI(),
+        (int16_t)(radio_driver.getLastSNR() * 4),
+        getNumSentFlood(), getNumSentDirect(),
+        getNumRecvFlood(), getNumRecvDirect(),
+        getTotalAirTime() / 1000, uptime_millis / 1000);
     }
   }
 #endif
