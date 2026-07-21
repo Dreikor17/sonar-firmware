@@ -842,12 +842,20 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
     } else if (memcmp(subcmd, "username", 8) == 0) {
       sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_username[slot]);
     } else if (memcmp(subcmd, "password", 8) == 0) {
-      sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_password[slot]);
+      // Serial only; remote sees set/unset.
+      if (sender_timestamp == 0) {
+        sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_password[slot]);
+      } else {
+        strcpy(reply, _mqtt_prefs.mqtt_slot_password[slot][0] ? "> ******** (serial only)" : "> (not set)");
+      }
     } else if (memcmp(subcmd, "token", 5) == 0) {
-      if (_mqtt_prefs.mqtt_slot_token[slot][0] != '\0') {
+      // Serial only; remote sees set/unset.
+      if (_mqtt_prefs.mqtt_slot_token[slot][0] == '\0') {
+        strcpy(reply, "> (not set)");
+      } else if (sender_timestamp == 0) {
         sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_token[slot]);
       } else {
-        strcpy(reply, "> (not set)");
+        strcpy(reply, "> ******** (serial only)");
       }
     } else if (memcmp(subcmd, "topic", 5) == 0) {
       if (_mqtt_prefs.mqtt_slot_topic[slot][0] != '\0') {
@@ -869,7 +877,12 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "wifi.ssid", 9) == 0) {
     sprintf(reply, "> %s", _mqtt_prefs.wifi_ssid);
   } else if (memcmp(config, "wifi.pwd", 8) == 0) {
-    sprintf(reply, "> %s", _mqtt_prefs.wifi_password);
+    // Serial only (WiFi creds grant LAN access); remote sees set/unset.
+    if (sender_timestamp == 0) {
+      sprintf(reply, "> %s", _mqtt_prefs.wifi_password);
+    } else {
+      strcpy(reply, _mqtt_prefs.wifi_password[0] ? "> ******** (serial only)" : "> (not set)");
+    }
   } else if (memcmp(config, "wifi.status", 11) == 0) {
     wl_status_t status = WiFi.status();
     const char* status_str;
