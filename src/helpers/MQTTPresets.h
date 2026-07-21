@@ -130,7 +130,7 @@ static const char ISRG_ROOT_X1[] PROGMEM =
     "-----END CERTIFICATE-----\n";
 
 // Number of built-in presets
-static const int MQTT_PRESET_COUNT = 28;
+static const int MQTT_PRESET_COUNT = 29;
 
 // Built-in preset definitions (stored in flash)
 static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
@@ -166,6 +166,7 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "ipnt.uk",         "wss://mqtt.ipnt.uk:443",                    "mqtt.ipnt.uk",                    ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "flmesh",       "wss://mcmqtt.jntconnections.com:443",       "mcmqtt.jntconnections.com",       GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     { "corecomms",     "wss://mqtt.corecomms.net:443/mqtt",       "mqtt.corecomms.net",              GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "meshtexas",     "wss://mqtt.meshtexas.org:443/mqtt",       "mqtt.meshtexas.org",              GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
     // Username is device pubkey hex at connect; password from mqttN.password. No TLS.
     { "mesh-chaun14",  "mqtt://mqtt.mesh.chaun14.fr:1884",        nullptr,                           nullptr,       MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   60,      MQTT_USERPASS_USERNAME_PUBKEY, nullptr },
     // LetsMesh-compatible JWT; TLS is Let's Encrypt (ISRG Root X1), not GTS.
