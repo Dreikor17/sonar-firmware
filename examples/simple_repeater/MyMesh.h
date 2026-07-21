@@ -394,6 +394,26 @@ public:
     auto* obs = _cli.getObserverPrefs();
     if (obs && obs->alert_enabled) _alerter.sendText(msg);
   }
+
+  // Best-effort flush of the outbound packet queue before an OTA teardown that
+  // blocks the loop until reboot. The START alert (otaAlert) and the CLI reply
+  // are queued fire-and-forget (delay 0 / CLI_REPLY_DELAY_MILLIS); once
+  // setBridgeState(false) + otaFromManifest() run they spin the loop task until
+  // the chip reboots, so anything still in the send queue at that point is
+  // silently lost — the observed "OTA update starting never arrives" case on a
+  // busy / duty-limited channel where the packet can't win a TX slot inside the
+  // 2.5 s window. Pump the mesh loop so already-queued packets get their airtime,
+  // bounded by timeout_ms so a jammed or budget-exhausted channel can't stall the
+  // update. Respects duty cycle / CAD: it only drains what is queued, it does not
+  // force a transmit. Returns instantly on a healthy node (queue already empty).
+  void drainOutbound(uint32_t timeout_ms) {
+    unsigned long start = millis();
+    while (hasOutbound() || _mgr->getOutboundCount(millis()) > 0) {
+      if (millis() - start >= timeout_ms) break;
+      mesh::Mesh::loop();  // base dispatcher only — drives RX + checkSend()/TX
+      delay(1);            // yield to the radio ISR / other FreeRTOS tasks
+    }
+  }
 #endif
 
   // Schedule the pull-OTA flash to run from loop() in ~2.5 s, leaving time for the

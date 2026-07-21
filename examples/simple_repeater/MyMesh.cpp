@@ -60,6 +60,12 @@
 
 #define CLI_REPLY_DELAY_MILLIS      600
 
+// Max time to flush the outbound queue (START alert + CLI reply) before the OTA
+// teardown blocks the loop until reboot. Best-effort: exits early once the queue
+// drains (immediate on a healthy node), caps the wait on a jammed/duty-limited
+// channel so an update is never stalled indefinitely.
+#define OTA_TX_DRAIN_TIMEOUT_MS     5000
+
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
@@ -1652,6 +1658,10 @@ void MyMesh::loop() {
     // (so this never returns); on any abort (already up to date, partition change,
     // download error) it returns and we resume the bridge.
     Serial.println("OTA: starting update");
+    // Flush the START alert (and CLI reply) out the radio BEFORE teardown blocks
+    // the loop until reboot — otherwise a packet still queued here (busy /
+    // duty-limited channel) is lost when the flash spins the loop and reboots.
+    drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
     setBridgeState(false);
     char ota_reply[160];
     // OTA teardown barrier (Phase 5): only flash after a CLEAN MQTT shutdown.

@@ -1111,7 +1111,16 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       strcpy(reply, "Error: alert channel not configured (set alert.psk or set alert.hashtag)");
     } else {
       bool ok = _callbacks->sendAlertText(text);
-      strcpy(reply, ok ? "OK - alert sent" : "Error: alert send failed (bad PSK or PUBLIC key refused?)");
+      if (!ok) {
+        strcpy(reply, "Error: alert send failed (bad PSK or PUBLIC key refused?)");
+      } else if (!_mqtt_prefs.alert_enabled) {
+        // `alert test` deliberately bypasses the master switch, so a successful
+        // send here does NOT mean automatic WiFi/MQTT/OTA alerts will fire — those
+        // gate on `alert on`. Flag it so a working test can't give false confidence.
+        strcpy(reply, "OK - test sent, but automatic alerts are OFF (run 'set alert on')");
+      } else {
+        strcpy(reply, "OK - alert sent");
+      }
     }
     return true;
   }

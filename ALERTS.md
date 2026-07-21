@@ -77,7 +77,7 @@ Set:
 - `set alert.interval <minutes>` (60-10080; 60-minute floor to protect mesh airtime)
 
 Action:
-- `alert test` - send a one-off `[test] alert channel ok` immediately on the configured channel; ignores `alert on/off` so operators can verify the channel before enabling fault firing. Returns an error if no channel is configured.
+- `alert test` - send a one-off `[test] alert channel ok` immediately on the configured channel; ignores `alert on/off` so operators can verify the channel before enabling fault firing. Returns an error if no channel is configured. If the send succeeds but the `alert` master switch is still `off`, the reply says so (`OK - test sent, but automatic alerts are OFF`) - a working test alone does **not** mean automatic WiFi/MQTT/OTA alerts will fire.
 - `alert test <message>` - send a custom test message: `[test] <message>`.
 
 ## Example: dedicated hashtag channel (recommended for operator groups)
