@@ -30,6 +30,10 @@
 #define WITH_BRIDGE
 #endif
 
+#ifdef WITH_SNMP
+#include "helpers/SNMPAgent.h"
+#endif
+
 /* ------------------------------ Config -------------------------------- */
 
 #ifndef FIRMWARE_BUILD_DATE
@@ -171,6 +175,9 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #ifdef WITH_MQTT_BRIDGE
   MQTTBridge* bridge;
 #endif
+#ifdef WITH_SNMP
+  MeshSNMPAgent _snmp_agent;
+#endif
 #ifdef WITH_MQTT_BRIDGE
   AlertReporter _alerter;
 #endif
@@ -279,6 +286,7 @@ public:
   void removeNeighbor(const uint8_t* pubkey, int key_len) override;
   void formatStatsReply(char *reply) override;
   void formatRadioStatsReply(char *reply) override;
+  void formatRadioDiagReply(char *reply) override;
   void formatPacketStatsReply(char *reply) override;
   void startRegionsLoad() override;
   bool saveRegions() override;
@@ -313,6 +321,13 @@ public:
       bridge->setBuildDate(getBuildDate());
 #ifdef WITH_MQTT_BRIDGE
       bridge->setStatsSources(this, _radio, _cli.getBoard(), _ms);
+#ifdef WITH_SNMP
+      if (_cli.getObserverPrefs()->snmp_enabled) {
+        _snmp_agent.setNodeName(_prefs.node_name);
+        _snmp_agent.setFirmwareVersion(getFirmwareVer());
+        bridge->setSNMPAgent(&_snmp_agent);
+      }
+#endif
 #endif
       bridge->begin();
 #ifdef WITH_MQTT_BRIDGE
