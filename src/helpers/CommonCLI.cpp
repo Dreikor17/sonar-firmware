@@ -20,6 +20,7 @@
 #include "bridges/MQTTBridge.h"
 #include "MQTTDefaults.h"
 #include "MQTTPrefsCodec.h"
+#include "MQTTPrefsRecovery.h"
 #endif
 
 // Believe it or not, this std C function is busted on some platforms!
@@ -473,20 +474,85 @@ static void setMQTTPrefsDefaults(MQTTPrefs* prefs) {
   applyMQTTDefaults(prefs);
 }
 
-static File openMqttPrefsRead(FILESYSTEM* fs) {
+static File openMqttPrefsRead(FILESYSTEM* fs, const char* path = "/mqtt_prefs") {
 #if defined(RP2040_PLATFORM)
-  return fs->open("/mqtt_prefs", "r");
+  return fs->open(path, "r");
 #else
-  return fs->open("/mqtt_prefs");
+  return fs->open(path);
 #endif
 }
 
-// Filesystem adapter for MQTTPrefsAtomicStore. It writes the new image only to
-// /mqtt_prefs.tmp, verifies size, then publishes by renaming over /mqtt_prefs.
-// ESP32 targets use SPIFFS, whose rename refuses an existing destination
-// (SPIFFS_ERR_CONFLICTING_NAME) — so commit() must remove /mqtt_prefs first.
-// That is a brief non-atomic window; the verified tmp remains until rename
-// succeeds, and abort() cleans it up on failure.
+static MQTTPrefsRecovery::FileState mqttPrefsFileState(FILESYSTEM* fs, const char* path) {
+  if (!fs->exists(path)) return MQTTPrefsRecovery::FileState::Missing;
+  File file = openMqttPrefsRead(fs, path);
+  if (!file) return MQTTPrefsRecovery::FileState::Preserve;
+  const size_t file_size = file.size();
+  uint8_t prefix[sizeof(MQTTPrefsHeader)] = {};
+  const size_t prefix_size = file_size < sizeof(prefix) ? file_size : sizeof(prefix);
+  const size_t prefix_read = file.read(prefix, prefix_size);
+  file.close();
+  return MQTTPrefsCodec::classify(prefix, prefix_read, file_size).preserve_file
+      ? MQTTPrefsRecovery::FileState::Preserve
+      : MQTTPrefsRecovery::FileState::Usable;
+}
+
+// Restore the only usable image before the normal loader inspects /mqtt_prefs.
+// SPIFFS cannot rename over an existing destination, so publishing moves the
+// old primary to .bak before moving the verified temp into the empty name.
+// The decision helper deliberately treats unsupported/corrupt files as opaque:
+// no recovery path overwrites one with an older layout.
+static bool recoverMqttPrefsFiles(FILESYSTEM* fs) {
+  const MQTTPrefsRecovery::FileState primary = mqttPrefsFileState(fs, "/mqtt_prefs");
+  const MQTTPrefsRecovery::FileState temp = mqttPrefsFileState(fs, "/mqtt_prefs.tmp");
+  const MQTTPrefsRecovery::FileState backup = mqttPrefsFileState(fs, "/mqtt_prefs.bak");
+  const MQTTPrefsRecovery::Action action = MQTTPrefsRecovery::select(primary, temp, backup);
+
+  if (action == MQTTPrefsRecovery::Action::KeepPrimary) {
+    // A current/known legacy primary has already published. Every transaction
+    // artifact is therefore unpublished or stale, including a partial temp
+    // left by a reset during write(), and can be discarded. Preserve artifacts
+    // only when the primary itself is opaque (the branch above still keeps it).
+    if (primary == MQTTPrefsRecovery::FileState::Usable) {
+      if (temp != MQTTPrefsRecovery::FileState::Missing) fs->remove("/mqtt_prefs.tmp");
+      if (backup != MQTTPrefsRecovery::FileState::Missing) fs->remove("/mqtt_prefs.bak");
+    }
+    return false;
+  }
+  if (action == MQTTPrefsRecovery::Action::PromoteTemp) {
+    if (fs->rename("/mqtt_prefs.tmp", "/mqtt_prefs")) {
+      // A usable temp is now the committed primary. Its backup is necessarily
+      // a stale transaction artifact, even if this firmware cannot decode it.
+      if (temp == MQTTPrefsRecovery::FileState::Usable &&
+          backup != MQTTPrefsRecovery::FileState::Missing) {
+        fs->remove("/mqtt_prefs.bak");
+      }
+      MESH_DEBUG_PRINTLN("MQTT: recovered /mqtt_prefs from transaction temp");
+      return false;
+    }
+    MESH_DEBUG_PRINTLN("MQTT: could not recover /mqtt_prefs temp; files preserved");
+    return true;
+  }
+  if (action == MQTTPrefsRecovery::Action::PromoteBackup) {
+    if (fs->rename("/mqtt_prefs.bak", "/mqtt_prefs")) {
+      // Symmetric case: a usable backup is now primary, so any interrupted
+      // temp is no longer authoritative and must not block a later save.
+      if (backup == MQTTPrefsRecovery::FileState::Usable &&
+          temp != MQTTPrefsRecovery::FileState::Missing) {
+        fs->remove("/mqtt_prefs.tmp");
+      }
+      MESH_DEBUG_PRINTLN("MQTT: recovered /mqtt_prefs from transaction backup");
+      return false;
+    }
+    MESH_DEBUG_PRINTLN("MQTT: could not recover /mqtt_prefs backup; files preserved");
+    return true;
+  }
+  return false;
+}
+
+// Filesystem adapter for MQTTPrefsAtomicStore. It writes the new image to
+// /mqtt_prefs.tmp and verifies its size. Publishing is a recoverable SPIFFS
+// transaction: primary -> .bak, then tmp -> primary, then best-effort backup
+// cleanup. A power loss at every boundary leaves at least one recoverable file.
 class MQTTPrefsFileStore {
 public:
   explicit MQTTPrefsFileStore(FILESYSTEM* fs) : _fs(fs) {}
@@ -494,17 +560,13 @@ public:
   bool begin() {
     _finished = false;
     _open = false;
+    _owns_temp = false;
     _bytes_written = 0;
-    // Clear only a stale, unpublished transaction. Guarded on exists(): on the
-    // normal path commit() renames the tmp away, so there is nothing to remove
-    // and an unconditional remove() makes the ESP32 VFS layer log
-    // "[E] vfs_api.cpp remove(): /mqtt_prefs.tmp does not exists" on EVERY save.
-    // Functionally harmless, but it looks like a fault to operators reading the
-    // serial log during a config change.
-    if (_fs->exists("/mqtt_prefs.tmp")) {
-      _fs->remove("/mqtt_prefs.tmp");
-      if (_fs->exists("/mqtt_prefs.tmp")) return false;  // could not clear it
-    }
+    // Recovery owns stale artifacts. Do not delete them here: a failed commit
+    // may have moved the old primary to .bak and left a verified temp that the
+    // next boot must choose between. Refusing the save is safer than erasing an
+    // image this firmware cannot decode.
+    if (_fs->exists("/mqtt_prefs.tmp") || _fs->exists("/mqtt_prefs.bak")) return false;
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
     _file = _fs->open("/mqtt_prefs.tmp", FILE_O_WRITE);
 #elif defined(RP2040_PLATFORM)
@@ -513,6 +575,7 @@ public:
     _file = _fs->open("/mqtt_prefs.tmp", "w", true);
 #endif
     _open = _file;
+    _owns_temp = _open;
     return _open;
   }
 
@@ -542,19 +605,32 @@ public:
 
   bool commit() {
     if (!_finished) return false;
-    // SPIFFS: rename(tmp, dest) fails when dest exists. LittleFS/POSIX replace
-    // in place; remove-then-rename is required on ESP32 and correct elsewhere.
-    if (_fs->exists("/mqtt_prefs") && !_fs->remove("/mqtt_prefs")) {
+    // SPIFFS refuses rename(tmp, existing_dest). Move the existing image to a
+    // recoverable backup first, then publish temp into the now-empty primary.
+    // Never remove either image after a failed boundary; boot recovery selects
+    // the completed temp or restores the backup.
+    if (_fs->exists("/mqtt_prefs.bak")) return false;
+    if (_fs->exists("/mqtt_prefs") && !_fs->rename("/mqtt_prefs", "/mqtt_prefs.bak")) {
       return false;
     }
-    return _fs->rename("/mqtt_prefs.tmp", "/mqtt_prefs");
+    if (!_fs->rename("/mqtt_prefs.tmp", "/mqtt_prefs")) return false;
+    // Cleanup failure is non-fatal: the new primary is published and recovery
+    // will remove a known-good stale backup on a later boot.
+    if (_fs->exists("/mqtt_prefs.bak")) _fs->remove("/mqtt_prefs.bak");
+    return true;
   }
 
   void abort() {
     if (_open) _file.close();
     _open = false;
+    // Once finish() has verified the temp, commit may already have moved the
+    // primary to .bak. Keep the temp on a commit failure so recovery can
+    // publish it (or fall back to .bak) after reset.
+    if (_owns_temp && !_finished && _fs->exists("/mqtt_prefs.tmp")) {
+      _fs->remove("/mqtt_prefs.tmp");
+    }
     _finished = false;
-    if (_fs->exists("/mqtt_prefs.tmp")) _fs->remove("/mqtt_prefs.tmp");
+    _owns_temp = false;
   }
 
 private:
@@ -562,6 +638,7 @@ private:
   File _file;
   bool _open = false;
   bool _finished = false;
+  bool _owns_temp = false;
   size_t _bytes_written = 0;
 };
 
@@ -684,7 +761,10 @@ static const char* mqttPrefsSaveResultName(MQTTPrefsAtomicStore::Result result) 
 void CommonCLI::loadMQTTPrefs(
     FILESYSTEM* fs, MQTTPrefsAtomicStore::LegacyUpgradeGate* legacy_upgrade) {
   setMQTTPrefsDefaults(&_mqtt_prefs);
-  _mqtt_prefs_hold = false;
+  // Complete or preserve an interrupted SPIFFS transaction before decoding.
+  // A failed recovery leaves the artifacts untouched and blocks this boot from
+  // replacing them with defaults through a later CLI save.
+  _mqtt_prefs_hold = recoverMqttPrefsFiles(fs);
   bool has_observer_fields = false;
   bool mqtt_rewrite_pending = false;
   bool migrated_legacy_mqtt = false;
