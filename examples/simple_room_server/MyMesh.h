@@ -125,6 +125,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   RegionEntry* recv_pkt_region;
   TransportKey default_scope;
   unsigned long set_radio_at, revert_radio_at;
+  unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
   float pending_freq;
   float pending_bw;
   uint8_t pending_sf;
@@ -350,6 +351,15 @@ public:
 #else
     (void)slot;
 #endif
+  }
+
+  // Schedule the pull-OTA flash to run from loop() in ~2.5 s, leaving time for the
+  // "Beginning update..." CLI reply (CLI_REPLY_DELAY_MILLIS = 600 ms) to transmit
+  // before the flash blocks the loop and reboots.
+  bool beginDeferredOtaUpdate() override {
+    _ota_update_at = millis() + 2500;
+    if (_ota_update_at == 0) _ota_update_at = 1;  // 0 means "none"
+    return true;
   }
 
   int getQueueSize() override {
