@@ -23,6 +23,10 @@
 
 #define RESP_SERVER_LOGIN_OK        0 // response to ANON_REQ
 
+// Best-effort bound for the queued CLI reply before OTA blocks the loop and
+// reboots.  Do not let a busy or duty-limited channel stall the update forever.
+#define OTA_TX_DRAIN_TIMEOUT_MS     5000
+
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
 struct ServerStats {
@@ -1501,15 +1505,36 @@ void MyMesh::loop() {
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
   if (_ota_update_at && millisHasNowPassed(_ota_update_at)) { // deferred `ota update`
     _ota_update_at = 0;                                       // clear timer
-    // The "Beginning update..." reply has now gone out. Free the bridge for heap
-    // headroom, then flash: otaFromManifest reboots into the new image on success
-    // (so this never returns); on any abort (already up to date, partition change,
-    // download error) it returns and we resume the bridge.
+    // The "Beginning update..." reply has now been queued.  Flush it before OTA
+    // blocks the loop until reboot, then free a running bridge for heap headroom.
+    // Remember its state: an OTA request must not enable MQTT that an operator
+    // had deliberately stopped.
     Serial.println("OTA: starting update");
-    setBridgeState(false);
+    const bool bridge_was_running = bridge && bridge->isRunning();
+    drainOutbound(OTA_TX_DRAIN_TIMEOUT_MS);
+
+    bool may_flash = true;
+    if (bridge_was_running) {
+      setBridgeState(false);
+      // OTA must not write after a forced/timed-out MQTT shutdown: its TLS/heap
+      // ownership is uncertain until a subsequent clean start/stop cycle.
+      may_flash = bridge && bridge->canFlashAfterStop();
+      if (!may_flash) {
+        Serial.println("OTA: aborted, MQTT stop did not complete cleanly");
+      }
+    }
+
     char ota_reply[160];
-    if (!_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
-      Serial.print("OTA: aborted, resuming bridge - "); Serial.println(ota_reply);
+    if (may_flash && !_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+      Serial.print("OTA: aborted - "); Serial.println(ota_reply);
+      may_flash = false;
+    }
+
+    // Successful otaFromManifest() reboots and never returns.  Restore only a
+    // bridge that was running before this attempt; leave an intentionally
+    // stopped bridge stopped after any OTA refusal or download failure.
+    if (!may_flash && bridge_was_running) {
+      Serial.println("OTA: resuming bridge");
       setBridgeState(true);
     }
   }

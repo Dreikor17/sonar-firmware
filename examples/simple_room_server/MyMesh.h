@@ -391,6 +391,20 @@ public:
 #endif
   }
 
+#if defined(WITH_MQTT_BRIDGE)
+  // Pump already-queued mesh traffic before OTA blocks the loop and reboots.
+  // This is deliberately bounded: a jammed or duty-limited channel must not
+  // prevent an update, and Mesh::loop() continues to respect TX constraints.
+  void drainOutbound(uint32_t timeout_ms) {
+    unsigned long start = millis();
+    while (hasOutbound() || _mgr->getOutboundCount(millis()) > 0) {
+      if (millis() - start >= timeout_ms) break;
+      mesh::Mesh::loop();
+      delay(1);
+    }
+  }
+#endif
+
   // Schedule the pull-OTA flash to run from loop() in ~2.5 s, leaving time for the
   // "Beginning update..." CLI reply (CLI_REPLY_DELAY_MILLIS = 600 ms) to transmit
   // before the flash blocks the loop and reboots.
