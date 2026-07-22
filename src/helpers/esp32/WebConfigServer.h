@@ -110,7 +110,7 @@ private:
     }
   }
   struct BatchEntry {
-    char key[24];     // allowlisted `set` key (echoed back to the UI)
+    char key[24];     // allowlisted config key (echoed back to the UI)
     char cmd[160];    // full CLI command (may contain secrets - never echoed)
     char reply[160];
   };
@@ -129,6 +129,7 @@ private:
   Mode _mode = MODE_OFF;
   bool _stopping = false;
   bool _was_setup_ap = false;
+  bool _initial_setup = false;
   char _ap_ssid[33] = {0};
 
   // Currently attached session, also used by the display's setup-info poll.

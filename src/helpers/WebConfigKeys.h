@@ -14,7 +14,8 @@
 
 // Keys mapping to CLI `set <key> <value>` handlers. Everything not listed here
 // is rejected, so a crafted request can't reach arbitrary commands (`erase`,
-// `password`, ...) through the batch.
+// etc.) through the batch. The portal's admin-password field is classified
+// separately, see wcIsAdminPasswordKey below.
 static const char* const WC_ALLOWED_SET_KEYS[] = {
   // NodePrefs (radio / node)
   "name", "lat", "lon", "radio", "tx", "af", "rxdelay", "txdelay",
@@ -51,6 +52,24 @@ static inline bool wcIsAllowedSetKey(const char* key) {
     }
   }
   return false;
+}
+
+// The admin password maps to the top-level `password` command, not a setter, so
+// it is classified apart from the `set` allowlist. It is the only key that gets
+// this treatment, which is what keeps the allowlist the sole route to `set` and
+// leaves no general path from a batch to arbitrary top-level CLI commands.
+static inline bool wcIsAdminPasswordKey(const char* key) {
+  return strcmp(key, "password") == 0;
+}
+
+static inline bool wcIsValidAdminPassword(const char* value) {
+  if (value == NULL) return false;
+  const size_t len = strlen(value);
+  if (len == 0 || len > 15) return false;  // NodePrefs::password[16], including NUL
+  for (size_t i = 0; i < len; i++) {
+    if (value[i] == '\r' || value[i] == '\n') return false;  // reject, never silently strip
+  }
+  return true;
 }
 
 // Keys carrying a secret whose stored value is masked with the placeholder in

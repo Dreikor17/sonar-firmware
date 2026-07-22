@@ -34,6 +34,23 @@ TEST(WebConfigKeys, RejectsDangerousOrUnknownKeys) {
   EXPECT_FALSE(wcIsAllowedSetKey(""));
 }
 
+TEST(WebConfigKeys, AdminPasswordIsNotAnAllowlistedSetKey) {
+  EXPECT_TRUE(wcIsAdminPasswordKey("password"));
+  EXPECT_FALSE(wcIsAdminPasswordKey("admin.password"));
+  EXPECT_FALSE(wcIsAdminPasswordKey(""));
+  EXPECT_FALSE(wcIsAllowedSetKey("password"));  // never reachable as `set password`
+}
+
+TEST(WebConfigKeys, AdminPasswordFitsNodePrefsAndRejectsLineBreaks) {
+  EXPECT_FALSE(wcIsValidAdminPassword(NULL));
+  EXPECT_FALSE(wcIsValidAdminPassword(""));
+  EXPECT_TRUE(wcIsValidAdminPassword("new-password"));
+  EXPECT_TRUE(wcIsValidAdminPassword("123456789012345"));
+  EXPECT_FALSE(wcIsValidAdminPassword("1234567890123456"));
+  EXPECT_FALSE(wcIsValidAdminPassword("line\nbreak"));
+  EXPECT_FALSE(wcIsValidAdminPassword("line\rbreak"));
+}
+
 TEST(WebConfigKeys, SlotIndexBoundsMatchMaxSlots) {
   EXPECT_FALSE(wcIsAllowedSetKey("mqtt0.preset"));  // slot 0 invalid
   EXPECT_TRUE(wcIsAllowedSetKey("mqtt6.preset"));   // last valid slot

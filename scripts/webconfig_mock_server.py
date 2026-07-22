@@ -108,6 +108,8 @@ class State:
         self.setup_mode = args.setup
         self.active_slots = args.active_slots
         self.cfg = default_config(args.setup)
+        # latched at AP start, like WebConfigServer::_initial_setup
+        self.initial_setup = args.setup and self.cfg["wifi"]["ssid"] == ""
         self.start = time.time()
         self.session = None            # cookie token when logged in (LAN mode)
         self.batch = {"state": "idle"}
@@ -180,6 +182,14 @@ def apply_set(cfg, key, val):
     # length guard for the plain string fields
     if key in LEN_LIMITS and len(val) > LEN_LIMITS[key]:
         return False, "Error: %s too long (max %d chars)" % (key, LEN_LIMITS[key])
+
+    if key == "password":
+        # Stored outside cfg: it must never appear in the /api/config GET. The
+        # firmware overwrites the CLI's "password now: <secret>" echo, so the
+        # reply carries no secret either.
+        global ADMIN_PASSWORD
+        ADMIN_PASSWORD = val
+        return True, "OK"
 
     if key == "radio":
         try:
@@ -392,6 +402,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "bad reqid"})
         reboot = bool(body.get("reboot", False))
         setmap = body.get("set", {}) or {}
+
+        # `password` maps to the top-level CLI command rather than a setter. It
+        # is accepted in both modes (LAN already required a login), but first
+        # onboarding cannot finish without it.
+        if "password" in setmap:
+            pwd = str(setmap["password"])
+            if not 0 < len(pwd) <= 15 or "\r" in pwd or "\n" in pwd:
+                return self._json(400, {"error": "admin password must be 1-15 characters with no line breaks"})
+        elif ST.setup_mode and ST.initial_setup and (reboot or "wifi.ssid" in setmap):
+            return self._json(400, {"error": "admin password required for initial setup"})
 
         with ST.lock:
             if ST.batch.get("state") != "idle" and ST.batch.get("reqid") == reqid:

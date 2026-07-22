@@ -127,6 +127,7 @@ bool WebConfigServer::startSetupMode(char reply[]) {
   _dns->start(53, "*", ip);  // captive portal: every name resolves to us
 
   _mode = MODE_SETUP;
+  _initial_setup = (_obs->wifi_ssid[0] == 0);
   createServer();
   _was_setup_ap = true;
   _last_activity = millis();
@@ -229,6 +230,7 @@ void WebConfigServer::finalizeTeardown() {
     }
     _was_setup_ap = false;
   }
+  _initial_setup = false;
   _stopping = false;
   _stop_warn_at = 0;
   _stop_warned = false;
@@ -314,6 +316,10 @@ void WebConfigServer::drainBatch(uint32_t now) {
       WCLock lock(_mux);
       _cb->execCommand(e.cmd, e.reply);
       if (e.reply[0] == 0) strcpy(e.reply, "OK");
+      // The upstream `password` command echoes the new password back in its
+      // reply, and replies are served to the client over the open setup AP.
+      // Overwrite it: the command cannot fail, so there is nothing to report.
+      if (wcIsAdminPasswordKey(e.key)) strcpy(e.reply, "OK");
       // Success convention across every allowlisted setter is an "OK" prefix
       // (the UI relies on the same test); anything else is a rejection.
       _batch_all_ok = WebConfigBatch::nextAllOk(_batch_all_ok,
@@ -680,11 +686,25 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
     return;
   }
 
+  // First onboarding is not complete until the known factory password has
+  // been replaced. Enforce this server-side so the Advanced editor or a crafted
+  // request cannot save WiFi and strand the node with the default password.
+  if (_mode == MODE_SETUP && _initial_setup && !set.containsKey("password") &&
+      (reboot_after || set.containsKey("wifi.ssid"))) {
+    req->send(400, "application/json", "{\"error\":\"admin password required for initial setup\"}");
+    return;
+  }
+
   int count = 0;
   for (JsonPair kv : set) {
     const char* key = kv.key().c_str();
     const char* val = kv.value().as<const char*>();
-    if (!val || !isAllowedSetKey(key)) {
+    // The admin password is the one key outside the `set` allowlist. It is safe
+    // in both modes: MODE_OFF was refused above, MODE_LAN required a login to
+    // get here, and MODE_SETUP has physical proximity. Rotating it is why the
+    // portal exists — restricting it to the AP would force a bridge outage.
+    const bool admin_pwd = wcIsAdminPasswordKey(key);
+    if (!val || (!isAllowedSetKey(key) && !admin_pwd)) {
       // Build with ArduinoJson so an attacker-supplied key containing quotes or
       // backslashes is escaped rather than breaking out of the JSON string.
       char safe_key[33];
@@ -698,6 +718,11 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
       req->send(400, "application/json", out);
       return;
     }
+    if (admin_pwd && !wcIsValidAdminPassword(val)) {
+      req->send(400, "application/json",
+                "{\"error\":\"admin password must be 1-15 characters with no line breaks\"}");
+      return;
+    }
     if (isSecretKey(key) && strcmp(val, SECRET_SENTINEL) == 0) continue;  // unchanged
     if (count >= MAX_BATCH) {
       req->send(400, "application/json", "{\"error\":\"too many changes\"}");
@@ -706,9 +731,11 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
     BatchEntry& e = _batch[count];
     strncpy(e.key, key, sizeof(e.key) - 1);
     e.key[sizeof(e.key) - 1] = 0;
-    // Build "set <key> <value>", stripping CR/LF so a value can't smuggle in
-    // a second command.
-    int pos = snprintf(e.cmd, sizeof(e.cmd), "set %s ", key);
+    // Build the allowlisted CLI command, stripping CR/LF from the value so it
+    // can't smuggle in a second command. The admin password reuses the existing
+    // top-level `password` command, so it persists exactly as the CLI does.
+    int pos = admin_pwd ? snprintf(e.cmd, sizeof(e.cmd), "password ")
+                        : snprintf(e.cmd, sizeof(e.cmd), "set %s ", key);
     for (const char* p = val; *p && pos < (int)sizeof(e.cmd) - 1; p++) {
       if (*p == '\r' || *p == '\n') continue;
       e.cmd[pos++] = *p;

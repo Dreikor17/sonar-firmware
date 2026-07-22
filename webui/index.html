@@ -175,6 +175,15 @@ canvas{width:100%;height:56px;display:block}
         <span class="tgl"><input type="checkbox" data-k="repeat"><u></u></span></div>
       <div class="note">Need settings that aren't listed? Choose <b>Keep current settings</b>, finish setup, then fine-tune in the <a href="#" onclick="enterApp();return false">Advanced editor</a>.</div>
     </div>
+    <div class="card">
+      <h2>Admin password</h2>
+      <p style="font-size:13.5px;color:var(--mut);margin-bottom:12px">Replaces the factory password. Used to log in to this page later and to administer the node remotely over the mesh.</p>
+      <div class="f"><label>New password</label>
+        <input type="password" data-k="password" maxlength="15" autocomplete="new-password">
+        <div class="hint">Maximum 15 characters.</div></div>
+      <div class="f"><label>Confirm password</label>
+        <input type="password" data-cfm="password" maxlength="15" autocomplete="new-password"></div>
+    </div>
     <div class="row">
       <button class="btn sec" onclick="wzGo(1)">Back</button>
       <button class="btn" style="flex:1" onclick="wzGo(3)">Next: MQTT</button>
@@ -238,6 +247,15 @@ canvas{width:100%;height:56px;display:block}
         <div class="f"><label>Latitude</label><input type="number" data-k="lat" step="any"></div>
         <div class="f"><label>Longitude</label><input type="number" data-k="lon" step="any"></div>
       </div>
+    </div>
+    <div class="card">
+      <h2>Admin password</h2>
+      <div class="note">Signs in here and authenticates remote admin commands over the mesh. Leave blank to keep the current password. A change takes effect immediately &mdash; this session stays signed in, but the next login needs the new password. During first-time setup a new password is required before the node can reboot into normal operation.</div>
+      <div class="f"><label>New password</label>
+        <input type="password" data-k="password" maxlength="15" autocomplete="new-password">
+        <div class="hint">Maximum 15 characters.</div></div>
+      <div class="f"><label>Confirm password</label>
+        <input type="password" data-cfm="password" maxlength="15" autocomplete="new-password"></div>
     </div>
     <div class="card">
       <h2>LoRa radio <span class="chip err hide" id="radio-warn">reboot to apply</span></h2>
@@ -472,7 +490,7 @@ function boot(){
     // Show only as many server slots as the board can keep active at once
     // (active_slots: 2 without PSRAM, 5 with). Fall back to the runtime array
     // size for older firmware that doesn't report it.
-    st.mode=s.mode;st.authed=s.auth;st.nslots=s.active_slots||s.runtime_slots||6;
+    st.mode=s.mode;st.authed=s.auth;st.needsSetup=!!s.needs_setup;st.nslots=s.active_slots||s.runtime_slots||6;
     $("#h-name").textContent=s.name||"MeshCore";
     $("#h-sub").textContent=s.role+" · "+s.fw+" · "+s.board;
     var b=$("#h-badge");b.classList.remove("hide");
@@ -522,6 +540,7 @@ function cfgVal(k){ // map a `set` key to its current value string, from st.cfg
     case"loop.detect":return r.loop_detect;
     case"advert.interval":return String(r.advert_interval);
     case"flood.advert.interval":return String(r.flood_advert_interval);
+    case"password":return"";
     case"wifi.ssid":return w.ssid;case"wifi.pwd":return w.pwd;case"wifi.powersave":return w.powersave;
     case"mqtt.origin":return q.origin;case"mqtt.iata":return q.iata;
     case"mqtt.status":return q.status?"on":"off";case"mqtt.packets":return q.packets?"on":"off";
@@ -556,6 +575,7 @@ function loadConfig(){
       st.orig[k]=v;setEl(el,v);el.classList.remove("dirty");
       var lab=el.closest(".f");var ch=lab&&lab.querySelector(".chip");if(ch)ch.remove();
     });
+    $$("[data-cfm]").forEach(function(el){el.value=""});  // confirm twins have no stored value
     $$("[data-rg]").forEach(function(el){el.value=String(c.radio[el.dataset.rg]);el.classList.remove("dirty")});
     st.orig.radio=radioCombo();afHint();
     for(var i=1;i<=st.nslots;i++){refreshSlotFields($("#app-slots"),i);refreshSlotFields($("#wz-slots"),i)}
@@ -582,6 +602,8 @@ document.addEventListener("input",function(ev){
     // keep duplicate fields (wizard vs app share keys) in sync
     $$('[data-k="'+el.dataset.k+'"]').forEach(function(o){if(o!==el)setEl(o,elVal(el))});
     markDirty(el.dataset.k,elVal(el),el);
+  }else if(el.dataset.cfm){ // confirm-only twin, mirrored but never submitted
+    $$('[data-cfm="'+el.dataset.cfm+'"]').forEach(function(o){if(o!==el)o.value=el.value});
   }else if(el.dataset.rg){
     var v=radioCombo();
     $$("[data-rg]").forEach(function(o){o.classList.toggle("dirty",v!==st.orig.radio)});
@@ -703,7 +725,13 @@ function saveChanges(extra,cb){
 // device only arms the reboot if every command succeeded (see the backend),
 // so a partially-rejected batch stays put for the operator to correct.
 function appSave(){
+  // Validate before the wifi split: a password-only change (the common LAN
+  // case) never reaches the reboot path but still must match its confirm field.
   var wifiChanged=("wifi.ssid" in st.dirty)||("wifi.pwd" in st.dirty);
+  var pwdErr=adminPwdError(wifiChanged);
+  // The save bar is global, so the offending field may be on another tab —
+  // show it, or the toast names a problem the user cannot see.
+  if(pwdErr){$('#tabs button[data-t="radio"]').click();toast(pwdErr);return}
   if(!wifiChanged){saveChanges();return}
   saveChanges({reboot:true},function(r,acked){
     if(!r){
@@ -784,6 +812,9 @@ function loadConfigSoft(){ // re-sync accepted values without clobbering chips/r
       if((k in st.dirty)&&st.dirty[k]!==stored){setEl(el,st.dirty[k]);el.classList.add("dirty")}
       else{delete st.dirty[k];setEl(el,stored);el.classList.remove("dirty")}
     });
+    // Clear the confirm twins alongside their (write-only, so always-cleared)
+    // password field; a value left behind here fails the next save as a mismatch.
+    if(!("password" in st.dirty))$$("[data-cfm]").forEach(function(el){el.value=""});
     var storedRadio=[c.radio.freq,c.radio.bw,c.radio.sf,c.radio.cr].join(",");
     st.orig.radio=storedRadio;
     var keepRadio=("radio" in st.dirty)&&!comboEq(st.dirty.radio,storedRadio);
@@ -1020,6 +1051,17 @@ function popOut(){
 // presence rather than truthiness stops a cleared field from silently reverting
 // to the original in the review/validation while the batch still submits "".
 function eff(k){return (k in st.dirty)?st.dirty[k]:(st.orig[k]||"")}
+// Admin-password gate shared by both save paths: "" when OK, else the reason.
+// The confirm field is UI-only (never submitted), so it is read from the DOM.
+// `finishing` marks a save that completes onboarding (reboots or sets WiFi) —
+// only those must carry a new password, matching the server's 400. A first-boot
+// save of some unrelated setting is allowed through, as the firmware allows it.
+function adminPwdError(finishing){
+  var p=eff("password"),c=$('[data-cfm="password"]').value;
+  if(finishing&&st.needsSetup&&!p)return"Set an admin password";
+  if((p||c)&&p!==c)return"Admin passwords do not match";
+  return"";
+}
 function buildReview(){
   var rows=[],d=st.dirty;
   function row(l,v){rows.push('<div class="kv"><i>'+l+"</i><b>"+esc(v)+"</b></div>")}
@@ -1033,6 +1075,7 @@ function buildReview(){
   row("Radio",(rp?rp.t+" — ":"")+rc.split(",").join(" / ")+(("radio" in d)?"":" (unchanged)"));
   if(("tx" in d)&&d.tx!=="")row("TX power",d.tx+" dBm");
   row("Repeat",eff("repeat")==="off"?"off (listen-only)":"on");
+  if(st.needsSetup||eff("password"))row("Admin password",eff("password")?"set":"(not set)");
   row("Observer name",eff("mqtt.origin")||"(not set)");
   row("IATA",(eff("mqtt.iata")||"(not set)").toUpperCase());
   var own=eff("mqtt.owner");
@@ -1043,7 +1086,7 @@ function buildReview(){
     var p=eff("mqtt"+i+".preset");
     if(p&&p!=="none")row("Slot "+i,p);
   }
-  var extra=Object.keys(d).filter(function(k){return!/^(wifi\.|name$|radio$|tx$|repeat$|mqtt\.origin|mqtt\.iata|mqtt\.owner|mqtt\.email|mqtt[1-9]\.)/.test(k)}).length;
+  var extra=Object.keys(d).filter(function(k){return!/^(wifi\.|password$|name$|radio$|tx$|repeat$|mqtt\.origin|mqtt\.iata|mqtt\.owner|mqtt\.email|mqtt[1-9]\.)/.test(k)}).length;
   if(extra)row("Other changes",extra+" setting(s)");
   $("#wz-review").innerHTML=rows.join("");
 }
@@ -1052,6 +1095,8 @@ function wizardSave(){
   // even if the node originally had one (the batch would submit an empty SSID).
   if(!eff("wifi.ssid")){$("#wz-err").textContent="Please set a WiFi network (step 1).";return}
   if($("#wz-rp").value===""){$("#wz-err").textContent="Please choose a radio preset (step 2) — nodes ship with non-US defaults.";return}
+  var pwdErr=adminPwdError(true);  // the wizard always saves WiFi and reboots
+  if(pwdErr){$("#wz-err").textContent=pwdErr+" (step 2).";return}
   // IATA is optional, but if given it must be exactly 3 chars (goes into topics).
   var iata=eff("mqtt.iata");
   if(iata&&iata.length!==3){$("#wz-err").textContent="IATA region code must be exactly 3 characters (e.g. DEN), or left blank.";return}
@@ -1077,7 +1122,8 @@ function wizardSave(){
       return;
     }
     showReboot("The node is joining “"+eff("wifi.ssid")
-      +"”. Reconnect your phone or laptop to your normal WiFi. Find the node's IP on your router, or run “start webconfig” over serial to manage it again.",
+      +"”. Reconnect your phone or laptop to your normal WiFi. Find the node's IP on your router, or run “start webconfig” over serial to manage it again"
+      +(eff("password")?" — logging in there needs the admin password you just set.":"."),
       false,"Settings saved ✓ — rebooting in a moment");
     st.dirty={};
   });
