@@ -133,13 +133,25 @@ build_firmware() {
     exit 1
   fi
 
+  # Observer build number: when CI provides FIRMWARE_BUILD_NUMBER (the per-base
+  # published-build counter), it becomes a 4th version component (e.g. .5 ->
+  # v1.16.0.5). Computed up front because it now feeds BOTH the filename and the
+  # embedded version. Local dev builds leave it unset → no 4th component.
+  BUILD_NUMBER_SUFFIX=""
+  if [ -n "$FIRMWARE_BUILD_NUMBER" ]; then
+    BUILD_NUMBER_SUFFIX=".${FIRMWARE_BUILD_NUMBER}"
+  fi
+
   # set firmware version string (used for the output filename)
-  # e.g: v1.0.0-abcdef — or v1.0.0-dev-abcdef when FILENAME_CHANNEL_TAG is set
-  # ("-dev" on the dev channel), so downloaded files identify their channel at
-  # a glance. Lowercase-letters-only tag: every filename parser (flasher
-  # gen-slim-manifests ASSET_RE, the /releases Worker, flasher.js stale-URL
-  # recovery) accepts exactly (?:-[a-z]+)? between version and hash.
-  FIRMWARE_VERSION_STRING="${FIRMWARE_VERSION}${FILENAME_CHANNEL_TAG:-}-${COMMIT_HASH}"
+  # e.g: v1.0.0-abcdef — or v1.16.0.5-dev-abcdef with a build number and the
+  # dev channel's FILENAME_CHANNEL_TAG. The build number is now IN the filename
+  # so the web flasher's Version dropdown (parsed from the asset name by the
+  # /releases Worker) shows the true published build, matching the embedded
+  # version that `ver` reports. Every filename parser (flasher gen-slim-manifests
+  # ASSET_RE, the /releases Worker VERSION_RE, flasher.js stale-URL recovery)
+  # accepts an optional 4th ".<n>" component followed by the lowercase
+  # (?:-[a-z]+)? channel tag between version and hash.
+  FIRMWARE_VERSION_STRING="${FIRMWARE_VERSION}${BUILD_NUMBER_SUFFIX}${FILENAME_CHANNEL_TAG:-}-${COMMIT_HASH}"
 
   # craft filename
   # e.g: RAK_4631_Repeater-v1.0.0-SHA
@@ -147,8 +159,9 @@ build_firmware() {
 
   # Tag the *embedded* version for observer builds, e.g. v1.0.0-observer-abcdef,
   # so `ver`, the MQTT firmware_version/client_version, and SNMP all identify the
-  # fork. The filename above is intentionally left untagged: the env name already
-  # contains "observer", and the web flasher keys off that existing pattern.
+  # fork. The filename above carries the same version + build number but no
+  # variant/channel tag: the env name already contains "observer", and the web
+  # flasher keys off that existing pattern.
   VARIANT_TAG=""
   case "$1" in
     *observer*) VARIANT_TAG="-observer" ;;
@@ -163,16 +176,9 @@ build_firmware() {
     VARIANT_TAG="${VARIANT_TAG}-${OTA_CHANNEL_TAG}"
   fi
 
-  # Observer build number: when CI provides FIRMWARE_BUILD_NUMBER (the per-base
-  # published-build counter), append it as a 4th version component so the node
-  # reports e.g. v1.16.0.5-observer-abcdef and `ota check` can show how many
-  # builds behind it is. Local dev builds leave it unset → no 4th component.
-  # The *filename* (FIRMWARE_VERSION_STRING above) is deliberately left without
-  # the build number so assets stay <env>-v<base>-<hash>.bin.
-  BUILD_NUMBER_SUFFIX=""
-  if [ -n "$FIRMWARE_BUILD_NUMBER" ]; then
-    BUILD_NUMBER_SUFFIX=".${FIRMWARE_BUILD_NUMBER}"
-  fi
+  # Embedded version: base + build number (4th component) + variant/channel tag
+  # + hash, e.g. v1.16.0.5-observer-abcdef, so the node reports its build and
+  # `ota check` can show how many builds behind it is.
   EMBEDDED_VERSION_STRING="${FIRMWARE_VERSION}${BUILD_NUMBER_SUFFIX}${VARIANT_TAG}-${COMMIT_HASH}"
 
   # Release channel. The observer pull-OTA fetches its slim per-variant manifest
