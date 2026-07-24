@@ -20,10 +20,12 @@ on:
       - 'docs/**'
       - 'scripts/gen_changelog.py'
 
-# Shared with build-observer-firmwares.yml so the two never push to the flasher
-# repo concurrently (a mixed code+docs commit can trigger both).
+# Own group: serialize doc syncs against each other only. Deliberately NOT shared
+# with build-observer-firmwares.yml — a shared group let one workflow cancel the
+# other's pending run (a mixed code+docs commit triggers both). Concurrent flasher
+# pushes are handled by the rebase-retry in "Commit & Push Flasher Content".
 concurrency:
-  group: flasher-publish
+  group: flasher-docs-sync
   cancel-in-progress: false
 
 jobs:
@@ -73,4 +75,22 @@ jobs:
           git config user.name "meshcore-bot"
           git config user.email "noreply@gessaman.com"
           git commit -am "Sync docs & changelog from MeshCore ${GITHUB_SHA::7}"
-          git push
+          # build-observer-firmwares.yml can be pushing the same docs/changelog
+          # right now (a mixed code+docs commit triggers both), so a non-fast-forward
+          # is expected rather than fatal: rebase onto its commit and retry. If the
+          # rebase leaves nothing, git reports up-to-date and we exit clean.
+          br=$(git rev-parse --abbrev-ref HEAD)
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:$br"; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); rebasing onto origin/$br"
+            git fetch origin "$br"
+            git rebase "origin/$br" || {
+              git rebase --abort || true
+              echo "::error::flasher rebase conflicted; re-run this workflow to resync"
+              exit 1
+            }
+          done
+          echo "::error::could not push flasher changes after 3 attempts"
+          exit 1

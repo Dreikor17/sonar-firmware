@@ -26,10 +26,13 @@ on:
       - '.vscode/**'
       - '.claude/**'
 
-# Serialize with sync-flasher-content.yml so the two workflows never push to the
-# flasher repo at the same time (shared group name across both workflows).
+# Own group: serialize builds against each other only. Do NOT share this group
+# with sync-flasher-content.yml — a mixed code+docs commit triggers both, and a
+# run that is still pending when its sibling is queued gets cancelled, which
+# silently skipped the firmware build. Concurrent flasher pushes are instead made
+# safe by the rebase-retry in "Commit & Push Flasher Config".
 concurrency:
-  group: flasher-publish
+  group: observer-firmware-build
   cancel-in-progress: false
 
 env:
@@ -306,4 +309,22 @@ jobs:
           git config user.name "meshcore-bot"
           git config user.email "noreply@gessaman.com"
           git commit -m "Update observer firmware to ${{ steps.sha.outputs.short }} (build ${FIRMWARE_VERSION}.${{ needs.enumerate.outputs.build_number }})"
-          git push
+          # sync-flasher-content.yml can be pushing the same docs/changelog right
+          # now (a mixed code+docs commit triggers both), so a non-fast-forward is
+          # expected rather than fatal: rebase onto the sibling's commit and retry.
+          # If the rebase leaves nothing, git reports up-to-date and we exit clean.
+          br=$(git rev-parse --abbrev-ref HEAD)
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:$br"; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); rebasing onto origin/$br"
+            git fetch origin "$br"
+            git rebase "origin/$br" || {
+              git rebase --abort || true
+              echo "::error::flasher rebase conflicted; re-run this workflow to republish"
+              exit 1
+            }
+          done
+          echo "::error::could not push flasher changes after 3 attempts"
+          exit 1
