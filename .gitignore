@@ -24,3 +24,6 @@ platformio.local.ini
 .claude/*
 .cursorrules
 src/helpers/esp32/WebConfigHtml.h
+# Throwaway build worktrees; committing one adds a stray gitlink that makes every
+# CI checkout warn "No url found for submodule path ... in .gitmodules".
+.build-wt-*/

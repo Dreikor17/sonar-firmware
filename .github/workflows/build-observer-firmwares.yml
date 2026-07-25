@@ -25,6 +25,9 @@ on:
       - 'LICENSE'
       - '.vscode/**'
       - '.claude/**'
+      # Throwaway build worktrees never affect the binaries.
+      - '.build-wt-*'
+      - '.build-wt-*/**'
 
 # Own group: serialize builds against each other only. Do NOT share this group
 # with sync-flasher-content.yml — a mixed code+docs commit triggers both, and a
