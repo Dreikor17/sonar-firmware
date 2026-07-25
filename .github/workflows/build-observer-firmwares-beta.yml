@@ -38,6 +38,9 @@ on:
       - 'LICENSE'
       - '.vscode/**'
       - '.claude/**'
+      # Throwaway build worktrees never affect the binaries.
+      - '.build-wt-*'
+      - '.build-wt-*/**'
 
 # Own group: serialize beta builds against each other only. Concurrency groups are
 # repo-wide, not per-branch, so sharing one with the production workflows let an

@@ -25,3 +25,6 @@ platformio.local.ini
 .cursor/*
 .claude/*
 .cursorrules
+# Throwaway build worktrees; committing one adds a stray gitlink that makes every
+# CI checkout warn "No url found for submodule path ... in .gitmodules".
+.build-wt-*/
