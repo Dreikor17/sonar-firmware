@@ -320,7 +320,9 @@ jobs:
             fi
             echo "push rejected (attempt $attempt); rebasing onto origin/$br"
             git fetch origin "$br"
-            git rebase "origin/$br" || {
+            # --autostash so a dirty tree can never make the rebase refuse to run;
+            # nothing unstaged gets published either way.
+            git rebase --autostash "origin/$br" || {
               git rebase --abort || true
               echo "::error::flasher rebase conflicted; re-run this workflow to republish"
               exit 1
