@@ -558,6 +558,18 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+#if defined(WITH_MQTT_NEIGHBORS)
+  if (neighbor_discover_active && pkt == neighbor_discover_request
+      && neighbor_discover_next < neighbor_discover_count) {
+    NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+    if (entry.status == ND_QUEUED) {
+      entry.status = ND_PENDING;
+      neighbor_discover_request = NULL;
+      neighbor_discover_until = futureMillis(neighborDiscoverQueryTimeoutMs());
+    }
+  }
+#endif
+
 #ifdef WITH_MQTT_BRIDGE
   // MQTT bridge: always feed TX packets — bridge decides based on mqtt.tx setting
   if (bridge) bridge->sendPacket(pkt);
@@ -587,6 +599,18 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 }
 
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
+#if defined(WITH_MQTT_NEIGHBORS)
+  if (neighbor_discover_active && pkt == neighbor_discover_request
+      && neighbor_discover_next < neighbor_discover_count) {
+    NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+    if (entry.status == ND_QUEUED) {
+      entry.status = ND_SEND_FAILED;
+      neighbor_discover_request = NULL;
+      neighbor_discover_until = 0;
+    }
+  }
+#endif
+
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
     if (f) {
@@ -677,9 +701,9 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
   // distinct from real ACL indices.
   if (neighbor_discover_active) {
     for (int i = 0; i < neighbor_discover_count && n < MAX_CLIENTS; i++) {
-      auto& nb = neighbours[neighbor_discover[i].neighbour_idx];
-      if (acl.getClient(nb.id.pub_key, PUB_KEY_SIZE) != nullptr) continue;
-      if (nb.heard_timestamp > 0 && nb.id.isHashMatch(hash)) {
+      auto& entry = neighbor_discover[i];
+      if (acl.getClient(entry.id.pub_key, PUB_KEY_SIZE) != nullptr) continue;
+      if (entry.heard_timestamp > 0 && entry.id.isHashMatch(hash)) {
         matching_peer_indexes[n++] = NEIGHBOR_DISCOVER_PEER_BASE + i;
       }
     }
@@ -700,7 +724,7 @@ void MyMesh::getPeerSharedSecret(uint8_t *dest_secret, int peer_idx) {
   if (neighbor_discover_active && i >= NEIGHBOR_DISCOVER_PEER_BASE) {
     int oi = i - NEIGHBOR_DISCOVER_PEER_BASE;
     if (oi >= 0 && oi < neighbor_discover_count) {
-      self_id.calcSharedSecret(dest_secret, neighbours[neighbor_discover[oi].neighbour_idx].id);
+      self_id.calcSharedSecret(dest_secret, neighbor_discover[oi].id);
       return;
     }
   }
@@ -757,8 +781,8 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
   // scope-query response from it lands here — match it against the overlay.
   if (neighbor_discover_active && type == PAYLOAD_TYPE_RESPONSE) {
     for (int oi = 0; oi < neighbor_discover_count; oi++) {
-      auto& nb = neighbours[neighbor_discover[oi].neighbour_idx];
-      if (client->id.matches(nb.id) && handleNeighborDiscoverResponse(oi, data, len)) {
+      if (client->id.matches(neighbor_discover[oi].id)
+          && handleNeighborDiscoverResponse(oi, data, len)) {
         return;
       }
     }
@@ -1041,10 +1065,12 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
 
 #if defined(WITH_MQTT_NEIGHBORS)
   neighbor_discover_count = 0;
+  neighbor_discover_next = 0;
   neighbor_discover_active = false;
   neighbor_table_refresh_active = false;
   neighbor_table_refresh_periodic = false;
   neighbor_discover_until = 0;
+  neighbor_discover_request = NULL;
   next_neighbors_publish = 0;
   self_scopes_buf[0] = 0;
 #endif
@@ -1806,7 +1832,11 @@ void MyMesh::getLocalScopes(char* buf, size_t len) {
 
 // Client side of the anon-regions request (the server side is handleAnonRegionsReq).
 // Inner payload: {tag(4)}{ANON_REQ_TYPE_REGIONS}{0x00 = zero-hop reply path}.
-bool MyMesh::sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag) {
+mesh::Packet* MyMesh::sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag) {
+  // RxReservePacketManager keeps a four-packet emergency floor. Preflight one
+  // extra free packet so its void queue API cannot silently shed this request.
+  if (_mgr->getFreeCount() < NEIGHBOR_DISCOVER_MIN_FREE_PACKETS) return NULL;
+
   uint8_t secret[PUB_KEY_SIZE];
   self_id.calcSharedSecret(secret, target);
 
@@ -1817,9 +1847,33 @@ bool MyMesh::sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag) {
   inner[5] = 0x00; // request a zero-hop reply path
 
   mesh::Packet* pkt = createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, self_id, target, secret, inner, sizeof(inner));
-  if (!pkt) return false;
+  if (!pkt) return NULL;
   sendDirect(pkt, NULL, 0, 0);
-  return true;
+  return pkt;
+}
+
+bool MyMesh::cancelNeighborDiscoverRequest() {
+  if (!neighbor_discover_request) return false;
+  for (int i = _mgr->getOutboundTotal() - 1; i >= 0; i--) {
+    if (_mgr->getOutboundByIdx(i) == neighbor_discover_request) {
+      mesh::Packet* pkt = _mgr->removeOutboundByIdx(i);
+      if (pkt) releasePacket(pkt);
+      neighbor_discover_request = NULL;
+      return true;
+    }
+  }
+  return false;
+}
+
+// This timer starts after the request finishes transmitting. Allow the server
+// delay, the responder's full CAD deferral window plus one maximum retry
+// overshoot, and airtime for one priority-0 packet ahead of the response plus
+// the response itself. The radio estimate scales with SF, bandwidth, coding
+// rate, and preamble.
+uint32_t MyMesh::neighborDiscoverQueryTimeoutMs() const {
+  uint32_t response_airtime = _radio->getEstAirtimeFor(MAX_PACKET_PAYLOAD + 2);
+  return SERVER_RESPONSE_DELAY + getCADFailMaxDuration() + 360UL
+    + response_airtime * 2UL;
 }
 
 // Match a RESPONSE against the pending overlay entry by tag; copy its scope
@@ -1907,14 +1961,14 @@ void MyMesh::finishNeighborDiscover() {
   uint32_t now_secs = getRTCClock()->getCurrentTime();
 
   for (int i = 0; i < neighbor_discover_count; i++) {
-    auto& nb = neighbours[neighbor_discover[i].neighbour_idx];
-    mesh::Utils::toHex(pubkey_hex[i], nb.id.pub_key, PUB_KEY_SIZE);
+    auto& entry = neighbor_discover[i];
+    mesh::Utils::toHex(pubkey_hex[i], entry.id.pub_key, PUB_KEY_SIZE);
     entries[i].pubkey_hex = pubkey_hex[i];
-    entries[i].snr = nb.snr / 4.0f;
-    entries[i].heard_secs_ago = (nb.heard_timestamp > 0 && now_secs >= nb.heard_timestamp)
-      ? (now_secs - nb.heard_timestamp) : 0;
-    entries[i].scopes = neighbor_discover[i].scopes;
-    switch (neighbor_discover[i].status) {
+    entries[i].snr = entry.snr / 4.0f;
+    entries[i].heard_secs_ago = (entry.heard_timestamp > 0 && now_secs >= entry.heard_timestamp)
+      ? (now_secs - entry.heard_timestamp) : 0;
+    entries[i].scopes = entry.scopes;
+    switch (entry.status) {
       case ND_RESPONDED:   entries[i].status = "responded"; break;
       case ND_SEND_FAILED: entries[i].status = "send_failed"; break;
       default:             entries[i].status = "timeout"; break;
@@ -1940,6 +1994,9 @@ void MyMesh::finishNeighborDiscover() {
   if (!json_buf) {
     neighbor_discover_active = false;
     neighbor_discover_count = 0;
+    neighbor_discover_next = 0;
+    neighbor_discover_until = 0;
+    neighbor_discover_request = NULL;
     if (_cli.getObserverPrefs()->mqtt_neighbors_enabled) {
       next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
     }
@@ -1969,27 +2026,67 @@ void MyMesh::finishNeighborDiscover() {
 
   neighbor_discover_active = false;
   neighbor_discover_count = 0;
+  neighbor_discover_next = 0;
+  neighbor_discover_until = 0;
+  neighbor_discover_request = NULL;
   if (_cli.getObserverPrefs()->mqtt_neighbors_enabled) {
     next_neighbors_publish = futureMillis(_cli.getObserverPrefs()->mqtt_neighbors_interval);
   }
 }
 
-// Advance the scope-query phase; publish once all entries resolve or the window
-// times out (stragglers marked ND_TIMEOUT).
+// Advance the newest-first scope-query phase. Keep only one request in flight so
+// its responder gets a clear reply opportunity and the packet pool stays free.
 void MyMesh::loopNeighborDiscover() {
   if (!neighbor_discover_active) return;
 
-  bool all_done = true;
-  for (int i = 0; i < neighbor_discover_count; i++) {
-    if (neighbor_discover[i].status == ND_PENDING) { all_done = false; break; }
+  if (neighbor_discover_next >= neighbor_discover_count) {
+    finishNeighborDiscover();
+    return;
   }
-  if (!all_done && !millisHasNowPassed(neighbor_discover_until)) return;
-  if (!all_done) {
-    for (int i = 0; i < neighbor_discover_count; i++) {
-      if (neighbor_discover[i].status == ND_PENDING) neighbor_discover[i].status = ND_TIMEOUT;
+
+  NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+  if (entry.status == ND_QUEUED) {
+    if (!millisHasNowPassed(neighbor_discover_until)) return;
+    if (cancelNeighborDiscoverRequest()) {
+      entry.status = ND_SEND_FAILED;
+      neighbor_discover_next++;
+      return;
     }
+    if (isCurrentOutbound(neighbor_discover_request)) {
+      neighbor_discover_until = futureMillis(neighborDiscoverQueryTimeoutMs());
+      return;
+    }
+    neighbor_discover_request = NULL;  // packet manager already shed it
+    entry.status = ND_SEND_FAILED;
+    neighbor_discover_next++;
+    return;
   }
-  finishNeighborDiscover();
+  if (entry.status == ND_PENDING) {
+    if (!millisHasNowPassed(neighbor_discover_until)) return;
+    entry.status = ND_TIMEOUT;
+    neighbor_discover_next++;
+    return;
+  }
+  if (entry.status == ND_RESPONDED || entry.status == ND_SEND_FAILED) {
+    neighbor_discover_next++;
+    return;
+  }
+  if (entry.status != ND_UNSENT) {
+    neighbor_discover_next++;
+    return;
+  }
+
+  uint32_t tag;
+  mesh::Packet* request = sendAnonRegionsReq(entry.id, tag);
+  if (request) {
+    entry.tag = tag;
+    entry.status = ND_QUEUED;
+    neighbor_discover_request = request;
+    neighbor_discover_until = futureMillis(NEIGHBOR_DISCOVER_QUEUE_TIMEOUT_MS);
+  } else {
+    entry.status = ND_SEND_FAILED;
+    neighbor_discover_next++;
+  }
 }
 
 // Shared precondition for starting a discovery: PSRAM present + bridge running.
@@ -2001,8 +2098,8 @@ bool MyMesh::neighborDiscoverReady(char* reply) {
   return true;
 }
 
-// Snapshot the neighbor table into the overlay and fire one anon-regions query
-// per heard neighbour; arm the 30s scope-query window.
+// Snapshot the neighbor table newest-first. loopNeighborDiscover() emits one
+// anon-regions query at a time so hidden responders do not reply as a burst.
 bool MyMesh::startNeighborDiscover(char* reply) {
   if (neighbor_discover_active) {
     strcpy(reply, "Err - neighbor discover already active");
@@ -2016,26 +2113,44 @@ bool MyMesh::startNeighborDiscover(char* reply) {
   neighbor_discover_count = 0;
   for (int i = 0; i < MAX_NEIGHBOURS; i++) {
     if (neighbours[i].heard_timestamp > 0) {
-      neighbor_discover[neighbor_discover_count].neighbour_idx = (uint8_t)i;
-      neighbor_discover[neighbor_discover_count].scopes[0] = 0;
-      neighbor_discover[neighbor_discover_count].status = ND_PENDING;
-      uint32_t tag;
-      if (sendAnonRegionsReq(neighbours[i].id, tag)) {
-        neighbor_discover[neighbor_discover_count].tag = tag;
-      } else {
-        neighbor_discover[neighbor_discover_count].status = ND_SEND_FAILED;
-      }
+      NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_count];
+      entry.id = neighbours[i].id;
+      entry.heard_timestamp = neighbours[i].heard_timestamp;
+      entry.snr = neighbours[i].snr;
+      entry.scopes[0] = 0;
+      entry.tag = 0;
+      entry.status = ND_UNSENT;
       neighbor_discover_count++;
     }
   }
 
+  // Query the freshest/strongest entries first; pubkey makes ties deterministic.
+  for (int i = 1; i < neighbor_discover_count; i++) {
+    NeighborDiscoverEntry entry = neighbor_discover[i];
+    int j = i;
+    while (j > 0) {
+      auto& rhs = neighbor_discover[j - 1];
+      bool before = entry.heard_timestamp > rhs.heard_timestamp
+        || (entry.heard_timestamp == rhs.heard_timestamp && entry.snr > rhs.snr)
+        || (entry.heard_timestamp == rhs.heard_timestamp && entry.snr == rhs.snr
+            && memcmp(entry.id.pub_key, rhs.id.pub_key, PUB_KEY_SIZE) < 0);
+      if (!before) break;
+      neighbor_discover[j] = neighbor_discover[j - 1];
+      j--;
+    }
+    neighbor_discover[j] = entry;
+  }
+
+  neighbor_discover_next = 0;
   neighbor_discover_active = true;
-  neighbor_discover_until = futureMillis(NEIGHBOR_DISCOVER_TIMEOUT_MS);
+  neighbor_discover_until = 0;
+  neighbor_discover_request = NULL;
 
   if (neighbor_discover_count == 0) {
     finishNeighborDiscover();
     strcpy(reply, "OK - neighbor discover started (0 neighbors, self only)");
   } else {
+    loopNeighborDiscover();  // queue the first request now
     sprintf(reply, "OK - neighbor discover started (%u neighbors)", (unsigned)neighbor_discover_count);
   }
   return true;

@@ -149,30 +149,38 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
 
 #if defined(WITH_MQTT_NEIGHBORS)
   // Neighbor-scope discovery: a snapshot of the neighbor table overlaid with an
-  // in-flight anon-regions query per neighbor, published to the MQTT neighbors
-  // topic once every neighbor has responded or the window times out.
+  // anon-regions query per neighbor, published to the MQTT neighbors topic once
+  // every neighbor has responded or timed out.
   enum NeighborDiscoverStatus : uint8_t {
-    ND_PENDING = 1,
-    ND_RESPONDED = 2,
-    ND_TIMEOUT = 3,
-    ND_SEND_FAILED = 4,
+    ND_UNSENT = 0,
+    ND_QUEUED = 1,
+    ND_PENDING = 2,
+    ND_RESPONDED = 3,
+    ND_TIMEOUT = 4,
+    ND_SEND_FAILED = 5,
   };
   struct NeighborDiscoverEntry {
-    uint8_t neighbour_idx;   // index into neighbours[]
+    mesh::Identity id;       // immutable snapshot: neighbour table can change mid-pass
+    uint32_t heard_timestamp;
+    int8_t snr;              // multiplied by 4
     uint32_t tag;            // anon-regions request tag we're waiting on
     char scopes[96];         // scope names from the response
     uint8_t status;          // NeighborDiscoverStatus
   };
   NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
   uint8_t neighbor_discover_count;
+  uint8_t neighbor_discover_next;            // newest-first entry currently being queried
   bool neighbor_discover_active;          // scope-query phase in flight
   bool neighbor_table_refresh_active;     // zero-hop table refresh (stage 1) in flight
   bool neighbor_table_refresh_periodic;   // that refresh was kicked by the periodic timer
-  unsigned long neighbor_discover_until;  // scope-query timeout deadline
+  unsigned long neighbor_discover_until;  // current queue or response deadline
+  mesh::Packet* neighbor_discover_request; // request awaiting TX completion
   unsigned long next_neighbors_publish;   // periodic publish deadline (0 = fire ASAP)
   char self_scopes_buf[96];
 
-  bool sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag);
+  mesh::Packet* sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag);
+  bool cancelNeighborDiscoverRequest();
+  uint32_t neighborDiscoverQueryTimeoutMs() const;
   bool neighborDiscoverReady(char* reply);
   bool startNeighborDiscover(char* reply);
   void loopNeighborDiscover();
@@ -182,7 +190,8 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   // Overlay peer indices are offset by this base so onPeerDataRecv can tell a
   // discovery response apart from a normal ACL-client index.
   static const int NEIGHBOR_DISCOVER_PEER_BASE = 1000;
-  static const unsigned long NEIGHBOR_DISCOVER_TIMEOUT_MS = 30000;
+  static const unsigned long NEIGHBOR_DISCOVER_QUEUE_TIMEOUT_MS = 29000;
+  static const int NEIGHBOR_DISCOVER_MIN_FREE_PACKETS = 5;
 #endif
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
