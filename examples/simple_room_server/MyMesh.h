@@ -163,6 +163,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
   uint8_t neighbor_discover_count;
   uint8_t neighbor_discover_next;
+  uint8_t neighbor_discover_publish_count;
+  uint8_t neighbor_discover_queried_count;    // requests confirmed transmitted
+  size_t neighbor_discover_json_size;
+  bool neighbor_discover_truncated;
   bool neighbor_discover_active;
   bool neighbor_table_refresh_active;
   bool neighbor_table_refresh_periodic;
@@ -170,12 +174,15 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   mesh::Packet* neighbor_discover_request;
   unsigned long next_neighbors_publish;
   char self_scopes_buf[96];
+  char neighbor_discover_origin[32];
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
   void sendNodeDiscoverReq();
   mesh::Packet* sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag);
   bool cancelNeighborDiscoverRequest();
   uint32_t neighborDiscoverQueryTimeoutMs() const;
+  bool completeNeighborDiscoverEntry();
+  void resetNeighborDiscoverJsonBudget();
   bool neighborDiscoverReady(char* reply);
   bool startNeighborDiscover(char* reply);
   void loopNeighborDiscover();

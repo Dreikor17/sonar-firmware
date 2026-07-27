@@ -170,6 +170,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   NeighborDiscoverEntry neighbor_discover[MAX_NEIGHBOURS];
   uint8_t neighbor_discover_count;
   uint8_t neighbor_discover_next;            // newest-first entry currently being queried
+  uint8_t neighbor_discover_publish_count;    // completed prefix that fits the JSON buffer
+  uint8_t neighbor_discover_queried_count;    // requests confirmed transmitted
+  size_t neighbor_discover_json_size;
+  bool neighbor_discover_truncated;
   bool neighbor_discover_active;          // scope-query phase in flight
   bool neighbor_table_refresh_active;     // zero-hop table refresh (stage 1) in flight
   bool neighbor_table_refresh_periodic;   // that refresh was kicked by the periodic timer
@@ -177,10 +181,13 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   mesh::Packet* neighbor_discover_request; // request awaiting TX completion
   unsigned long next_neighbors_publish;   // periodic publish deadline (0 = fire ASAP)
   char self_scopes_buf[96];
+  char neighbor_discover_origin[32];
 
   mesh::Packet* sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag);
   bool cancelNeighborDiscoverRequest();
   uint32_t neighborDiscoverQueryTimeoutMs() const;
+  bool completeNeighborDiscoverEntry();
+  void resetNeighborDiscoverJsonBudget();
   bool neighborDiscoverReady(char* reply);
   bool startNeighborDiscover(char* reply);
   void loopNeighborDiscover();

@@ -256,6 +256,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
     NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
     if (entry.status == ND_QUEUED) {
       entry.status = ND_PENDING;
+      neighbor_discover_queried_count++;
       neighbor_discover_request = NULL;
       neighbor_discover_until = futureMillis(neighborDiscoverQueryTimeoutMs());
     }
@@ -885,6 +886,10 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   pending_discover_until = 0;
   neighbor_discover_count = 0;
   neighbor_discover_next = 0;
+  neighbor_discover_publish_count = 0;
+  neighbor_discover_queried_count = 0;
+  neighbor_discover_json_size = 0;
+  neighbor_discover_truncated = false;
   neighbor_discover_active = false;
   neighbor_table_refresh_active = false;
   neighbor_table_refresh_periodic = false;
@@ -892,6 +897,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   neighbor_discover_request = NULL;
   next_neighbors_publish = 0;
   self_scopes_buf[0] = 0;
+  neighbor_discover_origin[0] = 0;
   memset(neighbours, 0, sizeof(neighbours));
 #endif
 
@@ -1723,6 +1729,57 @@ uint32_t MyMesh::neighborDiscoverQueryTimeoutMs() const {
     + response_airtime * 2UL;
 }
 
+void MyMesh::resetNeighborDiscoverJsonBudget() {
+  getLocalScopes(self_scopes_buf, sizeof(self_scopes_buf));
+  MQTTBridge::getEffectiveMqttOrigin(
+    &_prefs, _cli.getObserverPrefs(),
+    neighbor_discover_origin, sizeof(neighbor_discover_origin));
+
+  char self_pubkey_hex[65];
+  mesh::Utils::toHex(self_pubkey_hex, self_id.pub_key, PUB_KEY_SIZE);
+  char timestamp[40];
+  MQTTMessageBuilder::formatIsoTimestampForMqtt(
+    getRTCClock()->getCurrentTime(), 0, nullptr, timestamp, sizeof(timestamp));
+
+  neighbor_discover_publish_count = 0;
+  neighbor_discover_queried_count = 0;
+  neighbor_discover_truncated = false;
+  neighbor_discover_json_size = MQTTMessageBuilder::measureNeighborsMessageBase(
+    neighbor_discover_origin, self_pubkey_hex, timestamp, self_scopes_buf,
+    neighbor_discover_count);
+}
+
+// Account for one terminal result. The base measurement reserves maximum-width
+// progress metadata; UINT32_MAX likewise reserves the widest heard-age value.
+// If this result cannot fit, stop before transmitting another scope request.
+bool MyMesh::completeNeighborDiscoverEntry() {
+  NeighborDiscoverEntry& entry = neighbor_discover[neighbor_discover_next];
+  char pubkey_hex[65];
+  mesh::Utils::toHex(pubkey_hex, entry.id.pub_key, PUB_KEY_SIZE);
+
+  MQTTMessageBuilder::NeighborsMessageEntry measured = {
+    pubkey_hex,
+    entry.snr / 4.0f,
+    UINT32_MAX,
+    entry.scopes,
+    entry.status == ND_RESPONDED ? "responded"
+      : (entry.status == ND_SEND_FAILED ? "send_failed" : "timeout")
+  };
+  size_t added = MQTTMessageBuilder::measureNeighborsMessageEntry(measured);
+  if (neighbor_discover_publish_count > 0) added++;  // array comma
+
+  if (neighbor_discover_json_size + added >= MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE) {
+    neighbor_discover_truncated = true;
+    finishNeighborDiscover();
+    return false;
+  }
+
+  neighbor_discover_json_size += added;
+  neighbor_discover_publish_count++;
+  neighbor_discover_next++;
+  return true;
+}
+
 // Match a RESPONSE against the pending overlay entry by tag; copy its scope
 // string (payload after the 8-byte {tag}{clock} header) into the entry.
 bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len) {
@@ -1792,13 +1849,8 @@ struct NeighborsDocAllocator : ArduinoJson::Allocator {
 
 // Build the neighbors-table JSON and hand it to the bridge, then reschedule.
 void MyMesh::finishNeighborDiscover() {
-  getLocalScopes(self_scopes_buf, sizeof(self_scopes_buf));
-
   char self_pubkey_hex[65];
   mesh::Utils::toHex(self_pubkey_hex, self_id.pub_key, PUB_KEY_SIZE);
-
-  char origin[32];
-  MQTTBridge::getEffectiveMqttOrigin(&_prefs, _cli.getObserverPrefs(), origin, sizeof(origin));
 
   char timestamp[40];
   MQTTMessageBuilder::formatIsoTimestampForMqtt(getRTCClock()->getCurrentTime(), 0, nullptr, timestamp, sizeof(timestamp));
@@ -1807,7 +1859,7 @@ void MyMesh::finishNeighborDiscover() {
   MQTTMessageBuilder::NeighborsMessageEntry entries[MAX_NEIGHBOURS];
   uint32_t now_secs = getRTCClock()->getCurrentTime();
 
-  for (int i = 0; i < neighbor_discover_count; i++) {
+  for (int i = 0; i < neighbor_discover_publish_count; i++) {
     auto& entry = neighbor_discover[i];
     mesh::Utils::toHex(pubkey_hex[i], entry.id.pub_key, PUB_KEY_SIZE);
     entries[i].pubkey_hex = pubkey_hex[i];
@@ -1823,7 +1875,7 @@ void MyMesh::finishNeighborDiscover() {
   }
 
   // insertion sort: most useful first (JSON builder drops the tail on overflow)
-  for (int i = 1; i < neighbor_discover_count; i++) {
+  for (int i = 1; i < neighbor_discover_publish_count; i++) {
     MQTTMessageBuilder::NeighborsMessageEntry entry = entries[i];
     int j = i;
     while (j > 0 && neighborPublishEntryComesBefore(entry, entries[j - 1])) {
@@ -1842,6 +1894,10 @@ void MyMesh::finishNeighborDiscover() {
     neighbor_discover_active = false;
     neighbor_discover_count = 0;
     neighbor_discover_next = 0;
+    neighbor_discover_publish_count = 0;
+    neighbor_discover_queried_count = 0;
+    neighbor_discover_json_size = 0;
+    neighbor_discover_truncated = false;
     neighbor_discover_until = 0;
     neighbor_discover_request = NULL;
     if (_cli.getObserverPrefs()->mqtt_neighbors_enabled) {
@@ -1857,9 +1913,11 @@ void MyMesh::finishNeighborDiscover() {
   JsonDocument doc;
 #endif
   int json_len = MQTTMessageBuilder::buildNeighborsMessage(
-    doc, origin, self_pubkey_hex, timestamp, self_scopes_buf,
-    entries, neighbor_discover_count,
-    json_buf, MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE);
+    doc, neighbor_discover_origin, self_pubkey_hex, timestamp, self_scopes_buf,
+    entries, neighbor_discover_publish_count,
+    json_buf, MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE,
+    neighbor_discover_count, neighbor_discover_queried_count,
+    neighbor_discover_truncated);
 
   if (json_len > 0 && bridge) {
     bridge->requestPublishNeighbors(json_buf, (size_t)json_len);
@@ -1874,6 +1932,10 @@ void MyMesh::finishNeighborDiscover() {
   neighbor_discover_active = false;
   neighbor_discover_count = 0;
   neighbor_discover_next = 0;
+  neighbor_discover_publish_count = 0;
+  neighbor_discover_queried_count = 0;
+  neighbor_discover_json_size = 0;
+  neighbor_discover_truncated = false;
   neighbor_discover_until = 0;
   neighbor_discover_request = NULL;
   if (_cli.getObserverPrefs()->mqtt_neighbors_enabled) {
@@ -1896,7 +1958,7 @@ void MyMesh::loopNeighborDiscover() {
     if (!millisHasNowPassed(neighbor_discover_until)) return;
     if (cancelNeighborDiscoverRequest()) {
       entry.status = ND_SEND_FAILED;
-      neighbor_discover_next++;
+      completeNeighborDiscoverEntry();
       return;
     }
     if (isCurrentOutbound(neighbor_discover_request)) {
@@ -1905,17 +1967,18 @@ void MyMesh::loopNeighborDiscover() {
     }
     neighbor_discover_request = NULL;  // packet manager already shed it
     entry.status = ND_SEND_FAILED;
-    neighbor_discover_next++;
+    completeNeighborDiscoverEntry();
     return;
   }
   if (entry.status == ND_PENDING) {
     if (!millisHasNowPassed(neighbor_discover_until)) return;
     entry.status = ND_TIMEOUT;
-    neighbor_discover_next++;
+    completeNeighborDiscoverEntry();
     return;
   }
-  if (entry.status == ND_RESPONDED || entry.status == ND_SEND_FAILED) {
-    neighbor_discover_next++;
+  if (entry.status == ND_RESPONDED || entry.status == ND_SEND_FAILED
+      || entry.status == ND_TIMEOUT) {
+    completeNeighborDiscoverEntry();
     return;
   }
   if (entry.status != ND_UNSENT) {
@@ -1932,7 +1995,7 @@ void MyMesh::loopNeighborDiscover() {
     neighbor_discover_until = futureMillis(NEIGHBOR_DISCOVER_QUEUE_TIMEOUT_MS);
   } else {
     entry.status = ND_SEND_FAILED;
-    neighbor_discover_next++;
+    completeNeighborDiscoverEntry();
   }
 }
 
@@ -1956,7 +2019,6 @@ bool MyMesh::startNeighborDiscover(char* reply) {
     return false;  // reply already set
   }
 
-  getLocalScopes(self_scopes_buf, sizeof(self_scopes_buf));
   neighbor_discover_count = 0;
   for (int i = 0; i < MAX_NEIGHBOURS; i++) {
     if (neighbours[i].heard_timestamp > 0) {
@@ -1989,6 +2051,7 @@ bool MyMesh::startNeighborDiscover(char* reply) {
   }
 
   neighbor_discover_next = 0;
+  resetNeighborDiscoverJsonBudget();
   neighbor_discover_active = true;
   neighbor_discover_until = 0;
   neighbor_discover_request = NULL;

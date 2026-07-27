@@ -89,7 +89,21 @@ public:
     const NeighborsMessageEntry* neighbors,
     int neighbor_count,
     char* buffer,
-    size_t buffer_size
+    size_t buffer_size,
+    int total_neighbors = -1,
+    int queried_neighbors = -1,
+    bool truncated = false
   );
-};
 
+  // Exact serialized-size components used by paced neighbor discovery. The
+  // base reserves the largest progress metadata values for this snapshot;
+  // callers add each entry size plus one byte for commas after the first.
+  static size_t measureNeighborsMessageBase(
+    const char* origin,
+    const char* origin_id,
+    const char* timestamp,
+    const char* self_scopes,
+    int total_neighbors
+  );
+  static size_t measureNeighborsMessageEntry(const NeighborsMessageEntry& neighbor);
+};

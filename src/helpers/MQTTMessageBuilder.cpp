@@ -111,11 +111,31 @@ int MQTTMessageBuilder::buildNeighborsMessage(
   const NeighborsMessageEntry* neighbors,
   int neighbor_count,
   char* buffer,
-  size_t buffer_size
+  size_t buffer_size,
+  int total_neighbors,
+  int queried_neighbors,
+  bool truncated
 ) {
   return MQTTPayloadBuilder::buildNeighborsMessage(
       doc, origin, origin_id, timestamp, self_scopes, neighbors, neighbor_count,
-      buffer, buffer_size);
+      buffer, buffer_size, total_neighbors, queried_neighbors, truncated);
+}
+
+size_t MQTTMessageBuilder::measureNeighborsMessageBase(
+  const char* origin,
+  const char* origin_id,
+  const char* timestamp,
+  const char* self_scopes,
+  int total_neighbors
+) {
+  return MQTTPayloadBuilder::measureNeighborsMessageBase(
+      origin, origin_id, timestamp, self_scopes, total_neighbors);
+}
+
+size_t MQTTMessageBuilder::measureNeighborsMessageEntry(
+  const NeighborsMessageEntry& neighbor
+) {
+  return MQTTPayloadBuilder::measureNeighborsMessageEntry(neighbor);
 }
 
 int MQTTMessageBuilder::buildPacketJSON(

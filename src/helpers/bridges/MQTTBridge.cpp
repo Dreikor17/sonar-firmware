@@ -3314,8 +3314,10 @@ bool MQTTBridge::publishNeighbors() {
       // MeshRank slots reject non-packets by contract, so buildTopicForSlot
       // returns false for them here and the slot is skipped.
       if (buildTopicForSlot(i, MSG_NEIGHBORS, topic, sizeof(topic))) {
+        // Neighbor snapshots are periodically refreshed. Publish synchronously
+        // at QoS 0 to avoid the QoS 1 outbox, retaining where the broker allows.
         bool use_retain = _slots[i].preset ? _slots[i].preset->allow_retain : false;
-        if (publishToSlot(i, topic, _neighbors_json_buffer, use_retain, 1)) {
+        if (publishToSlot(i, topic, _neighbors_json_buffer, use_retain, 0)) {
           published = true;
         }
       }
