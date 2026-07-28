@@ -100,11 +100,14 @@ fall back to defaults (no downgrade, no misread). `saveMQTTPrefs()` also refuses
 write while such a file is present (`_mqtt_prefs_hold`), so a `set` command after a
 firmware downgrade can't clobber the newer config — observer settings changed in that
 state simply don't persist. The frozen legacy layouts are pinned with `static_assert`s
-in `CommonCLI.h`, so every target build re-verifies the fleet's file offsets.
+in `MQTTPrefsStorage.h`, so every target build re-verifies the fleet's file offsets.
 
 Adding a field to the current version stays backward compatible: append it to the end
-of `MQTTPrefs`. An older, shorter payload still loads and the missing tail keeps its
-default; a newer, longer one is truncated harmlessly.
+of `MQTTPrefs`, give the older exact payload length an explicit decoder boundary, and
+leave the missing tail at its default. The packet-filter addition follows that rule:
+the prior 2864-byte v1 payload loads with all six filters set to `all`, while the
+current payload is 2876 bytes. Older firmware treats that longer same-version payload
+as unsupported and preserves it rather than loading or overwriting it.
 
 ### Settings upgrade / migration
 

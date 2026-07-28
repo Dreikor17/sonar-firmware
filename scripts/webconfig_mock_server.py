@@ -48,7 +48,7 @@ LEN_LIMITS = {
     "mqtt.email": 63, "mqtt.ntp": 63, "timezone": 31, "snmp.community": 23,
 }
 SLOT_LEN_LIMITS = {"server": 63, "username": 31, "password": 63,
-                   "token": 47, "topic": 95, "audience": 63}
+                   "token": 47, "topic": 95, "audience": 63, "filter": 37}
 
 # Preset names + what the UI must collect (mirrors handlePresets()).
 PRESETS = (
@@ -99,7 +99,8 @@ def default_config(setup_mode):
 
 def _slot():
     return {"preset": "none", "server": "", "port": 8883, "username": "",
-            "password": "", "token": "", "topic": "", "audience": ""}
+            "password": "", "token": "", "topic": "", "audience": "",
+            "filter": "all"}
 
 
 class State:
@@ -253,6 +254,26 @@ def apply_set(cfg, key, val):
     return True, "OK"   # unknown-but-allowlisted: accept (mock is lenient here)
 
 
+def canonical_packet_filter(val):
+    stripped = val.strip()
+    if stripped == "" or stripped == "all":
+        return "all"
+    if stripped == "none":
+        return "none"
+    mask = 0
+    for part in stripped.split(","):
+        token = part.strip()
+        if not re.fullmatch(r"[0-9]+", token):
+            return None
+        packet_type = int(token)
+        if packet_type > 15:
+            return None
+        mask |= 1 << packet_type
+    if mask == 0xFFFF:
+        return "all"
+    return ",".join(str(i) for i in range(16) if mask & (1 << i))
+
+
 def apply_slot_set(cfg, idx, field, val):
     slot = cfg["mqtt"]["slots"][idx]
     if field in SLOT_LEN_LIMITS and len(val) > SLOT_LEN_LIMITS[field]:
@@ -266,6 +287,12 @@ def apply_slot_set(cfg, idx, field, val):
             return False, "Error: port must be between 1 and 65535"
         slot["port"] = p
         return True, "OK"
+    if field == "filter":
+        canonical = canonical_packet_filter(val)
+        if canonical is None:
+            return False, "Error: filter must be all, none, or CSV packet types 0-15"
+        slot["filter"] = canonical
+        return True, "OK - slot %d packet types: %s" % (idx + 1, canonical)
     if field in ("preset", "server", "username", "password", "token", "topic", "audience"):
         slot[field] = val
         if field == "token":

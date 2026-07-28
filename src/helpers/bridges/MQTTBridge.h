@@ -8,6 +8,7 @@
 #include <WiFiUdp.h>
 #include <Timezone.h>
 #include "helpers/JWTHelper.h"
+#include "helpers/MQTTPacketFilter.h"
 #include "helpers/MQTTPresets.h"
 #include "helpers/MQTTLifecycle.h"
 #include <atomic>
@@ -369,6 +370,7 @@ private:
   enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW, MSG_NEIGHBORS };
   bool buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size);
   bool substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size);
+  uint8_t eligiblePacketSlots(uint8_t packet_type, MQTTMessageType type);
 
   // Internal methods - slot management
   // Lifetime model (Phase 1 of MQTT memory-defrag):
@@ -404,10 +406,10 @@ private:
   void mqttTaskLoop();  // Main loop for MQTT task
   void initializeWiFiInTask();  // WiFi initialization moved to task
   #endif
-  bool publishPacket(mesh::Packet* packet, bool is_tx,
+  bool publishPacket(mesh::Packet* packet, bool is_tx, bool& has_eligible_target,
                      const uint8_t* raw_data = nullptr, int raw_len = 0,
                      float snr = 0.0f, float rssi = 0.0f);
-  bool publishRaw(mesh::Packet* packet);
+  bool publishRaw(mesh::Packet* packet, bool& has_eligible_target);
 #if defined(WITH_MQTT_NEIGHBORS)
   // Publishes the pending _neighbors_json_buffer to every connected slot's
   // neighbors topic. Runs on the MQTT task (Core 0) only.

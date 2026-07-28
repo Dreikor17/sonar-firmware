@@ -248,6 +248,7 @@ The MQTT bridge comes with the following defaults for fresh installs (unless ove
 - **Slot 1**: `analyzer-us`
 - **Slot 2**: `analyzer-eu`
 - **Slots 3-6**: `none` (disabled)
+- **Per-slot packet filters**: `all` (every payload type is uploaded)
 - **WiFi SSID**: (blank — must be configured)
 - **WiFi Password**: (blank — optional for open networks)
 - **WiFi Power Save**: `none` (no power save)
@@ -272,6 +273,7 @@ Each slot (1-6) supports the following commands:
 - `get mqttN.token` - Get per-slot token (e.g., MeshRank account token)
 - `get mqttN.topic` - Get custom topic template for slot N
 - `get mqttN.audience` - Get JWT audience for slot N (custom slots only)
+- `get mqttN.filter` - Get the slot's packet-type allowlist (`all`, `none`, or numeric CSV)
 
 #### Set Commands
 - `set mqttN.preset <name>` - Set slot N to a built-in preset. Use any `name` from the [preset table](#slot-based-preset-system) (run `get mqtt.presets` on-device for the full list). Most presets need no further configuration; the exceptions are:
@@ -287,8 +289,40 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.topic <template>` - Set custom topic template (custom preset only, see below)
 - `set mqttN.audience <audience>` - Set JWT audience for custom slot (enables Ed25519 JWT auth)
 - `set mqttN.audience` - Clear JWT audience (reverts to username/password auth)
+- `set mqttN.filter <all|none|CSV>` - Select payload types uploaded to this slot
 
 **Note:** Custom server/port settings only apply when the slot's preset is `custom`. Username/password also apply to built-in presets that use per-slot credentials (e.g. `inwmesh`); other userpass presets (`tennmesh`, `nashmesh`, `ctmesh`) ship fixed credentials in firmware.
+
+#### Per-broker packet filters
+
+Each slot has an independent allowlist. For example, this sends only text
+messages and adverts to slot 1 while slot 2 keeps its default of all packet
+types:
+
+```bash
+set mqtt1.filter 2,4
+set mqtt2.filter all
+```
+
+Use `none` when a broker should remain connected for status/neighbors but
+receive no packet traffic. A bare `set mqttN.filter` or an empty WebConfig
+value resets the slot to `all`.
+
+| Type | Name | Type | Name |
+|------|------|------|------|
+| 0 | REQ | 8 | PATH |
+| 1 | RESPONSE | 9 | TRACE |
+| 2 | TXT_MSG | 10 | MULTIPART |
+| 3 | ACK | 11 | CONTROL |
+| 4 | ADVERT | 12-14 | Reserved |
+| 5 | GRP_TXT | 15 | RAW_CUSTOM |
+| 6 | GRP_DATA | | |
+| 7 | ANON_REQ | | |
+
+The filter applies to both structured `packets` and `raw` publications for RX
+packets and for TX packets permitted by `mqtt.tx`. It does not affect local
+packet processing, forwarding, capture logs, status, or neighbors. Changes
+apply live without reconnecting the broker.
 
 #### Example: Configure MeshRank on Slot 3
 ```bash

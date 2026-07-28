@@ -2816,7 +2816,9 @@ void MQTTBridge::processPacketQueue() {
       _last_raw_timestamp = millis();
     }
 
+    bool packet_eligible = false;
     bool packet_published = publishPacket(&queued.packet_copy, queued.is_tx,
+                                          packet_eligible,
                                           queued.has_raw_data ? queued.raw_data : nullptr,
                                           queued.has_raw_data ? queued.raw_len  : 0,
                                           queued.snr, queued.rssi);
@@ -2824,15 +2826,21 @@ void MQTTBridge::processPacketQueue() {
 
     // Publish raw if enabled (live from prefs so `set mqtt.raw` applies without
     // a bridge restart)
+    bool raw_eligible = false;
     bool raw_published = false;
     if (_obs->mqtt_raw_enabled) {
-      raw_published = publishRaw(&queued.packet_copy);
+      raw_published = publishRaw(&queued.packet_copy, raw_eligible);
     }
 
-    bool any_published = MQTTPacketQueuePolicy::queuedPacketPublished(packet_published, raw_published);
+    // Decide intentional completion once across the entire queue item. An
+    // ineligible raw path (for example, MeshRank's packets-only topic style)
+    // must not hide a failed eligible structured publish.
+    const bool queue_complete = MQTTPacketFilter::publishComplete(
+        packet_eligible || raw_eligible,
+        MQTTPacketQueuePolicy::queuedPacketPublished(packet_published, raw_published));
     const MQTTPacketQueuePolicy::RetryDecision retry =
         MQTTPacketQueuePolicy::retryDecision(
-            any_published, queued.retry_attempts,
+            queue_complete, queued.retry_attempts,
             static_cast<uint32_t>(now_ms));
     if (retry.action == MQTTPacketQueuePolicy::RetryAction::Schedule) {
       queued.retry_attempts = retry.retry_attempts;
@@ -2943,22 +2951,30 @@ void MQTTBridge::processPacketQueue() {
       _last_raw_timestamp = millis();
     }
 
+    bool packet_eligible = false;
     bool packet_published = publishPacket(&queued.packet_copy, queued.is_tx,
+                                          packet_eligible,
                                           queued.has_raw_data ? queued.raw_data : nullptr,
                                           queued.has_raw_data ? queued.raw_len  : 0,
                                           queued.snr, queued.rssi);
     // No taskYIELD() on non-ESP32 platforms (non-FreeRTOS, cooperative scheduling not needed)
 
     // Live from prefs so `set mqtt.raw` applies without a bridge restart.
+    bool raw_eligible = false;
     bool raw_published = false;
     if (_obs->mqtt_raw_enabled) {
-      raw_published = publishRaw(&queued.packet_copy);
+      raw_published = publishRaw(&queued.packet_copy, raw_eligible);
     }
 
-    bool any_published = MQTTPacketQueuePolicy::queuedPacketPublished(packet_published, raw_published);
+    // Decide intentional completion once across the entire queue item. An
+    // ineligible raw path (for example, MeshRank's packets-only topic style)
+    // must not hide a failed eligible structured publish.
+    const bool queue_complete = MQTTPacketFilter::publishComplete(
+        packet_eligible || raw_eligible,
+        MQTTPacketQueuePolicy::queuedPacketPublished(packet_published, raw_published));
     const MQTTPacketQueuePolicy::RetryDecision retry =
         MQTTPacketQueuePolicy::retryDecision(
-            any_published, queued.retry_attempts,
+            queue_complete, queued.retry_attempts,
             static_cast<uint32_t>(now_ms));
     if (retry.action == MQTTPacketQueuePolicy::RetryAction::Schedule) {
       queued.retry_attempts = retry.retry_attempts;
@@ -3004,6 +3020,28 @@ void MQTTBridge::processPacketQueue() {
 // ---------------------------------------------------------------------------
 // Publishing
 // ---------------------------------------------------------------------------
+
+uint8_t MQTTBridge::eligiblePacketSlots(uint8_t packet_type, MQTTMessageType type) {
+  static_assert(RUNTIME_MQTT_SLOTS <= 8, "eligible slot mask must fit in uint8_t");
+  if (!_obs || (type != MSG_PACKETS && type != MSG_RAW)) return 0;
+
+  uint8_t eligible_slots = 0;
+  char topic[128];
+  for (int i = 0; i < RUNTIME_MQTT_SLOTS; ++i) {
+    const bool slot_enabled = _slots[i].enabled && _slots[i].client != nullptr;
+    // Load once so a live CLI/WebConfig update cannot split this packet's
+    // eligibility decision across two different masks.
+    const uint16_t filter_mask = _obs->mqtt_slot_packet_filter[i];
+    if (!slot_enabled || !MQTTPacketFilter::allows(filter_mask, packet_type)) continue;
+
+    const bool topic_supported = buildTopicForSlot(i, type, topic, sizeof(topic));
+    if (MQTTPacketFilter::slotEligible(slot_enabled, topic_supported,
+                                       filter_mask, packet_type)) {
+      eligible_slots |= static_cast<uint8_t>(1u << i);
+    }
+  }
+  return eligible_slots;
+}
 
 bool MQTTBridge::publishStatus() {
   if (!_cached_has_connected_slots) {
@@ -3104,9 +3142,16 @@ bool MQTTBridge::publishStatus() {
 }
 
 bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
+                                bool& has_eligible_target,
                                 const uint8_t* raw_data, int raw_len,
                                 float snr, float rssi) {
+  has_eligible_target = false;
   if (!packet) return false;
+
+  const uint8_t packet_type = packet->getPayloadType();
+  const uint8_t eligible_slots = eligiblePacketSlots(packet_type, MSG_PACKETS);
+  has_eligible_target = eligible_slots != 0;
+  if (!has_eligible_target) return false;
 
   refreshOriginFromPrefs();
 
@@ -3213,7 +3258,8 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
     bool published = false;
     char topic[128];
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
+      if ((eligible_slots & static_cast<uint8_t>(1u << i)) != 0 &&
+          _slots[i].enabled && _slots[i].client && _slots[i].connected) {
         if (buildTopicForSlot(i, MSG_PACKETS, topic, sizeof(topic))) {
           if (publishToSlot(i, topic, active_buffer, false)) {
             published = true;
@@ -3223,7 +3269,6 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
     }
     return published;
   } else {
-    uint8_t packet_type = packet->getPayloadType();
     if (packet_type == 4 || packet_type == 9) {
       MQTT_DEBUG_PRINTLN("Failed to build packet JSON for type=%d (len=%d), packet not published", packet_type, len);
     }
@@ -3231,8 +3276,14 @@ bool MQTTBridge::publishPacket(mesh::Packet* packet, bool is_tx,
   return false;
 }
 
-bool MQTTBridge::publishRaw(mesh::Packet* packet) {
+bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target) {
+  has_eligible_target = false;
   if (!packet) return false;
+
+  const uint8_t packet_type = packet->getPayloadType();
+  const uint8_t eligible_slots = eligiblePacketSlots(packet_type, MSG_RAW);
+  has_eligible_target = eligible_slots != 0;
+  if (!has_eligible_target) return false;
 
   refreshOriginFromPrefs();
 
@@ -3264,7 +3315,8 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet) {
     bool published = false;
     char topic[128];
     for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
-      if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
+      if ((eligible_slots & static_cast<uint8_t>(1u << i)) != 0 &&
+          _slots[i].enabled && _slots[i].client && _slots[i].connected) {
         if (buildTopicForSlot(i, MSG_RAW, topic, sizeof(topic))) {
           if (publishToSlot(i, topic, active_buffer, false)) {
             published = true;

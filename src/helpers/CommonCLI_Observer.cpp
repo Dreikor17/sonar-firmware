@@ -25,6 +25,7 @@
 #include "bridges/MQTTBridge.h"
 #include "MQTTConnectionPolicy.h"  // classifySlotActivation() — "will this slot connect here?"
 #include "MQTTDefaults.h"
+#include "MQTTPacketFilter.h"
 #endif
 
 // Local copy of the busted-libc-safe atoi (the original in CommonCLI.cpp is static).
@@ -529,6 +530,20 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       savePrefs();
       _callbacks->restartBridgeSlot(slot);
       sprintf(reply, "OK - slot %d JWT audience cleared (using username/password auth)", slot + 1);
+    } else if (strcmp(subcmd, "filter") == 0 ||
+               strncmp(subcmd, "filter ", 7) == 0) {
+      // Empty/bare input resets to the backwards-compatible all-types default.
+      const char* filter_value = subcmd[6] == '\0' ? "" : &subcmd[7];
+      uint16_t filter_mask = 0;
+      if (!MQTTPacketFilter::parse(filter_value, &filter_mask)) {
+        strcpy(reply, "Error: filter must be all, none, or CSV packet types 0-15");
+      } else {
+        _mqtt_prefs.mqtt_slot_packet_filter[slot] = filter_mask;
+        savePrefs();
+        char filter_text[MQTTPacketFilter::kFilterTextSize];
+        MQTTPacketFilter::format(filter_mask, filter_text, sizeof(filter_text));
+        snprintf(reply, 160, "OK - slot %d packet types: %s", slot + 1, filter_text);
+      }
     } else {
       sprintf(reply, "unknown config: %s", config);
     }
@@ -868,6 +883,14 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
         sprintf(reply, "> %s", _mqtt_prefs.mqtt_slot_audience[slot]);
       } else {
         strcpy(reply, "> (not set - custom slots use username/password auth)");
+      }
+    } else if (strcmp(subcmd, "filter") == 0) {
+      char filter_text[MQTTPacketFilter::kFilterTextSize];
+      if (MQTTPacketFilter::format(_mqtt_prefs.mqtt_slot_packet_filter[slot],
+                                   filter_text, sizeof(filter_text))) {
+        snprintf(reply, 160, "> %s", filter_text);
+      } else {
+        strcpy(reply, "Error: invalid stored packet filter");
       }
     } else if (memcmp(subcmd, "diag", 4) == 0) {
       MQTTBridge::formatSlotDiagReply(reply, 160, slot);

@@ -5,6 +5,7 @@
 
 #define WITH_MQTT_BRIDGE 1
 #include "helpers/MQTTPrefsCodec.h"
+#include "helpers/MQTTPacketFilter.h"
 
 namespace Codec = MQTTPrefsCodec;
 
@@ -20,6 +21,7 @@ MQTTPrefs defaults() {
   prefs.wifi_power_save = 1;
   for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
     strncpy(prefs.mqtt_slot_preset[i], "none", sizeof(prefs.mqtt_slot_preset[i]) - 1);
+    prefs.mqtt_slot_packet_filter[i] = MQTTPacketFilter::kAllPacketTypes;
   }
   strncpy(prefs.snmp_community, "public", sizeof(prefs.snmp_community) - 1);
   prefs.radio_watchdog_minutes = 5;
@@ -218,6 +220,10 @@ TEST(MQTTPrefsCodec, MigratesAllLegacySixSlotPrefixesWithoutClobberingDefaults) 
     } else {
       EXPECT_STREQ("time.example", prefs.mqtt_ntp_server);
     }
+    for (int slot = 0; slot < MQTT_PREFS_SLOT_COUNT; ++slot) {
+      EXPECT_EQ(MQTTPacketFilter::kAllPacketTypes,
+                prefs.mqtt_slot_packet_filter[slot]) << size << ":" << slot;
+    }
   }
 }
 
@@ -228,6 +234,9 @@ TEST(MQTTPrefsCodec, CurrentVersionedPayloadRoundTripsExactly) {
   strncpy(source.alert_region, "PNW", sizeof(source.alert_region) - 1);
   source.mqtt_neighbors_enabled = 1;
   source.mqtt_neighbors_interval = MQTT_NEIGHBORS_MAX_INTERVAL_MS;
+  for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
+    source.mqtt_slot_packet_filter[i] = static_cast<uint16_t>(1u << i);
+  }
   std::vector<uint8_t> bytes(Codec::kEncodedSize);
   ASSERT_EQ(Codec::kEncodedSize, Codec::encode(source, bytes.data(), bytes.size()));
 
@@ -238,6 +247,37 @@ TEST(MQTTPrefsCodec, CurrentVersionedPayloadRoundTripsExactly) {
   MQTTPrefs loaded = defaults();
   memcpy(&loaded, bytes.data() + sizeof(MQTTPrefsHeader), plan.payload_len);
   EXPECT_EQ(0, memcmp(&source, &loaded, sizeof(source)));
+}
+
+TEST(MQTTPrefsCodec, PreFilterV1PayloadDefaultsEverySlotToAllTypes) {
+  MQTTPrefs source = defaults();
+  strncpy(source.mqtt_origin, "pre-filter-node", sizeof(source.mqtt_origin) - 1);
+  source.mqtt_neighbors_enabled = 1;
+  source.mqtt_neighbors_interval = MQTT_NEIGHBORS_MAX_INTERVAL_MS;
+  for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
+    source.mqtt_slot_packet_filter[i] = 0;
+  }
+
+  std::vector<uint8_t> bytes(sizeof(MQTTPrefsHeader) + Codec::kV1PreFilterPayloadSize, 0);
+  writeHeader(&bytes, MQTT_PREFS_VERSION,
+              static_cast<uint16_t>(Codec::kV1PreFilterPayloadSize));
+  memcpy(bytes.data() + sizeof(MQTTPrefsHeader), &source, Codec::kV1PreFilterPayloadSize);
+
+  const Codec::DecodePlan plan = classify(bytes);
+  ASSERT_EQ(Codec::Source::Current, plan.source);
+  ASSERT_EQ(Codec::kV1PreFilterPayloadSize, plan.payload_len);
+  ASSERT_TRUE(plan.observer_fields_present);
+  ASSERT_FALSE(plan.preserve_file);
+
+  MQTTPrefs loaded = defaults();
+  memcpy(&loaded, bytes.data() + sizeof(MQTTPrefsHeader), plan.payload_len);
+  EXPECT_STREQ("pre-filter-node", loaded.mqtt_origin);
+  EXPECT_EQ(1u, loaded.mqtt_neighbors_enabled);
+  EXPECT_EQ(MQTT_NEIGHBORS_MAX_INTERVAL_MS, loaded.mqtt_neighbors_interval);
+  for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
+    EXPECT_EQ(MQTTPacketFilter::kAllPacketTypes,
+              loaded.mqtt_slot_packet_filter[i]) << i;
+  }
 }
 
 TEST(MQTTPrefsCodec, CompatibleShortV1PayloadPreservesDefaultsBeyondObserverBoundary) {
@@ -304,6 +344,10 @@ TEST(MQTTPrefsCodec, PreNeighborsV1PayloadLoadsObserverFieldsAndDefaultsNeighbor
   // Interval begins at 2860 (beyond the read) -> keeps the caller's default.
   EXPECT_EQ(0u, loaded.mqtt_neighbors_enabled);
   EXPECT_EQ(MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS, loaded.mqtt_neighbors_interval);
+  for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
+    EXPECT_EQ(MQTTPacketFilter::kAllPacketTypes,
+              loaded.mqtt_slot_packet_filter[i]) << i;
+  }
 }
 
 TEST(MQTTPrefsCodec, CorruptOrShortVersionedInputsArePreserved) {

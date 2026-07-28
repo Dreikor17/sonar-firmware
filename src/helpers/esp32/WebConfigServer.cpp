@@ -11,6 +11,7 @@
 #include <esp_heap_caps.h>
 
 #include <helpers/CommonCLI.h>
+#include <helpers/MQTTPacketFilter.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/WebConfigKeys.h>
 #include <helpers/bridges/MQTTBridge.h>
@@ -618,6 +619,15 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
       s["token"] = _obs->mqtt_slot_token[i][0] ? SECRET_SENTINEL : "";
       s["topic"] = (const char*)_obs->mqtt_slot_topic[i];
       s["audience"] = (const char*)_obs->mqtt_slot_audience[i];
+      char filter_text[MQTTPacketFilter::kFilterTextSize];
+      if (MQTTPacketFilter::format(_obs->mqtt_slot_packet_filter[i],
+                                   filter_text, sizeof(filter_text))) {
+        // Mutable char input is copied into the ArduinoJson document; the
+        // stack buffer is reused on the next slot.
+        s["filter"] = filter_text;
+      } else {
+        s["filter"] = "all";
+      }
     }
   }
 
