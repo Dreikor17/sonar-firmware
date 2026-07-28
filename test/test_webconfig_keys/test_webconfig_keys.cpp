@@ -22,6 +22,7 @@ TEST(WebConfigKeys, AllowsPerSlotKeys) {
   EXPECT_TRUE(wcIsAllowedSetKey("mqtt1.preset"));
   EXPECT_TRUE(wcIsAllowedSetKey("mqtt1.server"));
   EXPECT_TRUE(wcIsAllowedSetKey("mqtt1.token"));
+  EXPECT_TRUE(wcIsAllowedSetKey("mqtt2.filter"));
   EXPECT_TRUE(wcIsAllowedSetKey("mqtt6.audience"));  // MAX_MQTT_SLOTS == 6
 }
 
@@ -102,6 +103,7 @@ TEST(WebConfigKeys, NonSecretKeysNotFlagged) {
   EXPECT_FALSE(wcIsSecretKey("wifi.ssid"));
   EXPECT_FALSE(wcIsSecretKey("mqtt1.username"));  // username is not masked
   EXPECT_FALSE(wcIsSecretKey("mqtt1.server"));
+  EXPECT_FALSE(wcIsSecretKey("mqtt1.filter"));
   EXPECT_FALSE(wcIsSecretKey("mqtt.origin"));
   EXPECT_FALSE(wcIsSecretKey("name"));
   EXPECT_FALSE(wcIsSecretKey(""));

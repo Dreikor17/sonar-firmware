@@ -248,6 +248,7 @@ The MQTT bridge comes with the following defaults for fresh installs (unless ove
 - **Slot 1**: `analyzer-us`
 - **Slot 2**: `analyzer-eu`
 - **Slots 3-6**: `none` (disabled)
+- **Per-slot packet filters**: `all` (every payload type is uploaded)
 - **WiFi SSID**: (blank — must be configured)
 - **WiFi Password**: (blank — optional for open networks)
 - **WiFi Power Save**: `none` (no power save)
@@ -272,6 +273,7 @@ Each slot (1-6) supports the following commands:
 - `get mqttN.token` - Get per-slot token (e.g., MeshRank account token)
 - `get mqttN.topic` - Get custom topic template for slot N
 - `get mqttN.audience` - Get JWT audience for slot N (custom slots only)
+- `get mqttN.filter` - Get the slot's packet-type allowlist (`all`, `none`, or numeric CSV)
 
 #### Set Commands
 - `set mqttN.preset <name>` - Set slot N to a built-in preset. Use any `name` from the [preset table](#slot-based-preset-system) (run `get mqtt.presets` on-device for the full list). Most presets need no further configuration; the exceptions are:
@@ -287,8 +289,70 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.topic <template>` - Set custom topic template (custom preset only, see below)
 - `set mqttN.audience <audience>` - Set JWT audience for custom slot (enables Ed25519 JWT auth)
 - `set mqttN.audience` - Clear JWT audience (reverts to username/password auth)
+- `set mqttN.filter <all|none|list>` - Select payload types uploaded to this slot
 
 **Note:** Custom server/port settings only apply when the slot's preset is `custom`. Username/password also apply to built-in presets that use per-slot credentials (e.g. `inwmesh`); other userpass presets (`tennmesh`, `nashmesh`, `ctmesh`) ship fixed credentials in firmware.
+
+#### Per-broker packet filters
+
+Each slot has an independent allowlist. List entries may be payload-type names
+or numbers, and the two can be mixed. These are all equivalent, sending only
+text messages and adverts to slot 1:
+
+```bash
+set mqtt1.filter txt_msg,advert
+set mqtt1.filter 2,4
+set mqtt1.filter advert, 2
+```
+
+Use `none` when a broker should remain connected for status/neighbors but
+receive no packet traffic. A bare `set mqttN.filter` resets the slot to `all`.
+`get mqttN.filter` always answers in the canonical numeric form (`all`, `none`,
+or an ascending CSV), whichever spelling was used to set it.
+
+| Type | Name | Type | Name |
+|------|------|------|------|
+| 0 | `req` | 8 | `path` |
+| 1 | `response` | 9 | `trace` |
+| 2 | `txt_msg` | 10 | `multipart` |
+| 3 | `ack` | 11 | `control` |
+| 4 | `advert` | 12-14 | reserved (number only) |
+| 5 | `grp_txt` | 15 | `raw_custom` |
+| 6 | `grp_data` | | |
+| 7 | `anon_req` | | |
+
+Names are lowercase and exact; types 12-14 are reserved upstream and have no
+name, so they are selectable by number only.
+
+The filter applies to both structured `packets` and `raw` publications for RX
+packets and for TX packets permitted by `mqtt.tx`. It does not affect local
+packet processing, forwarding, capture logs, status, or neighbors. Changes
+apply live without reconnecting the broker.
+
+A rejected packet is dropped before it is copied into the publish queue, so a
+narrow filter saves the queue slot and the per-packet work, not just the
+upload. `get mqtt.stats` reports the running count as `filt=<n>`, and a slot
+whose filter is not `all` shows it in `get mqttN.diag` and on the WebConfig
+Stats tab — a filtered slot otherwise looks identical to an idle healthy one.
+
+The diag reply is capped at 160 characters. When a slot is also reporting a
+long error tail, the filter is summarised as `filter:<n>/16` rather than
+listed, because a list clipped mid-way would read as a different, valid
+allowlist. `get mqttN.filter` always gives the exact value.
+
+In WebConfig the allowlist is a checkbox per type under each configured slot,
+with **All** / **None** shortcuts. Clearing every box is `none` (nothing
+uploaded).
+
+**Downgrade note:** rolling back to any build from this release onward is safe —
+the older firmware reads the settings it understands and simply ignores the
+packet filters, which revert to `all` if it saves.
+
+Rolling back to a build released *before* this one is the case to watch: that
+firmware rejects the longer settings file outright and falls back to defaults,
+losing the stored WiFi credentials along with the broker config. Slots left at
+the `all` default keep the file in the shorter layout those builds can read, so
+if you may need to roll a node back that far, reset every slot to `all` first.
 
 #### Example: Configure MeshRank on Slot 3
 ```bash

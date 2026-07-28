@@ -8,6 +8,7 @@
 #include <WiFiUdp.h>
 #include <Timezone.h>
 #include "helpers/JWTHelper.h"
+#include "helpers/MQTTPacketFilter.h"
 #include "helpers/MQTTPresets.h"
 #include "helpers/MQTTLifecycle.h"
 #include <atomic>
@@ -325,6 +326,10 @@ private:
   unsigned long _last_memory_check;
   bool _memory_pressure = false;  // Cached max-alloc verdict; re-sampled at most once per interval in publishPacket() so the heap walk isn't paid per-packet under pressure
   int _skipped_publishes;  // Exposed via SNMP; count of publishes skipped when max_alloc is too low
+  // Packets rejected by the per-slot filters before reaching the queue. Written
+  // on Core 1 (radio callbacks), read on Core 0 for `mqtt.stats`; a torn read of
+  // a diagnostic counter is harmless, so no atomic is warranted.
+  unsigned long _filtered_packets = 0;
 
   // Status publish retry tracking
   unsigned long _last_status_retry;  // Track last retry attempt (separate from successful publish)
@@ -369,6 +374,8 @@ private:
   enum MQTTMessageType { MSG_STATUS, MSG_PACKETS, MSG_RAW, MSG_NEIGHBORS };
   bool buildTopicForSlot(int index, MQTTMessageType type, char* topic_buf, size_t buf_size);
   bool substituteTopicTemplate(const char* tmpl, MQTTMessageType type, int slot_index, char* buf, size_t buf_size);
+  uint8_t eligiblePacketSlots(uint8_t packet_type, MQTTMessageType type);
+  bool shouldQueuePacketType(uint8_t packet_type, bool& filtered);
 
   // Internal methods - slot management
   // Lifetime model (Phase 1 of MQTT memory-defrag):
@@ -404,10 +411,10 @@ private:
   void mqttTaskLoop();  // Main loop for MQTT task
   void initializeWiFiInTask();  // WiFi initialization moved to task
   #endif
-  bool publishPacket(mesh::Packet* packet, bool is_tx,
+  bool publishPacket(mesh::Packet* packet, bool is_tx, bool& has_eligible_target,
                      const uint8_t* raw_data = nullptr, int raw_len = 0,
                      float snr = 0.0f, float rssi = 0.0f);
-  bool publishRaw(mesh::Packet* packet);
+  bool publishRaw(mesh::Packet* packet, bool& has_eligible_target);
 #if defined(WITH_MQTT_NEIGHBORS)
   // Publishes the pending _neighbors_json_buffer to every connected slot's
   // neighbors topic. Runs on the MQTT task (Core 0) only.
@@ -591,6 +598,9 @@ public:
     const char* state;   // "inactive" | "wait" | "ok" | "fail" | "disc"
     unsigned long publish_ok;
     unsigned long publish_err;
+    // Raw packet-type allowlist. Kept as the mask rather than canonical text so
+    // the 1 KB stats JSON stays compact; the portal renders it.
+    uint16_t filter_mask;
   };
   static bool getSlotStatusSnapshot(int slot_index, SlotStatusSnapshot* out);
   /** True when WiFi is set and at least one MQTT slot can run (preset + custom host if needed). */

@@ -100,11 +100,50 @@ fall back to defaults (no downgrade, no misread). `saveMQTTPrefs()` also refuses
 write while such a file is present (`_mqtt_prefs_hold`), so a `set` command after a
 firmware downgrade can't clobber the newer config — observer settings changed in that
 state simply don't persist. The frozen legacy layouts are pinned with `static_assert`s
-in `CommonCLI.h`, so every target build re-verifies the fleet's file offsets.
+in `MQTTPrefsStorage.h`, so every target build re-verifies the fleet's file offsets.
 
 Adding a field to the current version stays backward compatible: append it to the end
-of `MQTTPrefs`. An older, shorter payload still loads and the missing tail keeps its
-default; a newer, longer one is truncated harmlessly.
+of `MQTTPrefs`, give the older exact payload length an explicit decoder boundary, and
+leave the missing tail at its default. The packet-filter addition follows that rule:
+the prior 2864-byte v1 payload loads with all six filters set to `all`, while the
+full payload is 2876 bytes.
+
+#### The downgrade contract
+
+**Within a version tag the layout is append-only, and a longer payload is always
+readable.** A file written by a later build starts with this binary's exact baseline,
+so `classify()` reads that prefix and ignores the tail. A downgraded node keeps its
+WiFi credentials, broker slots, and every other setting it understands; the only thing
+it loses is the settings the newer build added.
+
+That asymmetry is the whole point. Refusing the file costs the operator the network
+itself — `/mqtt_prefs` holds `wifi_ssid`/`wifi_password` as well as the broker config,
+so a node that falls back to defaults has no WiFi, no portal, and no OTA, recoverable
+only over serial. Reading it costs a feature's settings. Losing later settings is the
+acceptable half of that trade; losing the node is not.
+
+The tail survives until something actually writes. `saveMQTTPrefs()` rewrites at this
+binary's own length, so a rollback that changes no observer setting and is later rolled
+forward keeps the newer fields intact — only an explicit `set` while downgraded drops
+them. The boot log says so when it happens.
+
+**A change that is not a pure append MUST bump `MQTT_PREFS_VERSION`.** The version
+check is what makes the rule above safe: a different tag is still refused outright and
+the file preserved, because the bytes may no longer mean what this binary thinks. Never
+reorder, resize, or repurpose an existing field within a version.
+
+Note the rule is only as old as the build that implements it. Firmware already deployed
+carries the *previous* decoder, which rejects any longer v1 payload — so rolling back
+from this build to one shipped before it still falls back to defaults.
+`MQTTPrefsCodec::payloadLenFor()` covers that gap from the writing side: it returns the
+shortest length that still round-trips the configuration, so a node keeps writing 2864
+bytes until a packet filter actually holds something, and clearing the last non-default
+filter puts it back. That mitigation can be retired once no supported downgrade target
+predates the contract; the contract itself is the durable half.
+
+Shorter payloads keep their existing, stricter treatment: a short length must match a
+boundary that really shipped (`MQTT_PREFS_V1_*_PAYLOAD_SIZE`), because raw prefs have
+no checksum and an arbitrary short size cannot be trusted to mean anything.
 
 ### Settings upgrade / migration
 
