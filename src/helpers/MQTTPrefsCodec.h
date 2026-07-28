@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "MQTTPacketFilter.h"
 #include "MQTTPrefsStorage.h"
 
 #ifdef WITH_MQTT_BRIDGE
@@ -41,20 +42,40 @@ static const size_t kV1PreFilterPayloadSize = MQTT_PREFS_V1_PRE_FILTER_PAYLOAD_S
 static const size_t kV1BaselinePayloadSize = MQTT_PREFS_V1_FULL_PAYLOAD_SIZE;
 static const size_t kEncodedSize = sizeof(MQTTPrefsHeader) + kV1BaselinePayloadSize;
 
-inline MQTTPrefsHeader makeHeader() {
+// Shortest payload length that still round-trips this configuration.
+//
+// The packet-filter tail is the only optional part of the current layout, and
+// its default (all types) is exactly what a pre-filter decoder supplies for a
+// missing tail. So a device whose filters are all default keeps writing the
+// 2864-byte payload that pre-filter firmware can still read. That matters
+// because /mqtt_prefs also carries the WiFi credentials: an unrecognised
+// longer payload sends older firmware to defaults with no network, and it
+// refuses to overwrite the file, so the node cannot be recovered over the air.
+// Touching any filter opts that node into the longer payload — a deliberate,
+// operator-initiated trade rather than a side effect of upgrading.
+inline size_t payloadLenFor(const MQTTPrefs& prefs) {
+  return MQTTPacketFilter::allMasksDefault(prefs.mqtt_slot_packet_filter,
+                                           MQTT_PREFS_SLOT_COUNT)
+      ? kV1PreFilterPayloadSize
+      : kV1BaselinePayloadSize;
+}
+
+inline MQTTPrefsHeader makeHeader(size_t payload_len) {
   MQTTPrefsHeader header;
   memcpy(header.magic, MQTT_PREFS_MAGIC, sizeof(header.magic));
   header.version = MQTT_PREFS_VERSION;
-  header.payload_len = static_cast<uint16_t>(kV1BaselinePayloadSize);
+  header.payload_len = static_cast<uint16_t>(payload_len);
   return header;
 }
 
 inline size_t encode(const MQTTPrefs& prefs, uint8_t* output, size_t output_size) {
-  if (output == nullptr || output_size < kEncodedSize) return 0;
-  const MQTTPrefsHeader header = makeHeader();
+  const size_t payload_len = payloadLenFor(prefs);
+  const size_t encoded_size = sizeof(MQTTPrefsHeader) + payload_len;
+  if (output == nullptr || output_size < encoded_size) return 0;
+  const MQTTPrefsHeader header = makeHeader(payload_len);
   memcpy(output, &header, sizeof(header));
-  memcpy(output + sizeof(header), &prefs, sizeof(prefs));
-  return kEncodedSize;
+  memcpy(output + sizeof(header), &prefs, payload_len);
+  return encoded_size;
 }
 
 inline bool isMagicPrefix(const uint8_t* input, size_t available) {

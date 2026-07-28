@@ -106,8 +106,29 @@ Adding a field to the current version stays backward compatible: append it to th
 of `MQTTPrefs`, give the older exact payload length an explicit decoder boundary, and
 leave the missing tail at its default. The packet-filter addition follows that rule:
 the prior 2864-byte v1 payload loads with all six filters set to `all`, while the
-current payload is 2876 bytes. Older firmware treats that longer same-version payload
-as unsupported and preserves it rather than loading or overwriting it.
+full payload is 2876 bytes.
+
+#### Why the written length is not always the full length
+
+Reading a longer payload is the easy direction; writing one is a one-way door.
+Pre-filter firmware classifies a 2876-byte v1 payload as `UnsupportedVersion`, so
+after a downgrade the node boots on *defaults* and `_mqtt_prefs_hold` blocks every
+save. `/mqtt_prefs` holds `wifi_ssid`/`wifi_password` as well as the broker config, so
+that node comes up with no network at all: no portal, no OTA, no way back except
+serial or a re-flash forward. The same is true of every previous tail (observer,
+neighbors) — each append moved the cliff.
+
+`MQTTPrefsCodec::payloadLenFor()` narrows the blast radius instead of widening it. It
+returns the *shortest* length that still round-trips the configuration, which for the
+packet-filter tail means: keep writing 2864 while all six masks are the all-types
+default, and only write 2876 once a filter actually holds something. A node that
+upgrades and never touches a filter therefore stays downgrade-readable, and clearing
+the last non-default filter puts it back. Opting in is an explicit operator action,
+not a side effect of installing a build.
+
+The rule generalises to the next appended field: give it a default that a missing tail
+already implies, and extend `payloadLenFor()` so the longer payload is only written
+when the field is set. That keeps every append reversible for the fleet majority.
 
 ### Settings upgrade / migration
 

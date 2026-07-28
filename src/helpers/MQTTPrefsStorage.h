@@ -140,6 +140,11 @@ static const uint32_t MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS = MQTT_NEIGHBORS_DEFAUL
 //   - PRE_NEIGHBORS (2860): full observer tail, no neighbors fields yet.
 //   - PRE_FILTER    (2864): neighbors tail, no per-slot packet filters.
 //   - FULL          (2876): current baseline, with six uint16_t filter masks.
+//
+// FULL is the maximum written, not the default: MQTTPrefsCodec::payloadLenFor()
+// keeps emitting PRE_FILTER while every slot holds the all-types default, so a
+// node that never touches a filter stays readable by pre-filter firmware. See
+// the rollback note there — /mqtt_prefs also carries the WiFi credentials.
 static const size_t MQTT_PREFS_V1_PRE_OBSERVER_PAYLOAD_SIZE = 2736;
 static const size_t MQTT_PREFS_V1_PRE_NEIGHBORS_PAYLOAD_SIZE = 2860;
 static const size_t MQTT_PREFS_V1_PRE_FILTER_PAYLOAD_SIZE = 2864;

@@ -41,6 +41,18 @@ input[type=text],input[type=password],input[type=number],input[type=email],selec
   border:1px solid var(--in-line);border-radius:8px;outline:none}  /* >=16px: stops iOS zoom-on-focus (sideways-scroll in captive sheet) */
 input:focus,select:focus{border-color:var(--acc);box-shadow:0 0 0 2px color-mix(in srgb,var(--acc) 25%,transparent)}
 input.dirty,select.dirty{border-color:var(--warn)}
+/* packet-type allowlist: auto-fit so six slots stay readable on a phone */
+.pkg{display:grid;grid-template-columns:repeat(auto-fill,minmax(122px,1fr));gap:2px 8px;
+  border:1px solid var(--in-line);border-radius:8px;padding:8px;background:var(--in-bg)}
+.f.dirty .pkg{border-color:var(--warn)}
+.pk{display:flex;align-items:center;gap:6px;font-size:12.5px;font-weight:400;margin:0;
+  min-height:26px;cursor:pointer}
+.pk input{width:15px;height:15px;margin:0;flex:none}
+.pk span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pka{display:flex;align-items:center;gap:10px;margin-top:5px;font-size:11.5px}
+.lnk{background:none;border:none;padding:0;font:inherit;font-size:11.5px;color:var(--acc);
+  cursor:pointer;text-decoration:underline}
+.pfsum{color:var(--mut);margin-left:auto}
 .row{display:flex;gap:10px}.row>.f{flex:1;min-width:0}
 .sw{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 0}
 .sw span b{display:block;font-size:13.5px;font-weight:600}
@@ -468,7 +480,7 @@ function api(path,opts){
       if(!r.ok&&r.status!==202){
         // Carry the HTTP status and any batch reqid so callers can tell a
         // definite rejection (400/409/413) from an ambiguous network failure.
-        var e=new Error(j.error||("HTTP "+r.status));e.status=r.status;e.reqid=j.reqid;throw e;
+        var e=new Error(j.error||("HTTP "+r.status));e.status=r.status;e.reqid=j.reqid;e.key=j.key;throw e;
       }
       return j;
     });
@@ -579,6 +591,7 @@ function loadConfig(){
     $$("[data-rg]").forEach(function(el){el.value=String(c.radio[el.dataset.rg]);el.classList.remove("dirty")});
     st.orig.radio=radioCombo();afHint();
     for(var i=1;i<=st.nslots;i++){refreshSlotFields($("#app-slots"),i);refreshSlotFields($("#wz-slots"),i)}
+    syncPacketFilters();
     updateSaveBar();
   });
 }
@@ -627,10 +640,98 @@ function revertAll(){loadConfig().then(function(){toast("Reverted")})}
 // maxlength per destination MQTTPrefs buffer minus the NUL (host[64],
 // username[32], password[64], token[48], topic[96], audience[64]). Bounds the
 // common browser case; the backend still owns authoritative length limits.
-var SLOT_MAXLEN={token:47,username:31,password:63,server:63,topic:95,audience:63,filter:37};
+// mqttN.filter is deliberately absent: it is a bitmask, not a text buffer, and
+// its accepted input (names, spaces) is longer than its canonical output — a
+// maxlength here would silently truncate a valid list into a different one.
+var SLOT_MAXLEN={token:47,username:31,password:63,server:63,topic:95,audience:63};
+
+// Payload types, mirroring PAYLOAD_TYPE_* in src/Packet.h. 12-14 are reserved
+// upstream with no name, so they are offered by number only.
+var PKT_TYPES=[[0,"REQ"],[1,"RESPONSE"],[2,"TXT_MSG"],[3,"ACK"],[4,"ADVERT"],
+  [5,"GRP_TXT"],[6,"GRP_DATA"],[7,"ANON_REQ"],[8,"PATH"],[9,"TRACE"],
+  [10,"MULTIPART"],[11,"CONTROL"],[12,"reserved"],[13,"reserved"],[14,"reserved"],
+  [15,"RAW_CUSTOM"]];
+// Name -> type, for the names MQTTPacketFilter::resolveToken actually accepts.
+// "reserved" is a shared display label for 12-14, not a spelling the firmware
+// resolves, so it is excluded — otherwise "reserved" would silently mean 14.
+// Null-prototype so a token like "constructor" can't match an inherited key.
+var PKT_NAMED=Object.create(null);
+PKT_TYPES.forEach(function(p){if(p[1]!=="reserved")PKT_NAMED[p[1].toLowerCase()]=p[0]});
+// Mirrors MQTTPacketFilter::parse/format. The text form must round-trip the
+// firmware's canonical output exactly, or an unedited slot reads as dirty.
+function filterMask(text){
+  var t=String(text==null?"":text).trim();
+  // Empty is "all" on purpose — it is what the firmware stores for a missing
+  // or cleared value, so an absent `filter` in /api/config reads as unfiltered
+  // rather than as a slot that uploads nothing.
+  if(t===""||t==="all")return 0xFFFF;
+  if(t==="none")return 0;
+  var mask=0,ok=true;
+  t.split(",").forEach(function(part){
+    var tok=part.trim(),n=-1;
+    if(/^[0-9]+$/.test(tok))n=parseInt(tok,10);
+    else if(tok.toLowerCase() in PKT_NAMED)n=PKT_NAMED[tok.toLowerCase()];
+    if(n<0||n>15){ok=false;return}
+    mask|=(1<<n);
+  });
+  // The device only ever emits canonical text; anything else means a value we
+  // did not write, so show it as unfiltered rather than inventing a subset.
+  return ok?mask:0xFFFF;
+}
+function filterText(mask){
+  if(mask===0xFFFF)return"all";
+  if(mask===0)return"none";
+  var out=[];
+  for(var i=0;i<16;i++)if(mask&(1<<i))out.push(i);
+  return out.join(",");
+}
 function slotFieldHtml(i,f,type,label,hint){
   var ml=SLOT_MAXLEN[f]?' maxlength="'+SLOT_MAXLEN[f]+'"':'';
   return'<div class="f sf-'+f+'"><label>'+label+'</label><input type="'+type+'" data-k="mqtt'+i+'.'+f+'"'+ml+' autocapitalize="off" autocorrect="off" autocomplete="off">'+(hint?'<div class="hint">'+hint+'</div>':'')+'</div>';
+}
+// Checkboxes rather than a text field: the accepted grammar is wider than the
+// canonical form, so free text invites a value that saves as something else.
+// The hidden input stays the single source of truth for the generic dirty /
+// save / result-chip machinery, which is keyed on [data-k].
+function packetFilterHtml(i){
+  var boxes=PKT_TYPES.map(function(p){
+    return'<label class="pk"><input type="checkbox" data-pf="'+i+'" value="'+p[0]+'"> <span>'+p[0]+' '+p[1]+'</span></label>';
+  }).join("");
+  return'<div class="f sf-filter"><label>Packet types</label>'
+    +'<input type="hidden" data-k="mqtt'+i+'.filter">'
+    +'<div class="pkg">'+boxes+'</div>'
+    +'<div class="pka"><button type="button" class="lnk" data-pfset="'+i+':all">All</button>'
+    +'<button type="button" class="lnk" data-pfset="'+i+':none">None</button>'
+    +'<span class="pfsum"></span></div>'
+    +'<div class="hint">Which payload types are uploaded to this broker. Applies to both packet and raw uploads; status and neighbors are never filtered. Clearing every box uploads nothing.</div></div>';
+}
+// Reflect each hidden filter value into its checkboxes and summary. Cheap
+// enough to re-run wholesale after any load or edit.
+function syncPacketFilters(){
+  $$('[data-k$=".filter"]').forEach(function(h){
+    var i=h.dataset.k.match(/^mqtt([1-9])\./)[1];
+    var card=h.closest(".slot");if(!card)return;
+    var mask=filterMask(h.value);
+    card.querySelectorAll('[data-pf="'+i+'"]').forEach(function(cb){
+      cb.checked=(mask&(1<<parseInt(cb.value,10)))!==0;
+    });
+    var sum=card.querySelector(".pfsum");
+    if(sum)sum.textContent=mask===0xFFFF?"all types":(mask===0?"nothing uploaded":filterText(mask));
+    var wrap=h.closest(".f");
+    if(wrap)wrap.classList.toggle("dirty",h.dataset.k in st.dirty);
+  });
+}
+// Recompute one slot's canonical value from its boxes and push it through the
+// same markDirty path a typed field would use.
+function packetFilterChanged(i,card){
+  var mask=0;
+  card.querySelectorAll('[data-pf="'+i+'"]').forEach(function(cb){
+    if(cb.checked)mask|=(1<<parseInt(cb.value,10));
+  });
+  var k="mqtt"+i+".filter",v=filterText(mask);
+  $$('[data-k="'+k+'"]').forEach(function(h){h.value=v});
+  markDirty(k,v);
+  syncPacketFilters();
 }
 function buildSlots(sel){
   var host=$(sel);if(!host)return;
@@ -649,7 +750,7 @@ function buildSlots(sel){
       +slotFieldHtml(i,"port","number","Port","")
       +slotFieldHtml(i,"topic","text","Topic template","Placeholders: {iata} {device} {type} {token}")
       +slotFieldHtml(i,"audience","text","JWT audience","Optional — blank for user/pass auth")
-      +slotFieldHtml(i,"filter","text","Packet types","all, none, or 0–15 CSV. 0 REQ · 1 RESPONSE · 2 TXT_MSG · 3 ACK · 4 ADVERT · 5 GRP_TXT · 6 GRP_DATA · 7 ANON_REQ · 8 PATH · 9 TRACE · 10 MULTIPART · 11 CONTROL · 12–14 reserved · 15 RAW_CUSTOM. Applies to packet and raw uploads.")
+      +packetFilterHtml(i)
       +'</div>';
   }
   host.innerHTML=html;
@@ -672,7 +773,20 @@ document.addEventListener("change",function(ev){
   var el=ev.target,m;
   if(el.dataset.k&&(m=el.dataset.k.match(/^mqtt([1-9])\.preset$/))){
     ["#app-slots","#wz-slots"].forEach(function(sel){refreshSlotFields($(sel),+m[1])});
+  }else if(el.dataset.pf){
+    var card=el.closest(".slot");
+    if(card)packetFilterChanged(el.dataset.pf,card);
   }
+});
+document.addEventListener("click",function(ev){
+  var b=ev.target.closest?ev.target.closest("[data-pfset]"):null;
+  if(!b)return;
+  var parts=b.dataset.pfset.split(":"),i=parts[0],all=parts[1]==="all";
+  // Write through the same path a checkbox edit takes, so both the app and
+  // wizard copies of this slot stay in step.
+  var card=b.closest(".slot");if(!card)return;
+  card.querySelectorAll('[data-pf="'+i+'"]').forEach(function(cb){cb.checked=all});
+  packetFilterChanged(i,card);
 });
 
 /* ---------- save / results ---------- */
@@ -702,7 +816,19 @@ function saveChanges(extra,cb){
     // result to poll for. Report it instead of chasing a phantom save.
     if(e.status===400||e.status===413){
       $("#save-btn").disabled=false;
-      if(cb)cb(null,false);else toast(e.message||"Save rejected");
+      // A whole-batch rejection names the offending key; chip it so the
+      // operator doesn't have to guess which of N edited fields was at fault.
+      // Every copy, not querySelector: the wizard's slot cards precede the
+      // app's in document order, so one lookup always lands on the hidden one.
+      // Comparing the property also keeps a device-echoed key — "bad key"
+      // returns whatever was sent — out of the selector grammar, where a quote
+      // would throw SyntaxError and swallow the rest of this handler.
+      if(e.key){
+        $$("[data-k]").forEach(function(el){
+          if(el.dataset.k===e.key)chipFor(el,false,e.message||"rejected");
+        });
+      }
+      if(cb)cb(null,false);else toast((e.message||"Save rejected")+(e.key?": "+e.key:""));
       return;
     }
     // 409 busy: a batch is in flight. If it's ours (same reqid — our POST
@@ -826,6 +952,7 @@ function loadConfigSoft(){ // re-sync accepted values without clobbering chips/r
       el.value=radioParts[idx];el.classList.toggle("dirty",keepRadio);
     });
     for(var i=1;i<=st.nslots;i++){refreshSlotFields($("#app-slots"),i);refreshSlotFields($("#wz-slots"),i)}
+    syncPacketFilters();
     afHint();
     updateSaveBar();
   }).catch(function(){});
@@ -880,7 +1007,12 @@ function pollStats(){
     spark($("#spark-heap"),st.hist.heap);spark($("#spark-noise"),st.hist.noise);
     var sl=s.slots||[];
     $("#stat-slots").innerHTML=sl.length?sl.map(function(x){
-      return'<div class="kv"><i>Slot '+x.n+" · "+esc(x.name)+'</i><b><span class="pill '+esc(x.state)+'">'+esc(x.state)+'</span> '+x.ok+' ok / '+x.err+' err</b></div>';
+      // "filt" is sent only when the slot is not on the all-types default. A
+      // healthy slot that has stopped publishing is otherwise indistinguishable
+      // from an idle one.
+      var f=(x.filt==null)?"":'<div class="kv"><i></i><b style="font-weight:400;color:var(--mut)">filter: '
+        +esc(x.filt===0?"none (nothing uploaded)":filterText(x.filt))+'</b></div>';
+      return'<div class="kv"><i>Slot '+x.n+" · "+esc(x.name)+'</i><b><span class="pill '+esc(x.state)+'">'+esc(x.state)+'</span> '+x.ok+' ok / '+x.err+' err</b></div>'+f;
     }).join(""):"No servers configured.";
   }).catch(function(){}).then(function(){
     // Runs whether the poll resolved or rejected: clear the guard, then schedule

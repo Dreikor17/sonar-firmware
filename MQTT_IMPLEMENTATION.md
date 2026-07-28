@@ -289,40 +289,66 @@ Each slot (1-6) supports the following commands:
 - `set mqttN.topic <template>` - Set custom topic template (custom preset only, see below)
 - `set mqttN.audience <audience>` - Set JWT audience for custom slot (enables Ed25519 JWT auth)
 - `set mqttN.audience` - Clear JWT audience (reverts to username/password auth)
-- `set mqttN.filter <all|none|CSV>` - Select payload types uploaded to this slot
+- `set mqttN.filter <all|none|list>` - Select payload types uploaded to this slot
 
 **Note:** Custom server/port settings only apply when the slot's preset is `custom`. Username/password also apply to built-in presets that use per-slot credentials (e.g. `inwmesh`); other userpass presets (`tennmesh`, `nashmesh`, `ctmesh`) ship fixed credentials in firmware.
 
 #### Per-broker packet filters
 
-Each slot has an independent allowlist. For example, this sends only text
-messages and adverts to slot 1 while slot 2 keeps its default of all packet
-types:
+Each slot has an independent allowlist. List entries may be payload-type names
+or numbers, and the two can be mixed. These are all equivalent, sending only
+text messages and adverts to slot 1:
 
 ```bash
+set mqtt1.filter txt_msg,advert
 set mqtt1.filter 2,4
-set mqtt2.filter all
+set mqtt1.filter advert, 2
 ```
 
 Use `none` when a broker should remain connected for status/neighbors but
-receive no packet traffic. A bare `set mqttN.filter` or an empty WebConfig
-value resets the slot to `all`.
+receive no packet traffic. A bare `set mqttN.filter` resets the slot to `all`.
+`get mqttN.filter` always answers in the canonical numeric form (`all`, `none`,
+or an ascending CSV), whichever spelling was used to set it.
 
 | Type | Name | Type | Name |
 |------|------|------|------|
-| 0 | REQ | 8 | PATH |
-| 1 | RESPONSE | 9 | TRACE |
-| 2 | TXT_MSG | 10 | MULTIPART |
-| 3 | ACK | 11 | CONTROL |
-| 4 | ADVERT | 12-14 | Reserved |
-| 5 | GRP_TXT | 15 | RAW_CUSTOM |
-| 6 | GRP_DATA | | |
-| 7 | ANON_REQ | | |
+| 0 | `req` | 8 | `path` |
+| 1 | `response` | 9 | `trace` |
+| 2 | `txt_msg` | 10 | `multipart` |
+| 3 | `ack` | 11 | `control` |
+| 4 | `advert` | 12-14 | reserved (number only) |
+| 5 | `grp_txt` | 15 | `raw_custom` |
+| 6 | `grp_data` | | |
+| 7 | `anon_req` | | |
+
+Names are lowercase and exact; types 12-14 are reserved upstream and have no
+name, so they are selectable by number only.
 
 The filter applies to both structured `packets` and `raw` publications for RX
 packets and for TX packets permitted by `mqtt.tx`. It does not affect local
 packet processing, forwarding, capture logs, status, or neighbors. Changes
 apply live without reconnecting the broker.
+
+A rejected packet is dropped before it is copied into the publish queue, so a
+narrow filter saves the queue slot and the per-packet work, not just the
+upload. `get mqtt.stats` reports the running count as `filt=<n>`, and a slot
+whose filter is not `all` shows it in `get mqttN.diag` and on the WebConfig
+Stats tab — a filtered slot otherwise looks identical to an idle healthy one.
+
+The diag reply is capped at 160 characters. When a slot is also reporting a
+long error tail, the filter is summarised as `filter:<n>/16` rather than
+listed, because a list clipped mid-way would read as a different, valid
+allowlist. `get mqttN.filter` always gives the exact value.
+
+In WebConfig the allowlist is a checkbox per type under each configured slot,
+with **All** / **None** shortcuts. Clearing every box is `none` (nothing
+uploaded).
+
+**Downgrade note:** slots left at the `all` default keep `/mqtt_prefs` in the
+layout older firmware can read. Setting any filter — including `none` — extends
+the file so that a downgrade to pre-filter firmware falls back to defaults and
+loses the stored WiFi credentials along with the broker config. Reset every
+slot to `all` before rolling a node back over the air.
 
 #### Example: Configure MeshRank on Slot 3
 ```bash

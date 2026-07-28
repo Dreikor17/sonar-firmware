@@ -47,8 +47,16 @@ LEN_LIMITS = {
     "name": 31, "wifi.ssid": 31, "wifi.pwd": 63, "mqtt.origin": 31,
     "mqtt.email": 63, "mqtt.ntp": 63, "timezone": 31, "snmp.community": 23,
 }
+# "filter" is absent on purpose: it is a bitmask, not a text buffer, so it has
+# no destination-buffer limit. It is still bounded by the shared CLI command
+# budget below, like every other key.
 SLOT_LEN_LIMITS = {"server": 63, "username": 31, "password": 63,
-                   "token": 47, "topic": 95, "audience": 63, "filter": 37}
+                   "token": 47, "topic": 95, "audience": 63}
+
+# BatchEntry::cmd[160] in WebConfigServer.cpp holds "set <key> <value>" plus a
+# NUL. Over-long values are rejected there rather than truncated, because a
+# clipped value can still be valid and would persist as a different setting.
+BATCH_CMD_SIZE = 160
 
 # Preset names + what the UI must collect (mirrors handlePresets()).
 PRESETS = (
@@ -254,7 +262,30 @@ def apply_set(cfg, key, val):
     return True, "OK"   # unknown-but-allowlisted: accept (mock is lenient here)
 
 
+# Payload-type names accepted alongside the decimal form. Mirrors
+# namedPacketTypes() in src/helpers/MQTTPacketFilter.h; 12-14 are reserved
+# upstream and stay reachable by number only.
+PACKET_TYPE_NAMES = {
+    "req": 0, "response": 1, "txt_msg": 2, "ack": 3, "advert": 4,
+    "grp_txt": 5, "grp_data": 6, "anon_req": 7, "path": 8, "trace": 9,
+    "multipart": 10, "control": 11, "raw_custom": 15,
+}
+
+
+def packet_filter_mask(text):
+    """Canonical filter text -> bitmask, for the stats payload."""
+    if text == "all":
+        return 0xFFFF
+    if text == "none":
+        return 0
+    mask = 0
+    for token in text.split(","):
+        mask |= 1 << int(token)
+    return mask
+
+
 def canonical_packet_filter(val):
+    """Mirror of MQTTPacketFilter::parse + ::format. Returns None if invalid."""
     stripped = val.strip()
     if stripped == "" or stripped == "all":
         return "all"
@@ -263,10 +294,13 @@ def canonical_packet_filter(val):
     mask = 0
     for part in stripped.split(","):
         token = part.strip()
-        if not re.fullmatch(r"[0-9]+", token):
-            return None
-        packet_type = int(token)
-        if packet_type > 15:
+        if re.fullmatch(r"[0-9]+", token):
+            packet_type = int(token)
+            if packet_type > 15:
+                return None
+        elif token in PACKET_TYPE_NAMES:
+            packet_type = PACKET_TYPE_NAMES[token]
+        else:
             return None
         mask |= 1 << packet_type
     if mask == 0xFFFF:
@@ -290,7 +324,8 @@ def apply_slot_set(cfg, idx, field, val):
     if field == "filter":
         canonical = canonical_packet_filter(val)
         if canonical is None:
-            return False, "Error: filter must be all, none, or CSV packet types 0-15"
+            return False, ("Error: filter must be all, none, or a CSV of "
+                           "types 0-15 / names (advert,txt_msg,...)")
         slot["filter"] = canonical
         return True, "OK - slot %d packet types: %s" % (idx + 1, canonical)
     if field in ("preset", "server", "username", "password", "token", "topic", "audience"):
@@ -451,6 +486,13 @@ class Handler(BaseHTTPRequestHandler):
             # drop unchanged secrets (sentinel), like the firmware does
             entries = [(k, v) for k, v in setmap.items()
                        if not (is_secret_key(k) and v == SENTINEL)]
+            # Same command-budget rejection the firmware applies while building
+            # BatchEntry::cmd; CR/LF are stripped there and don't count.
+            for k, v in entries:
+                prefix = "password " if k == "password" else "set %s " % k
+                stripped = str(v).replace("\r", "").replace("\n", "")
+                if len(prefix) + len(stripped) > BATCH_CMD_SIZE - 1:
+                    return self._json(400, {"error": "value too long", "key": k[:32]})
             if not entries and not reboot:
                 return self._json(400, {"error": "no changes"})
             # apply now, but expose as pending->done to exercise polling
@@ -500,8 +542,14 @@ class Handler(BaseHTTPRequestHandler):
         for i, s in enumerate(ST.cfg["mqtt"]["slots"]):
             if s["preset"] == "none":
                 continue
-            slots.append({"n": i + 1, "name": s["preset"], "state": "ok",
-                          "ok": 100 + up, "err": 0})
+            row = {"n": i + 1, "name": s["preset"], "state": "ok",
+                   "ok": 100 + up, "err": 0}
+            # Mirrors buildStatsJson(): "filt" carries the raw mask and is
+            # omitted entirely for the all-types default.
+            mask = packet_filter_mask(s.get("filter", "all"))
+            if mask != 0xFFFF:
+                row["filt"] = mask
+            slots.append(row)
         return {
             "uptime_s": up, "batt_mv": 4020, "heap_free": 142000, "heap_min": 118000,
             "heap_max_alloc": 96000, "noise": -98, "rssi": -71, "snr": 9.5,

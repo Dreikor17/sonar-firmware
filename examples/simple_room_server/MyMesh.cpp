@@ -1310,9 +1310,17 @@ void MyMesh::buildStatsJson(char* buf, size_t buf_size) {
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     MQTTBridge::SlotStatusSnapshot s;
     if (!MQTTBridge::getSlotStatusSnapshot(i, &s)) continue;
+    // "filt" is omitted for the all-types default, so the portal only has to
+    // render the exception and the JSON stays inside the stats buffer.
+    char filt[24];
+    filt[0] = '\0';
+    if (s.filter_mask != MQTTPacketFilter::kAllPacketTypes) {
+      snprintf(filt, sizeof(filt), ",\"filt\":%u", (unsigned)s.filter_mask);
+    }
     int n = snprintf(buf + pos, buf_size - pos,
-                     "%s{\"n\":%d,\"name\":\"%s\",\"state\":\"%s\",\"ok\":%lu,\"err\":%lu}",
-                     first ? "" : ",", i + 1, s.name, s.state, s.publish_ok, s.publish_err);
+                     "%s{\"n\":%d,\"name\":\"%s\",\"state\":\"%s\",\"ok\":%lu,\"err\":%lu%s}",
+                     first ? "" : ",", i + 1, s.name, s.state, s.publish_ok, s.publish_err,
+                     filt);
     if (n < 0 || n >= (int)(buf_size - pos)) break;
     pos += n;
     first = false;

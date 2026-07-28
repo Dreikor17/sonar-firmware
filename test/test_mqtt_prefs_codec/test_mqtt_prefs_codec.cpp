@@ -249,6 +249,83 @@ TEST(MQTTPrefsCodec, CurrentVersionedPayloadRoundTripsExactly) {
   EXPECT_EQ(0, memcmp(&source, &loaded, sizeof(source)));
 }
 
+// /mqtt_prefs also carries the WiFi credentials, so a payload older firmware
+// rejects strands a downgraded node with no network and no way to save. The
+// filter tail is only written once it actually holds something.
+TEST(MQTTPrefsCodec, DefaultFiltersKeepTheDowngradeReadablePayloadLength) {
+  MQTTPrefs source = defaults();
+  strncpy(source.wifi_ssid, "home-net", sizeof(source.wifi_ssid) - 1);
+  strncpy(source.mqtt_slot_preset[0], "analyzer-us", sizeof(source.mqtt_slot_preset[0]) - 1);
+
+  ASSERT_EQ(Codec::kV1PreFilterPayloadSize, Codec::payloadLenFor(source));
+  std::vector<uint8_t> bytes(Codec::kEncodedSize, 0xEE);
+  const size_t written = Codec::encode(source, bytes.data(), bytes.size());
+  ASSERT_EQ(sizeof(MQTTPrefsHeader) + Codec::kV1PreFilterPayloadSize, written);
+  EXPECT_LT(written, Codec::kEncodedSize);
+
+  MQTTPrefsHeader header;
+  memcpy(&header, bytes.data(), sizeof(header));
+  EXPECT_EQ(Codec::kV1PreFilterPayloadSize, header.payload_len);
+  // Nothing past the boundary was touched, so the file really is the short one.
+  for (size_t i = written; i < bytes.size(); ++i) {
+    EXPECT_EQ(0xEE, bytes[i]) << i;
+  }
+
+  bytes.resize(written);
+  const Codec::DecodePlan plan = classify(bytes);
+  ASSERT_EQ(Codec::Source::Current, plan.source);
+  ASSERT_EQ(Codec::kV1PreFilterPayloadSize, plan.payload_len);
+  ASSERT_FALSE(plan.preserve_file);
+
+  MQTTPrefs loaded = defaults();
+  memcpy(&loaded, bytes.data() + sizeof(MQTTPrefsHeader), plan.payload_len);
+  EXPECT_EQ(0, memcmp(&source, &loaded, sizeof(source)));
+}
+
+TEST(MQTTPrefsCodec, AnyNonDefaultFilterOptsIntoTheLongerPayload) {
+  MQTTPrefs source = defaults();
+  strncpy(source.wifi_ssid, "home-net", sizeof(source.wifi_ssid) - 1);
+
+  // "none" is as much a real setting as a subset, and must survive a reload.
+  for (int slot = 0; slot < MQTT_PREFS_SLOT_COUNT; ++slot) {
+    for (uint16_t mask : {static_cast<uint16_t>(0),
+                          static_cast<uint16_t>(1u << 4),
+                          static_cast<uint16_t>(MQTTPacketFilter::kAllPacketTypes & ~1u)}) {
+      source.mqtt_slot_packet_filter[slot] = mask;
+      ASSERT_EQ(Codec::kV1BaselinePayloadSize, Codec::payloadLenFor(source)) << slot;
+
+      std::vector<uint8_t> bytes(Codec::kEncodedSize);
+      ASSERT_EQ(Codec::kEncodedSize, Codec::encode(source, bytes.data(), bytes.size()));
+      const Codec::DecodePlan plan = classify(bytes);
+      ASSERT_EQ(Codec::kV1BaselinePayloadSize, plan.payload_len);
+
+      MQTTPrefs loaded = defaults();
+      memcpy(&loaded, bytes.data() + sizeof(MQTTPrefsHeader), plan.payload_len);
+      EXPECT_EQ(mask, loaded.mqtt_slot_packet_filter[slot]) << slot;
+      EXPECT_EQ(0, memcmp(&source, &loaded, sizeof(source)));
+    }
+    source.mqtt_slot_packet_filter[slot] = MQTTPacketFilter::kAllPacketTypes;
+  }
+  // Clearing the last non-default filter returns the node to the short payload.
+  EXPECT_EQ(Codec::kV1PreFilterPayloadSize, Codec::payloadLenFor(source));
+}
+
+TEST(MQTTPrefsCodec, EncodeRefusesAnOutputBufferShorterThanItsChosenPayload) {
+  MQTTPrefs shortest = defaults();
+  const size_t short_size = sizeof(MQTTPrefsHeader) + Codec::kV1PreFilterPayloadSize;
+  std::vector<uint8_t> bytes(Codec::kEncodedSize);
+
+  EXPECT_EQ(0u, Codec::encode(shortest, bytes.data(), short_size - 1));
+  EXPECT_EQ(short_size, Codec::encode(shortest, bytes.data(), short_size));
+  EXPECT_EQ(0u, Codec::encode(shortest, nullptr, bytes.size()));
+
+  // A buffer that fits the short payload is not enough for the long one.
+  MQTTPrefs longest = defaults();
+  longest.mqtt_slot_packet_filter[0] = 0;
+  EXPECT_EQ(0u, Codec::encode(longest, bytes.data(), short_size));
+  EXPECT_EQ(Codec::kEncodedSize, Codec::encode(longest, bytes.data(), bytes.size()));
+}
+
 TEST(MQTTPrefsCodec, PreFilterV1PayloadDefaultsEverySlotToAllTypes) {
   MQTTPrefs source = defaults();
   strncpy(source.mqtt_origin, "pre-filter-node", sizeof(source.mqtt_origin) - 1);

@@ -536,13 +536,25 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       const char* filter_value = subcmd[6] == '\0' ? "" : &subcmd[7];
       uint16_t filter_mask = 0;
       if (!MQTTPacketFilter::parse(filter_value, &filter_mask)) {
-        strcpy(reply, "Error: filter must be all, none, or CSV packet types 0-15");
+        strcpy(reply, "Error: filter must be all, none, or a CSV of types 0-15 / names (advert,txt_msg,...)");
       } else {
         _mqtt_prefs.mqtt_slot_packet_filter[slot] = filter_mask;
         savePrefs();
         char filter_text[MQTTPacketFilter::kFilterTextSize];
         MQTTPacketFilter::format(filter_mask, filter_text, sizeof(filter_text));
         snprintf(reply, 160, "OK - slot %d packet types: %s", slot + 1, filter_text);
+        // A non-default filter extends /mqtt_prefs past what pre-filter
+        // firmware can read (see MQTTPrefsCodec::payloadLenFor), so say when
+        // that cost buys nothing: slots beyond the runtime array are never
+        // published to on this board, the same warning `preset` gives.
+        if (slot >= RUNTIME_MQTT_SLOTS &&
+            filter_mask != MQTTPacketFilter::kAllPacketTypes) {
+          size_t used = strlen(reply);
+          if (used < 158) {
+            snprintf(reply + used, 160 - used,
+                     " (slot inactive on this hardware; blocks firmware rollback)");
+          }
+        }
       }
     } else {
       sprintf(reply, "unknown config: %s", config);

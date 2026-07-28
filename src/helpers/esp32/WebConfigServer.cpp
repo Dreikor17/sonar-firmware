@@ -746,11 +746,32 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
     // top-level `password` command, so it persists exactly as the CLI does.
     int pos = admin_pwd ? snprintf(e.cmd, sizeof(e.cmd), "password ")
                         : snprintf(e.cmd, sizeof(e.cmd), "set %s ", key);
-    for (const char* p = val; *p && pos < (int)sizeof(e.cmd) - 1; p++) {
+    bool overflow = false;
+    for (const char* p = val; *p; p++) {
       if (*p == '\r' || *p == '\n') continue;
+      if (pos >= (int)sizeof(e.cmd) - 1) { overflow = true; break; }
       e.cmd[pos++] = *p;
     }
     e.cmd[pos] = 0;
+    // A value that doesn't fit used to be truncated here and applied anyway.
+    // For length-checked keys the CLI would reject the remainder, but a key
+    // whose grammar stays valid when clipped (mqttN.filter: "advert,2" cut to
+    // "advert") would silently persist a *different* setting and still answer
+    // OK. Refuse the batch instead — the caller can shorten and retry.
+    if (overflow) {
+      // Name the key, like the "bad key" rejection above: a 20-field batch is
+      // rejected whole, so without it the operator has nothing to correct.
+      char safe_key[33];
+      strncpy(safe_key, key, sizeof(safe_key) - 1);
+      safe_key[sizeof(safe_key) - 1] = 0;
+      StaticJsonDocument<128> ed;
+      ed["error"] = "value too long";
+      ed["key"] = safe_key;
+      String out;
+      serializeJson(ed, out);
+      req->send(400, "application/json", out);
+      return;
+    }
     count++;
   }
   // Phase 2: the count is now known, so the remaining NoChanges/Accept arms

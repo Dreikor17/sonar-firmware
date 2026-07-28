@@ -944,12 +944,15 @@ bool CommonCLI::saveMQTTPrefs(FILESYSTEM* fs) {
   }
 
   // Write header and payload sequentially so the transaction needs no second
-  // full-size (2.8 KiB) staging buffer on constrained targets.
-  const MQTTPrefsHeader header = MQTTPrefsCodec::makeHeader();
+  // full-size (2.8 KiB) staging buffer on constrained targets. The length is
+  // the shortest that still round-trips this config, so a node with default
+  // packet filters keeps writing a payload older firmware can read.
+  const size_t payload_len = MQTTPrefsCodec::payloadLenFor(_mqtt_prefs);
+  const MQTTPrefsHeader header = MQTTPrefsCodec::makeHeader(payload_len);
   MQTTPrefsFileStore store(fs);
   const MQTTPrefsAtomicStore::Result result = MQTTPrefsAtomicStore::write(
       store, (const uint8_t *)&header, sizeof(header),
-      (const uint8_t *)&_mqtt_prefs, sizeof(_mqtt_prefs));
+      (const uint8_t *)&_mqtt_prefs, payload_len);
   if (!MQTTPrefsAtomicStore::committed(result)) {
     MESH_DEBUG_PRINTLN("MQTT: atomic /mqtt_prefs save failed at %s; source preserved",
                        mqttPrefsSaveResultName(result));
