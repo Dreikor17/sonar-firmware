@@ -499,18 +499,83 @@ TEST(MQTTPrefsCodec, UnsupportedHeaderlessSizesArePreserved) {
   }
 }
 
-TEST(MQTTPrefsCodec, NewerAndSameVersionExtendedPayloadsAreHeld) {
+// A different version tag means the layout may have changed shape, so it is
+// still refused outright. That refusal is what makes reading longer same-version
+// payloads safe, so the two belong in one test.
+TEST(MQTTPrefsCodec, ADifferentVersionTagIsStillRefusedAndHeld) {
   std::vector<uint8_t> newer(sizeof(MQTTPrefsHeader), 0);
   writeHeader(&newer, MQTT_PREFS_VERSION + 1, 0);
-  Codec::DecodePlan plan = classify(newer);
+  const Codec::DecodePlan plan = classify(newer);
   EXPECT_EQ(Codec::Source::UnsupportedVersion, plan.source);
   EXPECT_TRUE(plan.preserve_file);
+}
 
-  std::vector<uint8_t> extended(sizeof(MQTTPrefsHeader) + Codec::kV1BaselinePayloadSize + 1, 0);
-  writeHeader(&extended, MQTT_PREFS_VERSION,
-              static_cast<uint16_t>(Codec::kV1BaselinePayloadSize + 1));
-  plan = classify(extended);
-  EXPECT_EQ(Codec::Source::UnsupportedVersion, plan.source);
+// The downgrade contract: a v1 payload longer than this build's baseline was
+// appended to by a later build, so the baseline prefix is present verbatim.
+// Read it and drop the tail — never refuse the file, which would cost the
+// operator WiFi and every broker slot to save settings they don't understand.
+TEST(MQTTPrefsCodec, LongerSameVersionPayloadLoadsTheBaselineAndIgnoresTheTail) {
+  MQTTPrefs source = defaults();
+  strncpy(source.mqtt_origin, "future-node", sizeof(source.mqtt_origin) - 1);
+  strncpy(source.wifi_ssid, "field-ssid", sizeof(source.wifi_ssid) - 1);
+  strncpy(source.wifi_password, "field-secret", sizeof(source.wifi_password) - 1);
+  strncpy(source.mqtt_iata, "SEA", sizeof(source.mqtt_iata) - 1);
+  strncpy(source.mqtt_slot_preset[0], "meshrank", sizeof(source.mqtt_slot_preset[0]) - 1);
+  source.mqtt_neighbors_enabled = 1;
+  for (int i = 0; i < MQTT_PREFS_SLOT_COUNT; ++i) {
+    source.mqtt_slot_packet_filter[i] = static_cast<uint16_t>(1u << i);
+  }
+
+  // Baseline image plus a 40-byte tail of fields this build has never heard of.
+  const size_t kTail = 40;
+  const size_t payload_len = Codec::kV1BaselinePayloadSize + kTail;
+  std::vector<uint8_t> bytes(sizeof(MQTTPrefsHeader) + payload_len, 0xA5);
+  writeHeader(&bytes, MQTT_PREFS_VERSION, static_cast<uint16_t>(payload_len));
+  memcpy(bytes.data() + sizeof(MQTTPrefsHeader), &source, sizeof(source));
+
+  const Codec::DecodePlan plan = classify(bytes);
+  ASSERT_EQ(Codec::Source::Current, plan.source);
+  EXPECT_FALSE(plan.preserve_file) << "refusing the file would strand the node";
+  EXPECT_TRUE(plan.observer_fields_present);
+  EXPECT_FALSE(plan.rewrite_legacy);
+  ASSERT_EQ(Codec::kV1BaselinePayloadSize, plan.payload_len);
+
+  // Reading plan.payload_len bytes recovers this build's whole struct exactly,
+  // and cannot run past it into the unknown tail.
+  MQTTPrefs loaded = defaults();
+  memcpy(&loaded, bytes.data() + sizeof(MQTTPrefsHeader), plan.payload_len);
+  EXPECT_EQ(0, memcmp(&source, &loaded, sizeof(source)));
+  EXPECT_STREQ("future-node", loaded.mqtt_origin);
+  EXPECT_STREQ("field-ssid", loaded.wifi_ssid);
+  EXPECT_STREQ("field-secret", loaded.wifi_password);
+  EXPECT_STREQ("meshrank", loaded.mqtt_slot_preset[0]);
+  EXPECT_EQ(1u, loaded.mqtt_neighbors_enabled);
+  EXPECT_EQ(1u, loaded.mqtt_slot_packet_filter[0]);
+}
+
+// The rule has to hold for any appended size, including a single byte and a
+// tail far larger than the baseline.
+TEST(MQTTPrefsCodec, EveryLongerSameVersionLengthReadsTheBaseline) {
+  for (const size_t tail : {size_t(1), size_t(2), size_t(12), size_t(64),
+                            size_t(512), size_t(4096)}) {
+    const size_t payload_len = Codec::kV1BaselinePayloadSize + tail;
+    std::vector<uint8_t> bytes(sizeof(MQTTPrefsHeader) + payload_len, 0);
+    writeHeader(&bytes, MQTT_PREFS_VERSION, static_cast<uint16_t>(payload_len));
+    const Codec::DecodePlan plan = classify(bytes);
+    EXPECT_EQ(Codec::Source::Current, plan.source) << tail;
+    EXPECT_FALSE(plan.preserve_file) << tail;
+    EXPECT_EQ(Codec::kV1BaselinePayloadSize, plan.payload_len) << tail;
+  }
+}
+
+// A length that merely *declares* a longer payload without the bytes to back it
+// is still corrupt — the header/file-size agreement check must run first.
+TEST(MQTTPrefsCodec, LongerDeclaredLengthWithoutTheBytesIsStillCorrupt) {
+  std::vector<uint8_t> bytes(sizeof(MQTTPrefsHeader) + Codec::kV1BaselinePayloadSize, 0);
+  writeHeader(&bytes, MQTT_PREFS_VERSION,
+              static_cast<uint16_t>(Codec::kV1BaselinePayloadSize + 16));
+  const Codec::DecodePlan plan = classify(bytes);
+  EXPECT_EQ(Codec::Source::Corrupt, plan.source);
   EXPECT_TRUE(plan.preserve_file);
 }
 

@@ -108,27 +108,42 @@ leave the missing tail at its default. The packet-filter addition follows that r
 the prior 2864-byte v1 payload loads with all six filters set to `all`, while the
 full payload is 2876 bytes.
 
-#### Why the written length is not always the full length
+#### The downgrade contract
 
-Reading a longer payload is the easy direction; writing one is a one-way door.
-Pre-filter firmware classifies a 2876-byte v1 payload as `UnsupportedVersion`, so
-after a downgrade the node boots on *defaults* and `_mqtt_prefs_hold` blocks every
-save. `/mqtt_prefs` holds `wifi_ssid`/`wifi_password` as well as the broker config, so
-that node comes up with no network at all: no portal, no OTA, no way back except
-serial or a re-flash forward. The same is true of every previous tail (observer,
-neighbors) — each append moved the cliff.
+**Within a version tag the layout is append-only, and a longer payload is always
+readable.** A file written by a later build starts with this binary's exact baseline,
+so `classify()` reads that prefix and ignores the tail. A downgraded node keeps its
+WiFi credentials, broker slots, and every other setting it understands; the only thing
+it loses is the settings the newer build added.
 
-`MQTTPrefsCodec::payloadLenFor()` narrows the blast radius instead of widening it. It
-returns the *shortest* length that still round-trips the configuration, which for the
-packet-filter tail means: keep writing 2864 while all six masks are the all-types
-default, and only write 2876 once a filter actually holds something. A node that
-upgrades and never touches a filter therefore stays downgrade-readable, and clearing
-the last non-default filter puts it back. Opting in is an explicit operator action,
-not a side effect of installing a build.
+That asymmetry is the whole point. Refusing the file costs the operator the network
+itself — `/mqtt_prefs` holds `wifi_ssid`/`wifi_password` as well as the broker config,
+so a node that falls back to defaults has no WiFi, no portal, and no OTA, recoverable
+only over serial. Reading it costs a feature's settings. Losing later settings is the
+acceptable half of that trade; losing the node is not.
 
-The rule generalises to the next appended field: give it a default that a missing tail
-already implies, and extend `payloadLenFor()` so the longer payload is only written
-when the field is set. That keeps every append reversible for the fleet majority.
+The tail survives until something actually writes. `saveMQTTPrefs()` rewrites at this
+binary's own length, so a rollback that changes no observer setting and is later rolled
+forward keeps the newer fields intact — only an explicit `set` while downgraded drops
+them. The boot log says so when it happens.
+
+**A change that is not a pure append MUST bump `MQTT_PREFS_VERSION`.** The version
+check is what makes the rule above safe: a different tag is still refused outright and
+the file preserved, because the bytes may no longer mean what this binary thinks. Never
+reorder, resize, or repurpose an existing field within a version.
+
+Note the rule is only as old as the build that implements it. Firmware already deployed
+carries the *previous* decoder, which rejects any longer v1 payload — so rolling back
+from this build to one shipped before it still falls back to defaults.
+`MQTTPrefsCodec::payloadLenFor()` covers that gap from the writing side: it returns the
+shortest length that still round-trips the configuration, so a node keeps writing 2864
+bytes until a packet filter actually holds something, and clearing the last non-default
+filter puts it back. That mitigation can be retired once no supported downgrade target
+predates the contract; the contract itself is the durable half.
+
+Shorter payloads keep their existing, stricter treatment: a short length must match a
+boundary that really shipped (`MQTT_PREFS_V1_*_PAYLOAD_SIZE`), because raw prefs have
+no checksum and an arbitrary short size cannot be trusted to mean anything.
 
 ### Settings upgrade / migration
 

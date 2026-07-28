@@ -344,11 +344,15 @@ In WebConfig the allowlist is a checkbox per type under each configured slot,
 with **All** / **None** shortcuts. Clearing every box is `none` (nothing
 uploaded).
 
-**Downgrade note:** slots left at the `all` default keep `/mqtt_prefs` in the
-layout older firmware can read. Setting any filter — including `none` — extends
-the file so that a downgrade to pre-filter firmware falls back to defaults and
-loses the stored WiFi credentials along with the broker config. Reset every
-slot to `all` before rolling a node back over the air.
+**Downgrade note:** rolling back to any build from this release onward is safe —
+the older firmware reads the settings it understands and simply ignores the
+packet filters, which revert to `all` if it saves.
+
+Rolling back to a build released *before* this one is the case to watch: that
+firmware rejects the longer settings file outright and falls back to defaults,
+losing the stored WiFi credentials along with the broker config. Slots left at
+the `all` default keep the file in the shorter layout those builds can read, so
+if you may need to roll a node back that far, reset every slot to `all` first.
 
 #### Example: Configure MeshRank on Slot 3
 ```bash

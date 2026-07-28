@@ -793,6 +793,16 @@ void CommonCLI::loadMQTTPrefs(
           MESH_DEBUG_PRINTLN("MQTT: /mqtt_prefs read failed, using defaults (file preserved)");
         } else {
           has_observer_fields = plan.observer_fields_present;
+          // Written by a later build with appended fields. Everything this
+          // binary knows loaded normally; say so, because the next `set` will
+          // rewrite the file at this length and drop the newer settings.
+          if (file_size - sizeof(MQTTPrefsHeader) > plan.payload_len) {
+            MESH_DEBUG_PRINTLN(
+                "MQTT: /mqtt_prefs written by newer firmware (%u > %u bytes); "
+                "config loaded, newer settings ignored and dropped on next save",
+                (unsigned)(file_size - sizeof(MQTTPrefsHeader)),
+                (unsigned)plan.payload_len);
+          }
         }
         if (file) file.close();
       } else if (plan.rewrite_legacy) {

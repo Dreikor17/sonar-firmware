@@ -135,7 +135,14 @@ static const uint32_t MQTT_NEIGHBORS_MAX_INTERVAL_MS = MQTT_NEIGHBORS_MAX_INTERV
 static const uint32_t MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS = MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS * 3600000UL;
 
 // Version-1 has four payload layouts this firmware can decode. Never infer a
-// compatible payload from an arbitrary shorter size: raw prefs have no checksum.
+// compatible payload from an arbitrary SHORTER size: raw prefs have no
+// checksum, so a short length has to match a boundary that was really shipped.
+//
+// A LONGER v1 payload is different and is always readable: within a version tag
+// the layout is append-only, so a later build's file still starts with this
+// binary's exact baseline. classify() reads that prefix and ignores the tail
+// rather than rejecting the file — see the downgrade contract there. Any change
+// that is not a pure append MUST bump MQTT_PREFS_VERSION instead.
 //   - PRE_OBSERVER  (2736): stops before the observer tail (snmp_*/alert_*).
 //   - PRE_NEIGHBORS (2860): full observer tail, no neighbors fields yet.
 //   - PRE_FILTER    (2864): neighbors tail, no per-slot packet filters.

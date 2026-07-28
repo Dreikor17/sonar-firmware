@@ -114,10 +114,26 @@ inline DecodePlan classify(const uint8_t* prefix, size_t prefix_read, size_t fil
       if (header.payload_len != payload_available) {
         return corruptPlan();
       }
-      // A same-version append is still unknown to this binary. Holding the
-      // file prevents a downgrade from discarding it on the next CLI save.
+      // A longer same-version payload was written by a later build that
+      // appended fields. Within a version tag the layout is append-only, so
+      // every byte this binary knows is present and correctly positioned — read
+      // the baseline prefix and ignore the tail.
+      //
+      // This is the downgrade contract, and it is deliberately asymmetric:
+      // refusing the file would cost the operator WiFi credentials and every
+      // broker slot (a node with no network and no portal, recoverable only
+      // over serial), whereas reading it costs only the settings the newer
+      // build added. Losing a later feature's settings is the acceptable half.
+      //
+      // The tail survives until something actually writes: saveMQTTPrefs()
+      // rewrites at this binary's own length, so a rollback that changes no
+      // observer setting and is later rolled forward keeps the newer fields
+      // intact. Only an explicit `set` while downgraded drops them.
+      //
+      // A layout change that is NOT a pure append must bump MQTT_PREFS_VERSION;
+      // the version check above is what makes this rule safe.
       if (header.payload_len > kV1BaselinePayloadSize) {
-        return {Source::UnsupportedVersion, false, true, false, 0};
+        return {Source::Current, false, false, true, kV1BaselinePayloadSize};
       }
       if (header.payload_len == kV1BaselinePayloadSize) {
         return {Source::Current, false, false, true, kV1BaselinePayloadSize};
