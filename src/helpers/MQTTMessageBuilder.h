@@ -164,6 +164,7 @@ public:
     const char* origin_id,
     const char* timestamp,
     const char* self_scopes,
+    const char* self_default_scope,
     const NeighborsMessageEntry* neighbors,
     int neighbor_count,
     char* buffer,
@@ -177,6 +178,7 @@ public:
     const char* origin_id,
     const char* timestamp,
     const char* self_scopes,
+    const char* self_default_scope,
     int total_neighbors
   );
   static size_t measureNeighborsMessageEntry(const NeighborsMessageEntry& neighbor);

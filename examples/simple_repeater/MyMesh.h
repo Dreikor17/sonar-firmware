@@ -181,6 +181,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   mesh::Packet* neighbor_discover_request; // request awaiting TX completion
   unsigned long next_neighbors_publish;   // periodic publish deadline (0 = fire ASAP)
   char self_scopes_buf[96];
+  char self_default_scope_buf[31];
   char neighbor_discover_origin[32];
 
   mesh::Packet* sendAnonRegionsReq(const mesh::Identity& target, uint32_t& tag);

@@ -897,6 +897,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   neighbor_discover_request = NULL;
   next_neighbors_publish = 0;
   self_scopes_buf[0] = 0;
+  self_default_scope_buf[0] = 0;
   neighbor_discover_origin[0] = 0;
   memset(neighbours, 0, sizeof(neighbours));
 #endif
@@ -1739,6 +1740,14 @@ uint32_t MyMesh::neighborDiscoverQueryTimeoutMs() const {
 
 void MyMesh::resetNeighborDiscoverJsonBudget() {
   getLocalScopes(self_scopes_buf, sizeof(self_scopes_buf));
+  {
+    // No default region means this node floods unscoped, i.e. the wildcard.
+    RegionEntry* def = region_map.getDefaultRegion();
+    const char* def_name = (def && def->name[0]) ? def->name : "*";
+    if (*def_name == '#') def_name++;  // match how self.scopes renders names
+    strncpy(self_default_scope_buf, def_name, sizeof(self_default_scope_buf) - 1);
+    self_default_scope_buf[sizeof(self_default_scope_buf) - 1] = 0;
+  }
   MQTTBridge::getEffectiveMqttOrigin(
     &_prefs, _cli.getObserverPrefs(),
     neighbor_discover_origin, sizeof(neighbor_discover_origin));
@@ -1754,7 +1763,7 @@ void MyMesh::resetNeighborDiscoverJsonBudget() {
   neighbor_discover_truncated = false;
   neighbor_discover_json_size = MQTTMessageBuilder::measureNeighborsMessageBase(
     neighbor_discover_origin, self_pubkey_hex, timestamp, self_scopes_buf,
-    neighbor_discover_count);
+    self_default_scope_buf, neighbor_discover_count);
 }
 
 // Account for one terminal result. The base measurement reserves maximum-width
@@ -1922,7 +1931,7 @@ void MyMesh::finishNeighborDiscover() {
 #endif
   int json_len = MQTTMessageBuilder::buildNeighborsMessage(
     doc, neighbor_discover_origin, self_pubkey_hex, timestamp, self_scopes_buf,
-    entries, neighbor_discover_publish_count,
+    self_default_scope_buf, entries, neighbor_discover_publish_count,
     json_buf, MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE,
     neighbor_discover_count, neighbor_discover_queried_count,
     neighbor_discover_truncated);

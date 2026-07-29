@@ -174,6 +174,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   mesh::Packet* neighbor_discover_request;
   unsigned long next_neighbors_publish;
   char self_scopes_buf[96];
+  char self_default_scope_buf[31];
   char neighbor_discover_origin[32];
 
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);

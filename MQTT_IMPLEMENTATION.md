@@ -742,7 +742,7 @@ Like status/raw, this topic is **not** sent to MeshRank slots (packets-only cont
   "timestamp": "2024-01-01T12:00:00.000000+00:00",
   "origin": "MeshCore-HOWL",
   "origin_id": "A1B2C3D4E5F67890...",
-  "self": { "scopes": "DEN,APRS" },
+  "self": { "scopes": "DEN,APRS", "default_scope": "*" },
   "neighbors": [
     {
       "pubkey": "0011223344556677...",
@@ -757,6 +757,9 @@ Like status/raw, this topic is **not** sent to MeshRank slots (packets-only cont
 Entries are ordered most- to least-useful (most recently heard, then stronger
 SNR); the tail is dropped if the payload would exceed the 10 KB publish buffer.
 `status` is `responded`, `timeout`, or `send_failed` per neighbor.
+`self.default_scope` is the region name this node floods to by default (`region
+default`); it is `*` when no default region is set, matching the unscoped flood
+the radio actually performs in that case.
 
 ## Key Features
 
