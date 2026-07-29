@@ -2269,7 +2269,7 @@ void MQTTBridge::publishStatusToSlot(int index) {
   // Build per-slot topic (handles IATA check for meshcore, token check for meshrank)
   char status_topic[128];
   if (!buildTopicForSlot(index, MSG_STATUS, status_topic, sizeof(status_topic))) {
-    return;  // Slot doesn't support status (e.g., meshrank) or missing required config
+    return;  // Slot is missing required topic configuration
   }
 
   // Reuse pre-allocated buffer to avoid heap alloc/free churn under memory pressure.
@@ -2878,7 +2878,7 @@ void MQTTBridge::processPacketQueue() {
     }
 
     // Decide intentional completion once across the entire queue item. An
-    // ineligible raw path (for example, MeshRank's packets-only topic style)
+    // ineligible raw path (for example, MeshRank, which does not take raw)
     // must not hide a failed eligible structured publish.
     const bool queue_complete = MQTTPacketFilter::publishComplete(
         packet_eligible || raw_eligible,
@@ -3012,7 +3012,7 @@ void MQTTBridge::processPacketQueue() {
     }
 
     // Decide intentional completion once across the entire queue item. An
-    // ineligible raw path (for example, MeshRank's packets-only topic style)
+    // ineligible raw path (for example, MeshRank, which does not take raw)
     // must not hide a failed eligible structured publish.
     const bool queue_complete = MQTTPacketFilter::publishComplete(
         packet_eligible || raw_eligible,
@@ -3216,8 +3216,8 @@ bool MQTTBridge::publishStatus() {
         }
       }
     }
-    // If no connected slot accepts status topics (e.g. meshrank is packets-only),
-    // treat as success to avoid infinite retry loops
+    // If no connected slot accepts status topics, treat as success to avoid
+    // infinite retry loops
     if (published || !any_slot_wants_status) {
       if (published) MQTT_DEBUG_PRINTLN("Status published");
       return true;
@@ -3374,8 +3374,8 @@ bool MQTTBridge::publishRaw(mesh::Packet* packet, bool& has_eligible_target) {
   const uint8_t packet_type = packet->getPayloadType();
   const uint8_t eligible_slots = eligiblePacketSlots(packet_type, MSG_RAW);
   has_eligible_target = eligible_slots != 0;
-  // Filtered out everywhere, or no slot has a raw topic (MeshRank is
-  // packets-only): intentionally complete, and no JSON is built.
+  // Filtered out everywhere, or no slot has a raw topic (MeshRank does not take
+  // raw): intentionally complete, and no JSON is built.
   if (!has_eligible_target) return false;
 
   refreshOriginFromPrefs();
@@ -3456,8 +3456,7 @@ bool MQTTBridge::publishNeighbors() {
   char topic[128];
   for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
     if (_slots[i].enabled && _slots[i].client && _slots[i].connected) {
-      // MeshRank slots reject non-packets by contract, so buildTopicForSlot
-      // returns false for them here and the slot is skipped.
+      // Slots that cannot form a neighbors topic are skipped here.
       if (buildTopicForSlot(i, MSG_NEIGHBORS, topic, sizeof(topic))) {
         // Neighbor snapshots are periodically refreshed. Publish synchronously
         // at QoS 0 to avoid the QoS 1 outbox, retaining where the broker allows.

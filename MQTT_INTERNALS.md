@@ -78,8 +78,9 @@ defined in `MQTTBridge.h`). It spans two subsystems and two cores:
   `_neighbors_publish_pending` with a release store; the MQTT task (`mqttTaskLoop`, Core 0)
   consumes it with an acquire load, calls `publishNeighbors()`, and clears the flag. A
   second snapshot is dropped while one is in flight. `publishNeighbors()` sends QoS 1,
-  retain = `preset->allow_retain` (custom slots non-retained). MeshRank slots are skipped
-  (the topic router rejects non-packets for MeshRank).
+  retain = `preset->allow_retain` (custom slots non-retained). MeshRank slots are included,
+  publishing to `meshrank/uplink/{token}/{device}/neighbors` (non-retained, since the
+  preset sets `allow_retain = false`).
 - **Status reporting**: `MyMesh` reports the schedule each loop via
   `setNeighborsSchedule(phase, secs)`; `formatMqttStatusReply` renders it as the trailing
   `nbr: <when>/<last>` field in `get mqtt.status` while the feature is enabled.

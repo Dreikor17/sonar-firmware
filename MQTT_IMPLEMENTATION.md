@@ -360,7 +360,7 @@ set mqtt3.preset meshrank
 set mqtt3.token FE1B34242C5938C39225310081FD6718
 ```
 
-The token is generated on the MeshRank website and is tied to your account. MeshRank only receives packet data (no status or raw messages).
+The token is generated on the MeshRank website and is tied to your account. MeshRank receives status, packets, and neighbors under `meshrank/uplink/{token}/{device}/`, using the same type suffixes as the MeshCore layout. Raw is **not** sent to MeshRank — it is the highest-volume topic and the broker does not consume it — so `set mqtt.raw on` has no effect on a MeshRank slot.
 
 #### Example: Configure MeshMapper on Slot 3
 ```bash
@@ -656,7 +656,7 @@ Minimal raw packet data for map integration.
 Periodic snapshot of this node's zero-hop neighbor table plus each neighbor's
 region scopes (PSRAM boards only; disabled by default). Published non-retained at
 QoS 1 on the interval set by `mqtt.neighbors.interval` (12–336 h, default 24 h).
-Like status/raw, this topic is **not** sent to MeshRank slots (packets-only contract).
+MeshRank slots receive this topic too, as `meshrank/uplink/{token}/{device}/neighbors`.
 
 **Note**: `{DEVICE_PUBLIC_KEY}` is the device's public key in hexadecimal format (64 characters).
 

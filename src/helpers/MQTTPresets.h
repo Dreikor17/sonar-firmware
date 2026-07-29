@@ -26,7 +26,7 @@ enum MQTTAuthType : uint8_t {
 
 enum MQTTTopicStyle : uint8_t {
   MQTT_TOPIC_MESHCORE,   // meshcore/{iata}/{device_id}/{status|packets|raw}
-  MQTT_TOPIC_MESHRANK,   // meshrank/uplink/{token}/{device_id}/packets (packets only)
+  MQTT_TOPIC_MESHRANK,   // meshrank/uplink/{token}/{device_id}/{type} (no raw)
 };
 
 struct MQTTPresetDef {
