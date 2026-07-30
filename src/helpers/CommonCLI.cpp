@@ -52,40 +52,40 @@ static const size_t LEGACY_MQTT_GAP_6SLOT = 306 + 6 * 186;  // 1422
 static const size_t LEGACY_MQTT_GAP_3SLOT = 306 + 3 * 186;  // 864
 static const size_t LEGACY_OBS_TAIL_MAX = 124;  // rx_boosted(1) + flood(2) + snmp(25) + watchdog(1) + alert block(95)
 
-// Bytes savePrefs() writes after owner_info (offsets 290-294): rx_boosted_gain,
-// flood_max_unscoped, flood_max_advert, radio_fem_rxgain, cad_enabled. loadPrefsInt()
-// treats any larger remainder as a legacy MQTT-gap file — keep this in sync with the
-// trailing writes in savePrefs() whenever an upstream merge appends /com_prefs fields.
+// Bytes the last binary layout wrote after owner_info (offsets 290-294):
+// rx_boosted_gain, flood_max_unscoped, flood_max_advert, radio_fem_rxgain,
+// cad_enabled. loadPrefsInt() treats any larger remainder as a legacy MQTT-gap
+// file. Prefs are now written as JSON, so this describes read-side history only.
 static const size_t COM_PREFS_TAIL_BYTES = 5;
 
 
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   bool is_fresh_install = false;
   bool is_upgrade = false;
-#ifdef WITH_MQTT_BRIDGE
-  bool node_prefs_needs_migration = false;
+  // Set when prefs came from one of the legacy binary files; they are republished
+  // as /prefs.json below. The legacy file is never removed, so it stays available
+  // as a fallback if the JSON save does not commit this boot.
+  bool loaded_from_legacy = false;
+
+  if (fs->exists("/prefs.json")) {
+#if defined(RP2040_PLATFORM)
+    File file = fs->open("/prefs.json", "r");
+#else
+    File file = fs->open("/prefs.json");
 #endif
-  
-  if (fs->exists("/com_prefs")) {
-    loadPrefsInt(fs, "/com_prefs");   // new filename
+    if (file) {
+      _prefs->loadSerial(file);
+      file.close();
+    }
+  } else if (fs->exists("/com_prefs")) {
+    // Legacy binary layout. This is a file-format migration only: settings keep
+    // their stored values, so it must not trigger the bridge.source upgrade below.
+    loadPrefsInt(fs, "/com_prefs");
+    loaded_from_legacy = true;
   } else if (fs->exists("/node_prefs")) {
     loadPrefsInt(fs, "/node_prefs");
-    is_upgrade = true;  // Migrating from old filename
-#ifdef WITH_MQTT_BRIDGE
-    // Wait for loadMQTTPrefs() to persist any observer tail captured from this
-    // old file before replacing or removing its only on-flash copy.
-    node_prefs_needs_migration = true;
-#else
-    if (saveCommonPrefsImageAtomically(fs)) {
-      fs->remove("/node_prefs");  // remove old only after the rename commits
-    } else {
-      MESH_DEBUG_PRINTLN("Prefs: preserving legacy /node_prefs until /com_prefs migration commits");
-    }
-    // This boot has either completed the filename handoff or deliberately
-    // preserved /node_prefs for a retry. Do not follow it with the ordinary
-    // non-atomic legacy compaction path below.
-    _com_prefs_needs_upgrade = false;
-#endif
+    is_upgrade = true;  // pre-/com_prefs filename
+    loaded_from_legacy = true;
   } else {
     // File doesn't exist - set default bridge settings for fresh installs
     is_fresh_install = true;
@@ -96,7 +96,7 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   // Readers (MQTTBridge, AlertReporter, observer CLI) use _mqtt_prefs directly —
   // these fields no longer exist in NodePrefs, so there is nothing to sync.
   MQTTPrefsAtomicStore::LegacyUpgradeGate legacy_upgrade(
-      _com_prefs_needs_upgrade || node_prefs_needs_migration);
+      _com_prefs_needs_upgrade || loaded_from_legacy);
   loadMQTTPrefs(fs, &legacy_upgrade);
   if (_mqtt_prefs_hold) legacy_upgrade.holdMqttSource();
 
@@ -108,10 +108,9 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
     } else {
       MESH_DEBUG_PRINTLN("MQTT Bridge: Migrating bridge.source from tx to rx (MQTT bridge default)");
       _prefs->bridge_pkt_src = 1;  // Set to RX (logRx)
-      if (node_prefs_needs_migration) {
-        // The atomic /node_prefs -> /com_prefs handoff below persists this
-        // in-memory change. Do not publish /com_prefs before that transaction.
-        MESH_DEBUG_PRINTLN("MQTT Bridge: bridge.source will be saved with node prefs migration");
+      if (loaded_from_legacy) {
+        // The /prefs.json migration below persists this in-memory change.
+        MESH_DEBUG_PRINTLN("MQTT Bridge: bridge.source will be saved with the prefs migration");
       } else {
         savePrefs(fs);  // Save the updated preference
       }
@@ -122,46 +121,29 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   // set by setMQTTPrefsDefaults(). No explicit migration needed.
 #endif
 
+  // Republish legacy binary prefs as /prefs.json. Old-format files also carried a
+  // trailing observer block, which loadPrefsInt() recovered into _legacy_tail; wait
+  // for loadMQTTPrefs() to commit that to /mqtt_prefs first. The legacy file is left
+  // on flash either way, so a deferred or failed save just retries on the next boot.
 #ifdef WITH_MQTT_BRIDGE
-  if (node_prefs_needs_migration) {
+  if (loaded_from_legacy || _com_prefs_needs_upgrade) {
     if (legacy_upgrade.mayRewriteComPrefs()) {
-      // The MQTT image (and any tail from /node_prefs) is committed, so it is
-      // now safe to publish the replacement name. Keep /node_prefs until the
-      // complete /com_prefs image is closed and atomically renamed into place.
-      if (saveCommonPrefsImageAtomically(fs)) {
-        fs->remove("/node_prefs");
-        legacy_upgrade.recordComPrefsRewrite();
-        _com_prefs_needs_upgrade = false;
-      } else {
-        MESH_DEBUG_PRINTLN("MQTT: preserving legacy /node_prefs until /com_prefs migration commits");
-      }
-    } else {
-      MESH_DEBUG_PRINTLN("MQTT: preserving legacy /node_prefs until /mqtt_prefs migration commits");
-    }
-  } else if (_com_prefs_needs_upgrade) {
-    // Old-format /com_prefs (legacy MQTT gap + trailing observer block) was detected:
-    // rewrite the prefs files in the current layout, one time. This persists the
-    // recovered rx_boosted_gain/flood_max_* values and (on MQTT builds) the observer
-    // settings that loadMQTTPrefs carried over into /mqtt_prefs.
-    if (legacy_upgrade.mayRewriteComPrefs()) {
-      // loadMQTTPrefs has already committed the full MQTT payload (including
-      // any recovered observer tail), so compact only /com_prefs now.
-      savePrefs(fs, false);
+      savePrefs(fs, false);   // loadMQTTPrefs already committed the MQTT payload
       legacy_upgrade.recordComPrefsRewrite();
       _com_prefs_needs_upgrade = false;
     } else {
-      MESH_DEBUG_PRINTLN("MQTT: preserving legacy /com_prefs until /mqtt_prefs migration commits");
+      MESH_DEBUG_PRINTLN("Prefs: deferring /prefs.json migration until /mqtt_prefs commits");
     }
   }
 #else
-  if (_com_prefs_needs_upgrade) {
+  if (loaded_from_legacy || _com_prefs_needs_upgrade) {
     savePrefs(fs);
     _com_prefs_needs_upgrade = false;
   }
 #endif
 }
 
-void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
+void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy prefs loader
 #if defined(RP2040_PLATFORM)
   File file = fs->open(filename, "r");
 #else
@@ -374,98 +356,27 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {
   }
 }
 
-// Keep the byte layout in one place so ordinary saves and the atomic legacy
-// rename path write exactly the same /com_prefs image. The Writer interface is
-// deliberately just write(bytes, size), which lets the transaction helper test
-// every short-write boundary without an Arduino filesystem.
-template <typename Writer>
-static bool writeCommonPrefsImage(Writer& writer, const NodePrefs* prefs) {
-  uint8_t pad[8];
-  memset(pad, 0, sizeof(pad));
-
-#define WRITE_COMMON_PREFS(value) \
-  do { \
-    if (writer.write((const uint8_t *)(value), sizeof(*(value))) != sizeof(*(value))) return false; \
-  } while (0)
-#define WRITE_COMMON_PREFS_BYTES(value, size) \
-  do { \
-    if (writer.write((const uint8_t *)(value), (size)) != (size)) return false; \
-  } while (0)
-
-  WRITE_COMMON_PREFS(&prefs->airtime_factor);    // 0
-  WRITE_COMMON_PREFS(&prefs->node_name);         // 4
-  WRITE_COMMON_PREFS_BYTES(pad, 4);               // 36
-  WRITE_COMMON_PREFS(&prefs->node_lat);           // 40
-  WRITE_COMMON_PREFS(&prefs->node_lon);           // 48
-  WRITE_COMMON_PREFS_BYTES(prefs->password, sizeof(prefs->password)); // 56
-  WRITE_COMMON_PREFS(&prefs->freq);               // 72
-  WRITE_COMMON_PREFS(&prefs->tx_power_dbm);       // 76
-  WRITE_COMMON_PREFS(&prefs->disable_fwd);        // 77
-  WRITE_COMMON_PREFS(&prefs->advert_interval);    // 78
-  WRITE_COMMON_PREFS_BYTES(pad, 1);               // 79
-  WRITE_COMMON_PREFS(&prefs->rx_delay_base);      // 80
-  WRITE_COMMON_PREFS(&prefs->tx_delay_factor);    // 84
-  WRITE_COMMON_PREFS_BYTES(prefs->guest_password, sizeof(prefs->guest_password)); // 88
-  WRITE_COMMON_PREFS(&prefs->direct_tx_delay_factor); // 104
-  WRITE_COMMON_PREFS_BYTES(pad, 4);               // 108
-  WRITE_COMMON_PREFS(&prefs->sf);                 // 112
-  WRITE_COMMON_PREFS(&prefs->cr);                 // 113
-  WRITE_COMMON_PREFS(&prefs->allow_read_only);    // 114
-  WRITE_COMMON_PREFS(&prefs->multi_acks);         // 115
-  WRITE_COMMON_PREFS(&prefs->bw);                 // 116
-  WRITE_COMMON_PREFS(&prefs->agc_reset_interval); // 120
-  WRITE_COMMON_PREFS(&prefs->path_hash_mode);     // 121
-  WRITE_COMMON_PREFS(&prefs->loop_detect);        // 122
-  WRITE_COMMON_PREFS_BYTES(pad, 1);               // 123
-  WRITE_COMMON_PREFS(&prefs->flood_max);          // 124
-  WRITE_COMMON_PREFS(&prefs->flood_advert_interval); // 125
-  WRITE_COMMON_PREFS(&prefs->interference_threshold); // 126
-  WRITE_COMMON_PREFS(&prefs->bridge_enabled);     // 127
-  WRITE_COMMON_PREFS(&prefs->bridge_delay);       // 128
-  WRITE_COMMON_PREFS(&prefs->bridge_pkt_src);     // 130
-  WRITE_COMMON_PREFS(&prefs->bridge_baud);        // 131
-  WRITE_COMMON_PREFS(&prefs->bridge_channel);     // 135
-  WRITE_COMMON_PREFS_BYTES(prefs->bridge_secret, sizeof(prefs->bridge_secret)); // 136
-  WRITE_COMMON_PREFS(&prefs->powersaving_enabled); // 152
-  WRITE_COMMON_PREFS_BYTES(pad, 3);               // 153
-  WRITE_COMMON_PREFS(&prefs->gps_enabled);        // 156
-  WRITE_COMMON_PREFS(&prefs->gps_interval);       // 157
-  WRITE_COMMON_PREFS(&prefs->advert_loc_policy);  // 161
-  WRITE_COMMON_PREFS(&prefs->discovery_mod_timestamp); // 162
-  WRITE_COMMON_PREFS(&prefs->adc_multiplier);     // 166
-  WRITE_COMMON_PREFS_BYTES(prefs->owner_info, sizeof(prefs->owner_info)); // 170
-  // MQTT/observer settings are stored in /mqtt_prefs, not here. No zero-gap is
-  // written anymore — /com_prefs holds only the (non-observer) fields below.
-  // These trailing writes are COM_PREFS_TAIL_BYTES; keep the two in sync.
-  WRITE_COMMON_PREFS(&prefs->rx_boosted_gain);      // 290
-  WRITE_COMMON_PREFS(&prefs->flood_max_unscoped);   // 291
-  WRITE_COMMON_PREFS(&prefs->flood_max_advert);     // 292
-  WRITE_COMMON_PREFS(&prefs->radio_fem_rxgain);     // 293
-  WRITE_COMMON_PREFS(&prefs->cad_enabled);          // 294
-
-#undef WRITE_COMMON_PREFS_BYTES
-#undef WRITE_COMMON_PREFS
-  return true;
-}
-
-void CommonCLI::savePrefs(FILESYSTEM* fs, bool save_mqtt) {
+bool CommonCLI::savePrefs(FILESYSTEM* fs, bool save_mqtt) {
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-  fs->remove("/com_prefs");
-  File file = fs->open("/com_prefs", FILE_O_WRITE);
+  fs->remove("/prefs.json");
+  File file = fs->open("/prefs.json", FILE_O_WRITE);
 #elif defined(RP2040_PLATFORM)
-  File file = fs->open("/com_prefs", "w");
+  File file = fs->open("/prefs.json", "w");
 #else
-  File file = fs->open("/com_prefs", "w", true);
+  File file = fs->open("/prefs.json", "w", true);
 #endif
+  bool success = false;
   if (file) {
-    writeCommonPrefsImage(file, _prefs);
+    success = _prefs->saveSerial(file);
     file.close();
   }
 #ifdef WITH_MQTT_BRIDGE
   // Observer config (MQTT/WiFi/timezone/SNMP/alert) is persisted separately. The
   // observer CLI writes _mqtt_prefs directly, so no NodePrefs->MQTTPrefs sync runs.
+  // Runs regardless of the NodePrefs result so a failed JSON write cannot strand it.
   if (save_mqtt) saveMQTTPrefs(fs);
 #endif
+  return success;
 }
 
 #ifdef WITH_MQTT_BRIDGE
@@ -643,106 +554,6 @@ private:
 };
 
 #endif  // WITH_MQTT_BRIDGE
-
-// The old /node_prefs name is only removed after this transaction has published
-// a complete /com_prefs image. At this migration point /com_prefs is absent, so
-// rename never needs a platform-specific replace-existing implementation.
-class CommonPrefsFileStore {
-public:
-  explicit CommonPrefsFileStore(FILESYSTEM* fs) : _fs(fs) {}
-
-  bool begin() {
-    _finished = false;
-    _open = false;
-    _bytes_written = 0;
-    // The old-name migration only starts when /com_prefs is absent. Refuse to
-    // overwrite a destination that appeared unexpectedly before this handoff.
-    if (_fs->exists("/com_prefs")) return false;
-    // Clear only stale, unpublished output. Guarded on exists() for the same
-    // reason as the /mqtt_prefs store above: remove() on a missing file logs a
-    // spurious VFS error on ESP32.
-    if (_fs->exists("/com_prefs.tmp")) {
-      _fs->remove("/com_prefs.tmp");
-      if (_fs->exists("/com_prefs.tmp")) return false;  // could not clear it
-    }
-#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
-    _file = _fs->open("/com_prefs.tmp", FILE_O_WRITE);
-#elif defined(RP2040_PLATFORM)
-    _file = _fs->open("/com_prefs.tmp", "w");
-#else
-    _file = _fs->open("/com_prefs.tmp", "w", true);
-#endif
-    _open = _file;
-    return _open;
-  }
-
-  size_t write(const uint8_t* bytes, size_t size) {
-    if (!_open) return 0;
-    const size_t written = _file.write(bytes, size);
-    _bytes_written += written;
-    return written;
-  }
-
-  bool finish() {
-    if (!_open) return false;
-    _file.close();
-    _open = false;
-#if defined(RP2040_PLATFORM)
-    File verify = _fs->open("/com_prefs.tmp", "r");
-#else
-    File verify = _fs->open("/com_prefs.tmp");
-#endif
-    if (!verify) return false;
-    const bool complete = verify.size() == _bytes_written;
-    verify.close();
-    if (!complete) return false;
-    _finished = true;
-    return true;
-  }
-
-  bool commit() {
-    return _finished && _fs->rename("/com_prefs.tmp", "/com_prefs");
-  }
-
-  void abort() {
-    if (_open) _file.close();
-    _open = false;
-    _finished = false;
-    if (_fs->exists("/com_prefs.tmp")) _fs->remove("/com_prefs.tmp");
-  }
-
-private:
-  FILESYSTEM* _fs;
-  File _file;
-  bool _open = false;
-  bool _finished = false;
-  size_t _bytes_written = 0;
-};
-
-static const char* commonPrefsSaveResultName(MQTTPrefsAtomicStore::ImageResult result) {
-  switch (result) {
-    case MQTTPrefsAtomicStore::ImageResult::BeginFailed: return "begin";
-    case MQTTPrefsAtomicStore::ImageResult::WriteFailed: return "write";
-    case MQTTPrefsAtomicStore::ImageResult::FinishFailed: return "close";
-    case MQTTPrefsAtomicStore::ImageResult::CommitFailed: return "rename";
-    case MQTTPrefsAtomicStore::ImageResult::Committed: return "committed";
-  }
-  return "unknown";
-}
-
-bool CommonCLI::saveCommonPrefsImageAtomically(FILESYSTEM* fs) {
-  CommonPrefsFileStore store(fs);
-  const MQTTPrefsAtomicStore::ImageResult result = MQTTPrefsAtomicStore::writeImage(
-      store, [this](CommonPrefsFileStore& target) {
-        return writeCommonPrefsImage(target, _prefs);
-      });
-  if (!MQTTPrefsAtomicStore::imageCommitted(result)) {
-    MESH_DEBUG_PRINTLN("Prefs: atomic /com_prefs migration save failed at %s; /node_prefs preserved",
-                       commonPrefsSaveResultName(result));
-    return false;
-  }
-  return true;
-}
 
 #ifdef WITH_MQTT_BRIDGE
 
