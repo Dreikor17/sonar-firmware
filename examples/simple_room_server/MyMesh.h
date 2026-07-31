@@ -189,6 +189,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void loopNeighborDiscover();
   void finishNeighborDiscover();
   bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
+  void touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp);
   void getLocalScopes(char* buf, size_t len);
   static const int NEIGHBOR_DISCOVER_PEER_BASE = 1000;
   static const unsigned long NEIGHBOR_DISCOVER_QUEUE_TIMEOUT_MS = 29000;

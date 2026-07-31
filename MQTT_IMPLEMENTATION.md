@@ -777,6 +777,9 @@ While `mqtt.neighbors` is on, `get mqtt.status` appends `nbr: <next>/<last>` —
   "timestamp": "2024-01-01T12:00:00.000000+00:00",
   "origin": "MeshCore-HOWL",
   "origin_id": "A1B2C3D4E5F67890...",
+  "total_neighbors": 2,
+  "queried_neighbors": 2,
+  "truncated": false,
   "self": { "scopes": "DEN,APRS", "default_scope": "*" },
   "neighbors": [
     {
@@ -785,13 +788,38 @@ While `mqtt.neighbors` is on, `get mqtt.status` appends `nbr: <next>/<last>` —
       "heard_secs_ago": 42,
       "scopes": "DEN,APRS",
       "status": "responded"
+    },
+    {
+      "pubkey": "8899AABBCCDDEEFF...",
+      "snr": 12.5,
+      "heard_secs_ago": null,
+      "scopes": "DEN",
+      "status": "responded"
     }
   ]
 }
 ```
-Entries are ordered most- to least-useful (most recently heard, then stronger
-SNR); the tail is dropped if the payload would exceed the 10 KB publish buffer.
-`status` is `responded`, `timeout`, or `send_failed` per neighbor.
+Entries are ordered most- to least-useful (usable age first, then most recently
+heard, then stronger SNR); the tail is dropped if the payload would exceed the
+10 KB publish buffer. `status` is `responded`, `timeout`, or `send_failed` per
+neighbor.
+
+`total_neighbors` is the size of the neighbor-table snapshot the cycle started
+from, `queried_neighbors` how many scope requests were confirmed transmitted, and
+`truncated` whether the buffer filled before every entry fit. All three are
+always present. The `neighbors` array can therefore be shorter than
+`total_neighbors` — compare its length against that field rather than assuming
+the table is complete.
+
+`heard_secs_ago` is `null`, as in the second entry above, when the age cannot be
+computed: the neighbor was last heard before the clock was set, so the stored
+stamp and the current clock come from different epochs and their difference is
+meaningless (see `UPSTREAM_BUGS.md` #1). **Consumers must treat `null` as
+unknown, not as zero** — the key is always present, so a missing key means an
+older firmware, and a `null` never means "heard just now". A neighbor that
+answers the scope query has its stamp refreshed, so a `null` age normally clears
+itself on the next publish cycle.
+
 `self.default_scope` is the region name this node floods to by default (`region
 default`); it is `*` when no default region is set, matching the unscoped flood
 the radio actually performs in that case.

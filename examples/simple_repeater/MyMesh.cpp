@@ -2,6 +2,9 @@
 #include <algorithm>
 #include <stdlib.h>  // for qsort()
 #include <helpers/RxReservePacketManager.h>
+#if defined(WITH_MQTT_NEIGHBORS)
+#include <helpers/MQTTConnectionPolicy.h>  // kSyncedClockEpoch
+#endif
 
 /* ------------------------------ Config -------------------------------- */
 
@@ -1967,15 +1970,46 @@ bool MyMesh::handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data
   memcpy(entry.scopes, &data[8], scope_len);
   entry.scopes[scope_len] = 0;
   entry.status = ND_RESPONDED;
+  // A zero-hop reply is proof we heard this neighbour now, so re-stamp both the
+  // snapshot and the live table; a stamp taken before time sync heals here.
+  entry.heard_timestamp = getRTCClock()->getCurrentTime();
+  touchNeighbourHeard(entry.id, entry.heard_timestamp);
   return true;
 }
 
-// Publish-ordering: most recently heard first, then stronger SNR, then pubkey.
-// The JSON builder drops the tail if the buffer fills, so the head must be the
-// most useful entries.
+// Refresh a live neighbour's heard time only: a scope reply carries no advert
+// timestamp or SNR to update.
+void MyMesh::touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp) {
+#if MAX_NEIGHBOURS
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (id.matches(neighbours[i].id)) {
+      neighbours[i].heard_timestamp = heard_timestamp;
+      return;
+    }
+  }
+#endif
+}
+
+// A heard age is a wall-clock delta, so it only means something when both stamps
+// share a clock epoch. An entry heard before the clock was set holds the unset
+// default, which a synced clock turns into a ~2-year age; report those as
+// unknown instead. See UPSTREAM_BUGS.md for the monotonic fix.
+static bool neighborHeardAgeUsable(uint32_t heard_timestamp, uint32_t now_secs) {
+  if (heard_timestamp == 0 || now_secs < heard_timestamp) return false;
+  // Never synced: the stamp shares this clock's boot epoch, so the delta holds.
+  if (now_secs < MQTTConnectionPolicy::kSyncedClockEpoch) return true;
+  return heard_timestamp >= MQTTConnectionPolicy::kSyncedClockEpoch;
+}
+
+// Publish-ordering: usable ages first, then most recently heard, then stronger
+// SNR, then pubkey. The JSON builder drops the tail if the buffer fills, so the
+// head must be the most useful entries.
 static bool neighborPublishEntryComesBefore(
     const MQTTMessageBuilder::NeighborsMessageEntry& lhs,
     const MQTTMessageBuilder::NeighborsMessageEntry& rhs) {
+  if (lhs.heard_unknown != rhs.heard_unknown) {
+    return !lhs.heard_unknown;
+  }
   if (lhs.heard_secs_ago != rhs.heard_secs_ago) {
     return lhs.heard_secs_ago < rhs.heard_secs_ago;  // newer first
   }
@@ -2033,8 +2067,9 @@ void MyMesh::finishNeighborDiscover() {
     mesh::Utils::toHex(pubkey_hex[i], entry.id.pub_key, PUB_KEY_SIZE);
     entries[i].pubkey_hex = pubkey_hex[i];
     entries[i].snr = entry.snr / 4.0f;
-    entries[i].heard_secs_ago = (entry.heard_timestamp > 0 && now_secs >= entry.heard_timestamp)
-      ? (now_secs - entry.heard_timestamp) : 0;
+    bool heard_known = neighborHeardAgeUsable(entry.heard_timestamp, now_secs);
+    entries[i].heard_unknown = !heard_known;
+    entries[i].heard_secs_ago = heard_known ? (now_secs - entry.heard_timestamp) : 0;
     entries[i].scopes = entry.scopes;
     switch (entry.status) {
       case ND_RESPONDED:   entries[i].status = "responded"; break;

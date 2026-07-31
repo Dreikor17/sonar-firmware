@@ -195,6 +195,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   void loopNeighborDiscover();
   void finishNeighborDiscover();
   bool handleNeighborDiscoverResponse(int overlay_idx, const uint8_t* data, size_t len);
+  void touchNeighbourHeard(const mesh::Identity& id, uint32_t heard_timestamp);
   void getLocalScopes(char* buf, size_t len);
   // Overlay peer indices are offset by this base so onPeerDataRecv can tell a
   // discovery response apart from a normal ACL-client index.

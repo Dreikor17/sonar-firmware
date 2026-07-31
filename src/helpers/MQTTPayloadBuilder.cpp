@@ -220,7 +220,11 @@ static void addNeighborsMessageEntry(
   JsonObject nb = arr.add<JsonObject>();
   nb["pubkey"] = neighbor.pubkey_hex;
   nb["snr"] = neighbor.snr;
-  nb["heard_secs_ago"] = neighbor.heard_secs_ago;
+  if (neighbor.heard_unknown) {
+    nb["heard_secs_ago"] = nullptr;  // age unknown, not zero
+  } else {
+    nb["heard_secs_ago"] = neighbor.heard_secs_ago;
+  }
   nb["scopes"] = neighbor.scopes ? neighbor.scopes : "";
   nb["status"] = neighbor.status;
 }

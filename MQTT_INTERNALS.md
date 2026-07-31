@@ -69,10 +69,14 @@ defined in `MQTTBridge.h`). It spans two subsystems and two cores:
   (`startNeighborDiscover`) fires one anon-regions scope query per heard neighbor,
   overlaying them onto the peer-index space at `NEIGHBOR_DISCOVER_PEER_BASE` so their
   `PAYLOAD_TYPE_RESPONSE` packets decrypt via `searchPeersByHash`/`getPeerSharedSecret`/
-  `onPeerDataRecv` even when the neighbor is not an ACL client. After all responses land
-  or a 30 s window expires, `finishNeighborDiscover()` builds the JSON with
+  `onPeerDataRecv` even when the neighbor is not an ACL client. A reply is zero-hop by
+  request, so `handleNeighborDiscoverResponse` also re-stamps `heard_timestamp` in both
+  the snapshot and `neighbours[]` — proof of reception, and the only thing that heals a
+  stamp taken before the clock was set. After all responses land or a 30 s window
+  expires, `finishNeighborDiscover()` builds the JSON with
   `MQTTMessageBuilder::buildNeighborsMessage` into a transient PSRAM buffer and hands it
-  to the bridge.
+  to the bridge. Ages that still span a clock epoch publish as `null` rather than a
+  fabricated delta (`neighborHeardAgeUsable`, see `UPSTREAM_BUGS.md` #1).
 - **Bridge side, handoff**: `requestPublishNeighbors(json, len)` (Core 1) memcpys into a
   persistent ~10 KB PSRAM buffer (`NEIGHBORS_JSON_BUFFER_SIZE`) and sets
   `_neighbors_publish_pending` with a release store; the MQTT task (`mqttTaskLoop`, Core 0)
