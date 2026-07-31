@@ -199,7 +199,17 @@ pio run -e Station_G3_ESP32_room_server_observer_mqtt
 # LilyGo T-LoRa V2.1-1.6 (TTGO LoRa32 V1.0)
 pio run -e LilyGo_TLora_V2_1_1_6_repeater_observer_mqtt
 pio run -e LilyGo_TLora_V2_1_1_6_room_server_observer_mqtt
+
+# Elecrow ThinkNode M7
+pio run -e ThinkNode_M7_repeater_observer_mqtt
+pio run -e ThinkNode_M7_room_server_observer_mqtt
 ```
+
+**ThinkNode M7 — WiFi only:** the M7 has an onboard CH390 Ethernet controller, and
+`ThinkNode_M7_companion_radio_ethernet` uses it, but the MQTT bridge's link
+management is bound to the WiFi station API, so the observer envs uplink over WiFi.
+See `UPSTREAM_BUGS.md` for the Ethernet gap. The board has PSRAM, so these builds
+get the PSRAM-only neighbors publication (`WITH_MQTT_NEIGHBORS`).
 
 **TLora naming:** The env prefix `LilyGo_TLora_V2_1_1_6` is LilyGo’s **T-LoRa V2.1–1.6** board (SX1276); PlatformIO selects **`ttgo-lora32-v1`** (TTGO LoRa32 V1.0). **MQTT observer** envs extend a slim base **without** `sensor_base` so the image fits `min_spiffs`; **all other** `LilyGo_TLora_V2_1_1_6_*` targets still use optional I2C environmental sensors as before. The **`lilygo_tlora_c6`** variant is separate hardware (ESP32-C6).
 
@@ -221,6 +231,9 @@ Some MQTT observer builds use a non-default partition table to accommodate the l
 | `Station_G3_ESP32_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | 16 MB flash board |
 | `LilyGo_TBeam_1W_repeater_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | Set in `boards/t_beam_1w.json`; required vs implicit `default.csv` |
 | `LilyGo_TBeam_1W_room_server_observer_mqtt` | `default_16MB.csv` | 16 MB | 6.25 MB | same |
+
+Boards absent from this table need no special first flash: their observer envs use the
+same partition table as the board's other firmwares.
 
 **Settings loss when the layout changes**
 
