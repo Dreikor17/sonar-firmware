@@ -727,18 +727,23 @@ void MQTTBridge::allocateRuntimeBuffers() {
       _publish_json_buffer, PUBLISH_JSON_BUFFER_SIZE, psram_malloc));
   _status_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
       _status_json_buffer, STATUS_JSON_BUFFER_SIZE, psram_malloc));
-#if defined(WITH_MQTT_NEIGHBORS)
-  // Persistent neighbors JSON buffer. Unlike status/packet there is no stack
-  // fallback: the feature is PSRAM-gated, so a nullptr simply disables publishing
-  // (requestPublishNeighbors/publishNeighbors both no-op on nullptr).
-  _neighbors_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
-      _neighbors_json_buffer, NEIGHBORS_JSON_BUFFER_SIZE, psram_malloc));
-#endif
   MQTT_DEBUG_PRINTLN("Runtime buffers: raw=%s publish=%s status=%s",
       _last_raw_data ? "PSRAM" : "unavailable",
       _publish_json_buffer ? "PSRAM" : "stack fallback",
       _status_json_buffer ? "PSRAM" : "stack fallback");
   #endif
+
+#if defined(WITH_MQTT_NEIGHBORS)
+  // Persistent neighbors JSON buffer, heap-allocated on every board: too large to
+  // keep inline in the bridge object the way the non-PSRAM status/packet buffers
+  // are. psram_malloc() falls back to internal DRAM, so this works without PSRAM.
+  // Unlike status/packet there is no stack fallback — a nullptr simply disables
+  // publishing (requestPublishNeighbors/publishNeighbors both no-op on nullptr).
+  _neighbors_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+      _neighbors_json_buffer, NEIGHBORS_JSON_BUFFER_SIZE, psram_malloc));
+  MQTT_DEBUG_PRINTLN("Neighbors buffer: %s",
+      _neighbors_json_buffer ? "ready" : "unavailable");
+#endif
 }
 
 void MQTTBridge::releaseRuntimeBuffers() {
@@ -749,13 +754,15 @@ void MQTTBridge::releaseRuntimeBuffers() {
       _publish_json_buffer, psram_free));
   _status_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
       _status_json_buffer, psram_free));
+  #endif
+
 #if defined(WITH_MQTT_NEIGHBORS)
+  // Paired with the unconditional allocation in allocateRuntimeBuffers().
   _neighbors_json_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
       _neighbors_json_buffer, psram_free));
   _neighbors_publish_len = 0;
   _neighbors_publish_pending.store(false, std::memory_order_release);
 #endif
-  #endif
 
   // Never pair a newly allocated raw buffer with metadata from a prior bridge
   // run. This also makes non-PSRAM restarts discard their stale raw cache.

@@ -289,7 +289,7 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
 #elif defined(WITH_MQTT_BRIDGE)
   } else if (memcmp(config, "mqtt.neighbors.interval ", 24) == 0 ||
              memcmp(config, "mqtt.neighbors ", 15) == 0) {
-    strcpy(reply, "Err - not supported (requires PSRAM)");
+    strcpy(reply, "Err - neighbors not enabled in this build");
 #endif
   } else if (memcmp(config, "mqtt.ntp ", 9) == 0) {
     const char* host = &config[9];
@@ -837,7 +837,7 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
 #elif defined(WITH_MQTT_BRIDGE)
   } else if (memcmp(config, "mqtt.neighbors.interval", 23) == 0 ||
              memcmp(config, "mqtt.neighbors", 14) == 0) {
-    strcpy(reply, "Err - not supported (requires PSRAM)");
+    strcpy(reply, "Err - neighbors not enabled in this build");
 #endif
   } else if (memcmp(config, "mqtt.ntp.diag", 13) == 0 && (config[13] == '\0' || config[13] == ' ')) {
 #ifdef ESP_PLATFORM

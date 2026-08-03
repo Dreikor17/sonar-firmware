@@ -172,6 +172,16 @@ Fresh installs default to slot 1 `analyzer-us`, slot 2 `analyzer-eu`, and slots 
 - Slots configured beyond what the device supports show as `(inactive)` in `get mqtt.status`
 - Slot configuration is preserved in preferences — moving the firmware to a PSRAM device activates the rest
 
+**Neighbors publication without PSRAM.** PSRAM boards get `WITH_MQTT_NEIGHBORS`
+automatically. Non-PSRAM boards opt in per variant with
+`-D MQTT_NEIGHBORS_WITHOUT_PSRAM=1`, which is set on the ESP32-S3 observer envs
+(Heltec V3/WSL3, RAK3112, Heltec Tracker v1.1/v2). It costs ~7.4 KB of static DRAM
+(~9.6 KB on room servers) and up to ~13 KB transiently per publish, and caps the
+table at 20 entries — so the feature is deliberately **not** enabled on the classic
+ESP32 T-LoRa V2.1–1.6 observer builds, which are already down to one active TLS
+slot. Publishing peaks while the table is built, so keep the slot guidance above
+in mind: the peak lands on the same internal heap the TLS stack draws from.
+
 ## Build Configuration
 
 To build the MQTT bridge firmware:
@@ -209,7 +219,7 @@ pio run -e ThinkNode_M7_room_server_observer_mqtt
 `ThinkNode_M7_companion_radio_ethernet` uses it, but the MQTT bridge's link
 management is bound to the WiFi station API, so the observer envs uplink over WiFi.
 See `UPSTREAM_BUGS.md` for the Ethernet gap. The board has PSRAM, so these builds
-get the PSRAM-only neighbors publication (`WITH_MQTT_NEIGHBORS`).
+get neighbors publication (`WITH_MQTT_NEIGHBORS`) automatically.
 
 **TLora naming:** The env prefix `LilyGo_TLora_V2_1_1_6` is LilyGo’s **T-LoRa V2.1–1.6** board (SX1276); PlatformIO selects **`ttgo-lora32-v1`** (TTGO LoRa32 V1.0). **MQTT observer** envs extend a slim base **without** `sensor_base` so the image fits `min_spiffs`; **all other** `LilyGo_TLora_V2_1_1_6_*` targets still use optional I2C environmental sensors as before. The **`lilygo_tlora_c6`** variant is separate hardware (ESP32-C6).
 
@@ -500,8 +510,8 @@ These settings apply across all MQTT slots:
 - `get mqtt.rx` - Get RX packet uplinking setting (on/off)
 - `get mqtt.tx` - Get TX packet uplinking setting (on/off/advert)
 - `get mqtt.interval` - Get status publish interval
-- `get mqtt.neighbors` - Get periodic neighbors publishing setting (on/off; PSRAM only)
-- `get mqtt.neighbors.interval` - Get neighbors publish interval in hours (PSRAM only)
+- `get mqtt.neighbors` - Get periodic neighbors publishing setting (on/off; neighbors-enabled builds)
+- `get mqtt.neighbors.interval` - Get neighbors publish interval in hours (neighbors-enabled builds)
 - `get mqtt.ntp` - Get effective NTP server hostname
 - `get mqtt.ntp.diag` - Probe every configured NTP server for connectivity (does not change the clock; serial console shows each server's reported time, LoRa shows a compact `<server> ok|fail` list)
 - `get mqtt.owner` - Get owner public key (serial console only)
@@ -519,8 +529,8 @@ These settings apply across all MQTT slots:
   - `advert` - Uplink only this node's own advert packets (self-originated)
   - `off` - Disable TX packet uplinking
 - `set mqtt.interval <minutes>` - Set status publish interval (1-60 minutes)
-- `set mqtt.neighbors on|off` - Enable/disable periodic neighbors publishing (PSRAM only; read live, no restart)
-- `set mqtt.neighbors.interval <hours>` - Set neighbors publish interval (12-336 hours, default 24; PSRAM only)
+- `set mqtt.neighbors on|off` - Enable/disable periodic neighbors publishing (neighbors-enabled builds; read live, no restart)
+- `set mqtt.neighbors.interval <hours>` - Set neighbors publish interval (12-336 hours, default 24; neighbors-enabled builds)
 - `set mqtt.ntp <hostname>` - Set custom NTP server (validated with immediate sync); `none` reverts to default
 - `set mqtt.owner <64-hex-char-public-key>` - Set owner public key
 - `set mqtt.email <email>` - Set owner email address
@@ -698,7 +708,7 @@ Full packet data with RF characteristics and metadata.
 Minimal raw packet data for map integration.
 
 ### Neighbors Topic: `meshcore/{IATA}/{DEVICE_PUBLIC_KEY}/neighbors`
-Cached zero-hop repeater neighbors with SNR, last-heard age, and flood-allowed scopes. Published on `discover.scopes` or periodically when `mqtt.neighbors` is enabled (PSRAM observer builds only). Goes to every configured slot's `neighbors` topic at QoS 0, retained only where the preset allows it.
+Cached zero-hop repeater neighbors with SNR, last-heard age, and flood-allowed scopes. Published on `discover.scopes` or periodically when `mqtt.neighbors` is enabled (observer builds with neighbors compiled in; non-PSRAM builds cap the table at 20 entries and set `truncated`). Goes to every configured slot's `neighbors` topic at QoS 0, retained only where the preset allows it.
 
 Periodic publishing first runs a 60-second zero-hop neighbor refresh equivalent to `discover.neighbors`, then queries the refreshed table for scopes and publishes when the scope-query phase completes.
 
@@ -784,7 +794,7 @@ While `mqtt.neighbors` is on, `get mqtt.status` appends `nbr: <next>/<last>` —
 }
 ```
 
-### Neighbors Message (PSRAM observer builds)
+### Neighbors Message (neighbors-enabled observer builds)
 ```json
 {
   "timestamp": "2024-01-01T12:00:00.000000+00:00",
