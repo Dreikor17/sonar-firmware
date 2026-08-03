@@ -1,3 +1,8 @@
+// MQTT-only translation unit. 22 variants re-glob helpers/*.cpp past the
+// arduino_base exclusion, so the contents are guarded here rather than in
+// the build filter — same idiom as helpers/esp32/WebConfigServer.cpp.
+#ifdef WITH_MQTT_BRIDGE
+
 #include "MQTTMessageBuilder.h"
 #include "MQTTPayloadBuilder.h"
 #include <ArduinoJson.h>
@@ -361,3 +366,5 @@ void MQTTMessageBuilder::packetToHex(mesh::Packet* packet, char* hex, size_t hex
   // Convert serialized packet to hex
   bytesToHex(raw_buf, raw_len, hex, hex_size);
 }
+
+#endif  // WITH_MQTT_BRIDGE

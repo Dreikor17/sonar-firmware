@@ -15,6 +15,8 @@
 #include <WiFiClientSecure.h>
 #include <esp_wifi.h>
 #include <esp_heap_caps.h>
+#else
+#include <malloc.h>  // mallinfo() for the `memory` command on nRF52/RP2040
 #endif
 #ifdef WITH_MQTT_BRIDGE
 #include "bridges/MQTTBridge.h"
@@ -842,6 +844,7 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         strcpy(reply, "ERR: clock cannot go backwards");
       }
     } else if (memcmp(command, "memory", 6) == 0) {
+#ifdef ESP_PLATFORM
       sprintf(reply, "Free: %d, Min: %d, Max: %d, Queue: %d, IntFree: %d, IntMax: %d, PSRAM: %d/%d",
               ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getMaxAllocHeap(),
               _callbacks->getQueueSize(),
@@ -849,6 +852,16 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
               (int)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
               (int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
               (int)heap_caps_get_total_size(MALLOC_CAP_SPIRAM));
+#else
+      // newlib arena stats — the portable equivalent on nRF52/RP2040. There is
+      // no min-ever-free or largest-free-block counterpart, so those fields are
+      // left out rather than filled with numbers that mean something different.
+      // Frags is the free-chunk count, the closest available fragmentation hint.
+      struct mallinfo mi = mallinfo();
+      sprintf(reply, "Free: %d, Used: %d, Arena: %d, Frags: %d, Queue: %d",
+              (int)mi.fordblks, (int)mi.uordblks, (int)mi.arena, (int)mi.ordblks,
+              _callbacks->getQueueSize());
+#endif
     } else if (memcmp(command, "start ota", 9) == 0) {
       // Manual OTA: bring up the ElegantOTA web UI for a hand-uploaded binary.
       // Plain "start ota" serves on the station IP when joined to WiFi, else
