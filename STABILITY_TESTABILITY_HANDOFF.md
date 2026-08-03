@@ -32,7 +32,7 @@ index.
 | — | OTA teardown barrier | Implemented — flash gated on a clean MQTT stop in `simple_repeater`; not hardware-validated |
 | 6 | Request/queue/connection/publication integration tests | Partial: WiFi-backoff + publish-outcome + enum-alignment gaps extracted and host-tested; WebConfig batch/reboot/stop spec (`WebConfigBatch.h`) **now wired into `WebConfigServer.cpp`** (2026-07-19) so the host tests cover production; queue-orchestration coverage still open, and the wired path is not yet exercised over real HTTP |
 | 7 | Uptime, memory, and fault-injection gates | Representative HW matrix run 2026-07-19: V3 non-PSRAM + V4 PSRAM done (no leak/crash; forced-path OTA-withhold + ~15–27 s loop stall observed). Multi-day soak + stack-HWM build pending |
-| — | Non-PSRAM neighbors publication | Enabled on the ESP32-S3 non-PSRAM observer envs via `MQTT_NEIGHBORS_WITHOUT_PSRAM` (`feat/non-psram-neighbors`). Bench-verified 2026-08-03 at the 2-wss-slot non-PSRAM maximum (see "Hardware Characterization — Non-PSRAM Neighbors"). Found and fixed a **pre-existing PSRAM bug**: the JSON pool budget starved at ~40+ neighbours and dropped the whole publish (`34037f20`). Truncation path (>20 neighbours) still unverified on hardware |
+| — | Non-PSRAM neighbors publication | Enabled on the ESP32-S3 non-PSRAM observer envs via `MQTT_NEIGHBORS_WITHOUT_PSRAM` (`feat/non-psram-neighbors`). Bench-verified 2026-08-03 at the 2-wss-slot non-PSRAM maximum (see "Hardware Characterization — Non-PSRAM Neighbors"). Found and fixed a **pre-existing PSRAM bug, dev/beta channel only**: the JSON pool budget starved at ~40+ neighbours and dropped the whole publish (`34037f20`). Prod is on ArduinoJson v6 and unaffected — no hand-port needed. Truncation path (>20 neighbours) still unverified on hardware |
 | — | Upstream merge | `upstream/dev` merged 2026-07-19 on `observer-firmware-dev` (191 commits, 14 conflicted files). See "Upstream Merge Record". Not yet promoted to `webconfig` |
 | — | Dev release channel | `observer-firmware-dev` publishes the dev/beta firmware channel (see "Release Channels"). Manual dispatch; separate from production |
 
@@ -246,18 +246,28 @@ text budget admits 22 entries, so the 20-entry
 `NEIGHBORS_MAX_PUBLISH_ENTRIES` cap binds first — as designed, keeping the pool
 to a single block. No retuning needed.
 
-### Pre-existing bug found while verifying (affects PSRAM boards)
+### Pre-existing bug found while verifying — dev/beta channel only
 
 Sizing the ArduinoJson pool budget at `NEIGHBORS_JSON_BUFFER_SIZE` starved it:
 v7 hands out pool blocks in fixed 4096-byte chunks, so a 50-entry table needs
 12541 B of pool against the 10240 B cap. A starved pool sets `doc.overflowed()`,
 which makes `buildNeighborsMessage` return 0 and drop the **entire** publish
-rather than truncating. Repeaters with roughly 40+ neighbours have therefore been
-publishing no neighbors message at all, silently, on shipping PSRAM firmware.
-Fixed in `34037f20` with a separate `NEIGHBORS_DOC_POOL_BUDGET`; that commit is
-self-contained and cherry-pickable to production independently of the non-PSRAM
-work. **Action:** check `get mqtt.status` for `nbr: <next>/fail` on dense PSRAM
-nodes.
+rather than truncating. PSRAM repeaters running a `observer-firmware-dev` build
+with roughly 40+ neighbours were therefore publishing no neighbors message at
+all, silently. Fixed in `34037f20` with a separate `NEIGHBORS_DOC_POOL_BUDGET`.
+
+**Production (`observer-firmware`) is NOT affected, so this does not need a
+hand-port.** The failure requires ArduinoJson v7's fixed 4096-byte pool blocks
+plus dev's custom budget-capped `NeighborsDocAllocator`. Prod is still on v6 —
+`MQTTMessageBuilder.cpp` uses `createNestedArray`, removed in 7.0 — where
+`DynamicJsonDocument(10240)` is a real compact slot pool needing only ~3.8 KB
+for 50 entries. **Action:** check `get mqtt.status` for `nbr: <next>/fail` only
+on dev/beta-channel PSRAM nodes.
+
+Noted in passing: prod's `platformio.ini` has **no ArduinoJson pin** (it resolves
+transitively), so a clean dependency resolve could pull v7 and fail to compile
+the v6-only API. That is the same gap Phase 1's "ArduinoJson pin enforcement"
+covers on dev.
 
 ### Limitations / not covered
 
