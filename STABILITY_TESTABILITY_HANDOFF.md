@@ -32,6 +32,7 @@ index.
 | — | OTA teardown barrier | Implemented — flash gated on a clean MQTT stop in `simple_repeater`; not hardware-validated |
 | 6 | Request/queue/connection/publication integration tests | Partial: WiFi-backoff + publish-outcome + enum-alignment gaps extracted and host-tested; WebConfig batch/reboot/stop spec (`WebConfigBatch.h`) **now wired into `WebConfigServer.cpp`** (2026-07-19) so the host tests cover production; queue-orchestration coverage still open, and the wired path is not yet exercised over real HTTP |
 | 7 | Uptime, memory, and fault-injection gates | Representative HW matrix run 2026-07-19: V3 non-PSRAM + V4 PSRAM done (no leak/crash; forced-path OTA-withhold + ~15–27 s loop stall observed). Multi-day soak + stack-HWM build pending |
+| — | Non-PSRAM neighbors publication | Enabled on the ESP32-S3 non-PSRAM observer envs via `MQTT_NEIGHBORS_WITHOUT_PSRAM` (`feat/non-psram-neighbors`). Bench-verified 2026-08-03 at the 2-wss-slot non-PSRAM maximum (see "Hardware Characterization — Non-PSRAM Neighbors"). Found and fixed a **pre-existing PSRAM bug**: the JSON pool budget starved at ~40+ neighbours and dropped the whole publish (`34037f20`). Truncation path (>20 neighbours) still unverified on hardware |
 | — | Upstream merge | `upstream/dev` merged 2026-07-19 on `observer-firmware-dev` (191 commits, 14 conflicted files). See "Upstream Merge Record". Not yet promoted to `webconfig` |
 | — | Dev release channel | `observer-firmware-dev` publishes the dev/beta firmware channel (see "Release Channels"). Manual dispatch; separate from production |
 
@@ -198,6 +199,76 @@ exceeds 8 s → forced/dirty):
   failure, and `millis()`-rollover scenarios need external network control /
   time injection and were not driven over serial.
 - Both devices left restored to their original slot config with the bridge on.
+
+## Hardware Characterization — Non-PSRAM Neighbors (2026-08-03)
+
+Records the bench verification of neighbors publication on a non-PSRAM board
+(branch `feat/non-psram-neighbors`). Previously the feature was gated on
+`BOARD_HAS_PSRAM`; it is now available on the ESP32-S3 non-PSRAM observer envs
+via the per-variant `MQTT_NEIGHBORS_WITHOUT_PSRAM` opt-in.
+
+### Setup
+
+- Non-PSRAM ESP32-S3 observer node (`memory` reports `PSRAM: 0/0`); one of the
+  newly enabled envs — exact board not recorded. Origin `MQTT Observer 63`.
+- **2 active preset slots, both connected**: `meshmapper` and `waev`, both
+  `wss://` — i.e. the documented non-PSRAM design maximum of 2 TLS/WSS slots.
+- Driven over the serial CLI (`memory`, `neighbors`, `get mqtt.status`) with the
+  published payload captured off the broker's `neighbors` topic.
+
+### Result — publishes cleanly at the 2-slot maximum
+
+| Signal | Observed | Note |
+|--------|----------|------|
+| `get mqtt.status` | `nbr: 23h54m/ok` | periodic publish succeeded (`NBR_RESULT_OK`) |
+| Free / min-ever internal heap | 70136 / **53776** | worst witnessed free still ~53.8 KB |
+| Largest contiguous block | 55284 | vs a 4096 B largest single request |
+| Payload size | **1252 B of 4096** (31%) | 6 neighbours, 272 B base |
+| `total` / `queried` / `truncated` | 6 / 6 / `false` | self-consistent with array length |
+
+Publish peak is **near entry-count-independent** below the cap, because three of
+the four allocations are fixed size: persistent buffer 4096 + transient build
+buffer 4096 + one 4096 ArduinoJson pool block, plus only 89 B/entry of scratch.
+So ~13.0 KB at 6 entries vs ~14.3 KB at the 20-entry cap — this run already
+covered most of the worst-case peak.
+
+Correctness cross-checks, all passing: every pubkey distinct and correctly
+prefixed (validates the shared-scratch `&pubkey_hex[i * hex_size]` indexing that
+replaced the old stack arrays); all six SNRs match the `neighbors` CLI raw ×4
+values (29→7.25, 50→12.5, 48→12, 42→10.5, 46→11.5, 48→12); ordering newest-first
+(0/1/2/4/11/398 s); the 398 s non-responder rendered `scopes: ""` +
+`status: "timeout"` rather than a fabricated "responded"; `heard_secs_ago: 0` on
+the zero-hop responder confirms `neighborHeardAgeUsable` is not misfiring into
+the `null` path.
+
+**Capacity for this mesh** (scopes ranged `""`/`"*"` up to 49 chars): the 4 KB
+text budget admits 22 entries, so the 20-entry
+`NEIGHBORS_MAX_PUBLISH_ENTRIES` cap binds first — as designed, keeping the pool
+to a single block. No retuning needed.
+
+### Pre-existing bug found while verifying (affects PSRAM boards)
+
+Sizing the ArduinoJson pool budget at `NEIGHBORS_JSON_BUFFER_SIZE` starved it:
+v7 hands out pool blocks in fixed 4096-byte chunks, so a 50-entry table needs
+12541 B of pool against the 10240 B cap. A starved pool sets `doc.overflowed()`,
+which makes `buildNeighborsMessage` return 0 and drop the **entire** publish
+rather than truncating. Repeaters with roughly 40+ neighbours have therefore been
+publishing no neighbors message at all, silently, on shipping PSRAM firmware.
+Fixed in `34037f20` with a separate `NEIGHBORS_DOC_POOL_BUDGET`; that commit is
+self-contained and cherry-pickable to production independently of the non-PSRAM
+work. **Action:** check `get mqtt.status` for `nbr: <next>/fail` on dense PSRAM
+nodes.
+
+### Limitations / not covered
+
+- **The truncation path is untested on hardware.** This site has 6 neighbours;
+  `truncated: true` with `total_neighbors` exceeding the array length needs a
+  site with >20. The arithmetic is host-verified against the real builder.
+- Both slots were steady-connected throughout, so a publish coinciding with a
+  **slot reconnect** — the case the reduced buffer sizing exists for — was not
+  driven. That is the remaining memory-pressure scenario.
+- Single bench run; no multi-day soak, and no stack high-water-mark build. The
+  4752→304 byte stack-frame reduction was verified by disassembly, not at runtime.
 
 ## Current Baseline
 
