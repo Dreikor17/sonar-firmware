@@ -38,11 +38,15 @@ class MeshSNMPAgent;  // Forward declaration
 
 #ifdef WITH_MQTT_BRIDGE
 
-// Periodic neighbors publication is PSRAM-only: it needs a persistent ~10 KB JSON
-// buffer plus a second transient one while the mesh builds the table, and it keys
-// off the mesh neighbor cache (sized by MAX_NEIGHBOURS). Every neighbors-specific
-// member, method, and code block in this bridge is gated on WITH_MQTT_NEIGHBORS.
-#if defined(BOARD_HAS_PSRAM) && defined(MAX_NEIGHBOURS) && MAX_NEIGHBOURS > 0
+// Periodic neighbors publication keys off the mesh neighbor cache (sized by
+// MAX_NEIGHBOURS) and needs a persistent JSON buffer plus a second transient one
+// while the mesh builds the table. PSRAM boards get it automatically; non-PSRAM
+// boards must opt in per variant with MQTT_NEIGHBORS_WITHOUT_PSRAM, which spends
+// internal DRAM the TLS stack also needs (see NEIGHBORS_JSON_BUFFER_SIZE). Every
+// neighbors-specific member, method, and code block here is gated on
+// WITH_MQTT_NEIGHBORS.
+#if defined(MAX_NEIGHBOURS) && MAX_NEIGHBOURS > 0 && \
+    (defined(BOARD_HAS_PSRAM) || defined(MQTT_NEIGHBORS_WITHOUT_PSRAM))
 #define WITH_MQTT_NEIGHBORS 1
 #endif
 
@@ -513,7 +517,38 @@ public:
 #if defined(WITH_MQTT_NEIGHBORS)
   // Single source of truth for the neighbors JSON size, used by both the bridge's
   // persistent buffer and the mesh's transient build buffer.
+  #if defined(BOARD_HAS_PSRAM)
   static const size_t NEIGHBORS_JSON_BUFFER_SIZE = 10240;
+  #else
+  // Without PSRAM all three neighbors allocations (persistent buffer, transient
+  // build buffer, ArduinoJson pool) come out of internal DRAM, which each TLS
+  // slot also needs ~40 KB of. A quarter-size buffer keeps the peak near 13 KB
+  // instead of ~35 KB; the builder drops the tail and sets "truncated" once the
+  // next entry will not fit, so the table degrades instead of failing.
+  static const size_t NEIGHBORS_JSON_BUFFER_SIZE = 4096;
+  #endif
+
+  // The ArduinoJson pool is NOT bounded by the text buffer: v7 hands out pool
+  // blocks in fixed 4096-byte chunks, so a table that just fits the text buffer
+  // can still need well over it in pool. Budgeting the pool at the text size
+  // starves it, and a starved pool sets doc.overflowed() — which drops the whole
+  // publish instead of truncating. Measured need is 12541 B for 50 entries and
+  // 4286 B for 21, so allow a spare block over each.
+  #if defined(BOARD_HAS_PSRAM)
+  static const size_t NEIGHBORS_DOC_POOL_BUDGET = 16384;
+  #else
+  static const size_t NEIGHBORS_DOC_POOL_BUDGET = 12288;
+  #endif
+
+  // Entries per publish. One 4096-byte pool block holds 21, so staying under
+  // that keeps the non-PSRAM pool to a single block (~4.3 KB rather than
+  // ~8.4 KB) and the whole publish peak near 13 KB of internal DRAM. PSRAM
+  // boards are limited only by the text buffer and the neighbour cache.
+  #if defined(BOARD_HAS_PSRAM)
+  static const int NEIGHBORS_MAX_PUBLISH_ENTRIES = MAX_NEIGHBOURS;
+  #else
+  static const int NEIGHBORS_MAX_PUBLISH_ENTRIES = 20;
+  #endif
 
   // Called by the mesh (Core 1) once a neighbor-discovery pass has built the
   // table JSON. Copies it into the persistent PSRAM buffer and raises the

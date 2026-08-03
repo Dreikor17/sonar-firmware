@@ -74,11 +74,22 @@ defined in `MQTTBridge.h`). It spans two subsystems and two cores:
   the snapshot and `neighbours[]` — proof of reception, and the only thing that heals a
   stamp taken before the clock was set. After all responses land or a 30 s window
   expires, `finishNeighborDiscover()` builds the JSON with
-  `MQTTMessageBuilder::buildNeighborsMessage` into a transient PSRAM buffer and hands it
-  to the bridge. Ages that still span a clock epoch publish as `null` rather than a
+  `MQTTMessageBuilder::buildNeighborsMessage` into a transient buffer (PSRAM where
+  available, internal DRAM otherwise) and hands it to the bridge. The entry table and its
+  hex strings share one heap block sized to the pass — at `MAX_NEIGHBOURS` they reach
+  ~4.5 KB, which does not fit the mesh loop task's 8 KB stack. Ages that still span a clock epoch publish as `null` rather than a
   fabricated delta (`neighborHeardAgeUsable`, see `UPSTREAM_BUGS.md` #1).
-- **Bridge side, handoff**: `requestPublishNeighbors(json, len)` (Core 1) memcpys into a
-  persistent ~10 KB PSRAM buffer (`NEIGHBORS_JSON_BUFFER_SIZE`) and sets
+- **Buffer sizing**: `NEIGHBORS_JSON_BUFFER_SIZE` is 10 KB with PSRAM and 4 KB without,
+  since a non-PSRAM board pays for the persistent buffer, the transient build buffer and
+  the ArduinoJson pool out of the same internal DRAM each TLS slot needs ~40 KB of
+  (~13 KB peak instead of ~35 KB). The pool has its own budget
+  (`NEIGHBORS_DOC_POOL_BUDGET`) because ArduinoJson v7 hands out pool blocks in fixed
+  4096-byte chunks, so a table that just fits the text buffer can still need well over
+  it in pool — and a starved pool sets `doc.overflowed()`, which drops the entire publish
+  instead of truncating it. `NEIGHBORS_MAX_PUBLISH_ENTRIES` (20 without PSRAM) keeps the
+  pool inside a single block.
+- **Bridge side, handoff**: `requestPublishNeighbors(json, len)` (Core 1) memcpys into the
+  persistent buffer (`NEIGHBORS_JSON_BUFFER_SIZE`, PSRAM where available) and sets
   `_neighbors_publish_pending` with a release store; the MQTT task (`mqttTaskLoop`, Core 0)
   consumes it with an acquire load, calls `publishNeighbors()`, and clears the flag. A
   second snapshot is dropped while one is in flight. `publishNeighbors()` sends QoS 1,
