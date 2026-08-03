@@ -1940,7 +1940,8 @@ bool MyMesh::completeNeighborDiscoverEntry() {
   size_t added = MQTTMessageBuilder::measureNeighborsMessageEntry(measured);
   if (neighbor_discover_publish_count > 0) added++;  // array comma
 
-  if (neighbor_discover_json_size + added >= MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE) {
+  if (neighbor_discover_json_size + added >= MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE ||
+      neighbor_discover_publish_count >= MQTTBridge::NEIGHBORS_MAX_PUBLISH_ENTRIES) {
     neighbor_discover_truncated = true;
     finishNeighborDiscover();
     return false;
@@ -2026,7 +2027,7 @@ static bool neighborPublishEntryComesBefore(
 // single-shot doc (overflow path removes+breaks, so no further growth after free).
 struct NeighborsDocAllocator : ArduinoJson::Allocator {
   size_t used = 0;
-  static const size_t kBudget = MQTTBridge::NEIGHBORS_JSON_BUFFER_SIZE;
+  static const size_t kBudget = MQTTBridge::NEIGHBORS_DOC_POOL_BUDGET;
 
   void* allocate(size_t size) override {
     if (used >= kBudget || size > kBudget - used) return nullptr;

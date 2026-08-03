@@ -515,6 +515,16 @@ public:
   // persistent buffer and the mesh's transient build buffer.
   static const size_t NEIGHBORS_JSON_BUFFER_SIZE = 10240;
 
+  // The ArduinoJson pool is NOT bounded by the text buffer: v7 hands out pool
+  // blocks in fixed 4096-byte chunks, so a table that just fits the text buffer
+  // can still need well over it in pool. Budgeting the pool at the text size
+  // starves it, and a starved pool sets doc.overflowed() — which drops the whole
+  // publish instead of truncating. Measured need is 12541 B for 50 entries.
+  static const size_t NEIGHBORS_DOC_POOL_BUDGET = 16384;
+
+  // Entries per publish; the neighbour cache and text buffer are the real limit.
+  static const int NEIGHBORS_MAX_PUBLISH_ENTRIES = MAX_NEIGHBOURS;
+
   // Called by the mesh (Core 1) once a neighbor-discovery pass has built the
   // table JSON. Copies it into the persistent PSRAM buffer and raises the
   // publish-pending flag for the MQTT task; a request is dropped if one is
