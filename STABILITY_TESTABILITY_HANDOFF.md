@@ -33,6 +33,7 @@ index.
 | 6 | Request/queue/connection/publication integration tests | Partial: WiFi-backoff + publish-outcome + enum-alignment gaps extracted and host-tested; WebConfig batch/reboot/stop spec (`WebConfigBatch.h`) **now wired into `WebConfigServer.cpp`** (2026-07-19) so the host tests cover production; queue-orchestration coverage still open, and the wired path is not yet exercised over real HTTP |
 | 7 | Uptime, memory, and fault-injection gates | Representative HW matrix run 2026-07-19: V3 non-PSRAM + V4 PSRAM done (no leak/crash; forced-path OTA-withhold + ~15–27 s loop stall observed). Multi-day soak + stack-HWM build pending |
 | — | Non-PSRAM neighbors publication | Enabled on the ESP32-S3 non-PSRAM observer envs via `MQTT_NEIGHBORS_WITHOUT_PSRAM` (`feat/non-psram-neighbors`). Bench-verified 2026-08-03 at the 2-wss-slot non-PSRAM maximum (see "Hardware Characterization — Non-PSRAM Neighbors"). Found and fixed a **pre-existing PSRAM bug, dev/beta channel only**: the JSON pool budget starved at ~40+ neighbours and dropped the whole publish (`34037f20`). Prod is on ArduinoJson v6 and unaffected — no hand-port needed. Truncation path (>20 neighbours) still unverified on hardware |
+| — | Upstream merge (latest) | `upstream/dev` `9d902e63` merged 2026-08-03 as `126a2564` — 13 commits, 6 files, zero conflicts. Carries an LR1110 RX-timeout fix affecting the new ThinkNode M7 observer envs, and switches all nRF52 boards to CC310 hardware Ed25519. See "Upstream Merge Record — 2026-08-03". Exposed that nRF52/RP2040 had been unbuildable since 2026-04-10; nRF52 fixed in `45379ad7`, RP2040 still open |
 | — | Upstream merge | `upstream/dev` merged 2026-07-19 on `observer-firmware-dev` (191 commits, 14 conflicted files). See "Upstream Merge Record". Not yet promoted to `webconfig` |
 | — | Dev release channel | `observer-firmware-dev` publishes the dev/beta firmware channel (see "Release Channels"). Manual dispatch; separate from production |
 
@@ -843,6 +844,75 @@ receives OTA updates from the channel it was flashed from. Both channels
 deliberately share `FIRMWARE_VERSION`: the OTA logic treats a differing base
 version as "always an update", so channels must separate by manifest URL, never
 by base version.
+
+## Upstream Merge Record — 2026-08-03 (`observer-firmware-dev`)
+
+`upstream/dev` `9d902e63` merged into `observer-firmware-dev` as `126a2564`,
+starting from `db232808` (the 2026-07-30 merge). **13 upstream commits, 6 files,
+zero conflicts** — no `rerere` resolutions needed. This is what merging
+frequently buys: the whole merge is attributable at a glance.
+
+Baseline before and after, on the two named smoke builds, is **byte-identical**:
+
+| Target | RAM | Flash |
+|--------|-----|-------|
+| `Heltec_v3_repeater_observer_mqtt` | 74656 → 74656 | 1592513 → 1592513 |
+| `T_Beam_S3_Supreme_SX1262_repeater_observer_mqtt` | 71780 → 71780 | 1596977 → 1596977 |
+
+Native suite 267/267 before and after. The nRF52 crypto below is fully
+`#ifdef`-guarded, which is why ESP32 output does not move a byte.
+
+### The finding that matters most: the smoke pair is blind to this merge
+
+Both named smoke builds are ESP32; this merge is entirely nRF52 crypto and
+LR1110 radio. A green smoke run said nothing about any of it. Targets that
+actually exercise the change had to be chosen by hand.
+
+**LR1110 RX fix — this is the one that reaches shipped hardware.**
+`CustomLR1110::startReceive()` was passing `RADIOLIB_LR11X0_IRQ_PREAMBLE_DETECTED`
+(`0x01 << 4` = 16) as the **RX timeout** argument instead of
+`RADIOLIB_LR11X0_RX_TIMEOUT_INF` (`0xFFFFFF`, RX continuous). At the LR11x0's
+1/32768 s tick, that is a ~0.49 ms receive window rather than continuous receive.
+Fork LR1110 variants: `thinknode_m7`, `thinknode_m3`, `thinknode_m9`,
+`wio_wm1110`, `t1000-e`, `minewsemi_me25ls01` — including the ThinkNode M7
+observer envs added in `37444be7`. Confirmed the fix compiles into a shipped
+artifact: `ThinkNode_M7_repeater_observer_mqtt` flash 1554917 → 1554921 (+4 B).
+Constants and arithmetic verified; the practical RX improvement is **inferred,
+not measured** — worth a before/after on M7 hardware.
+
+**All nRF52 boards silently switched to CC310 hardware Ed25519.** Upstream
+`783b21bb` moved `USE_CC310_HW_CRYPTO=1` from 4 individual variants into
+`nrf52_base`. Pre-merge no fork nRF52 build had it (the fork's copies of those 4
+variants already lacked the flag); post-merge all 35 nRF52 variants do.
+`Identity::verify()` now runs on CryptoCell. Upstream's rationale is sound — the
+software path needs ~3 KB of stack and can overflow the Adafruit core's 4 KB loop
+task from the advert receive path, versus ~600–700 B for hardware. Note it uses a
+**`static CRYS_ECEDW_TempBuff_t` workspace**, i.e. shared mutable state that
+assumes `verify()` is never called concurrently. Disable per-board with
+`-U USE_CC310_HW_CRYPTO` if a board proves quirky.
+
+### Verification
+
+- ESP32: both smoke builds plus `ThinkNode_M7_repeater_observer_mqtt` (LR1110)
+  and `Heltec_v3_room_server_observer_mqtt`. All green, sizes unmoved.
+- Native: 267/267.
+- nRF52: **not buildable at merge time.** Every nRF52/RP2040 target had been
+  broken since `7e4f75c9` (2026-04-10) by observer-only dependencies leaking into
+  shared files — confirmed pre-existing by building `RAK_4631_repeater` at the
+  pre-merge commit. Fixed immediately after in `45379ad7`, after which RAK4631
+  (both roles), Heltec T114, T1000-E, Wio WM1110, Xiao nRF52 and ThinkNode M1 all
+  build. The incoming CC310 path therefore compiles, though it is still untested
+  on nRF52 hardware.
+- RP2040 remains broken for an unrelated reason: `PicoWBoard`, `WaveshareBoard`,
+  `XiaoRP2040Board` and `RAK11310Board` still declare the pre-`force_ap`
+  `startOTAUpdate` signature and no longer override the base.
+
+### Recommendation
+
+Add an LR1110 target (`ThinkNode_M7_repeater_observer_mqtt`) and one nRF52
+target to the PR-CI smoke set. The current ESP32-only pair cannot see radio or
+platform-crypto changes, and it did not notice that nRF52 had been unbuildable
+for nearly four months.
 
 ## Upstream Merge Record — 2026-07-19 (`observer-firmware-dev`)
 
