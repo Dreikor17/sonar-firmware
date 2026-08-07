@@ -170,7 +170,7 @@ static const MQTTPresetDef MQTT_PRESETS[MQTT_PRESET_COUNT] = {
     { "mesh-chaun14",  "mqtt://mqtt.mesh.chaun14.fr:1884",        nullptr,                           nullptr,       MQTT_AUTH_USERPASS,  MQTT_TOPIC_MESHCORE,  0,       true,   60,      MQTT_USERPASS_USERNAME_PUBKEY, nullptr },
     // LetsMesh-compatible JWT; TLS is Let's Encrypt (ISRG Root X1), not GTS.
     { "wcmesh",        "wss://mqtt.wcmesh.com:443",               "mqtt.wcmesh.com",                 ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
-    { "atvirastinklas","wss://mqtt-mc.atvirastinklas.lt:443",      "mqtt-mc.atvirastinklas.lt",       ISRG_ROOT_X1,  MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
+    { "atvirastinklas","wss://mqtt-mc.atvirastinklas.lt:443",      "mqtt-mc.atvirastinklas.lt",       GTS_ROOT_R4,   MQTT_AUTH_JWT,      MQTT_TOPIC_MESHCORE,  0,       true,   55,      nullptr,     nullptr     },
 };
 
 // Find a preset by name, returns nullptr if not found
