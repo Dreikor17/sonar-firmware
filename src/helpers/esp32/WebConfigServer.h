@@ -98,6 +98,11 @@ private:
   // than freeing memory still referenced by the async task.
   static const uint32_t STOP_WARN_MS = WebConfigBatch::kStopWarnMs;
   enum BatchState : uint8_t { BATCH_IDLE = 0, BATCH_PENDING, BATCH_DONE };
+  // What filled the shared slot. A config save comes from allowlisted form
+  // fields; a CLI sequence is arbitrary commands typed into the terminal. They
+  // share the slot (see WebConfigBatch.h) but differ in how results are read
+  // and in whether `key` means anything, so every reader checks the kind.
+  enum BatchKind : uint8_t { BATCH_CONFIG = 0, BATCH_CLI };
 
   // BatchState and WebConfigBatch::State are deliberately kept as separate
   // types (the enum is stored in a volatile member and used in prints); this
@@ -110,9 +115,9 @@ private:
     }
   }
   struct BatchEntry {
-    char key[24];     // allowlisted config key (echoed back to the UI)
+    char key[24];     // allowlisted config key (echoed back to the UI); empty for CLI entries
     char cmd[160];    // full CLI command (may contain secrets - never echoed)
-    char reply[160];
+    char reply[160];  // CLI reply budget, same 160 bytes the serial console gets
   };
 
   NodePrefs* _prefs;
@@ -141,6 +146,7 @@ private:
 
   // Command batch: filled by async_tcp under _mux, drained by tick().
   volatile BatchState _batch_state = BATCH_IDLE;
+  volatile BatchKind _batch_kind = BATCH_CONFIG;
   uint8_t _batch_count = 0;
   uint8_t _batch_next = 0;        // drain progress (one command per tick)
   uint32_t _batch_last_cmd = 0;
@@ -199,6 +205,8 @@ private:
   void handleConfigGet(AsyncWebServerRequest* req);
   void handleConfigPost(AsyncWebServerRequest* req);
   void handleConfigResult(AsyncWebServerRequest* req);
+  void handleCliPost(AsyncWebServerRequest* req);
+  void handleCliResult(AsyncWebServerRequest* req);
   void handleStats(AsyncWebServerRequest* req);
   void handleScan(AsyncWebServerRequest* req);
   void handlePresets(AsyncWebServerRequest* req);

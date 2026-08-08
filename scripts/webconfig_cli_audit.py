@@ -82,6 +82,9 @@ class Client:
         self.base = base
         r = self._open("/api/login", b'{"password":"password"}')
         self.cookie = r.headers["Set-Cookie"].split(";")[0]
+        # The node caps a sequence at MAX_BATCH and reports it; chunk to match
+        # rather than hardcoding a number that drifts when the slot is resized.
+        self.max_cmds = json.load(self._open("/api/status")).get("max_cmds", 24)
 
     def _open(self, path, data=None):
         headers = {"Content-Type": "application/json"}
@@ -91,10 +94,16 @@ class Client:
             self.base + path, data=data, headers=headers,
             method="POST" if data is not None else "GET"))
 
-    def run(self, cmds, chunk=40):
+    def run(self, cmds):
+        """[(command, result)]. The node never echoes the command back — it may
+        carry a secret — so results pair with what was sent, by index."""
         out = []
-        for i in range(0, len(cmds), chunk):
-            out += self._sequence(cmds[i:i + chunk])
+        for i in range(0, len(cmds), self.max_cmds):
+            chunk = cmds[i:i + self.max_cmds]
+            results = self._sequence(chunk)
+            if len(results) != len(chunk):
+                sys.exit("node returned %d results for %d commands" % (len(results), len(chunk)))
+            out += list(zip(chunk, results))
         return out
 
     def _sequence(self, cmds):
@@ -108,10 +117,14 @@ class Client:
                 if e.code != 409:
                     raise
                 time.sleep(0.5)
+        # Results stream and page, so keep reading from a cursor until the node
+        # says done — "done" arrives only once every result has been handed over.
+        out = []
         while True:
-            r = json.load(self._open("/api/cli/result?reqid=" + reqid))
+            r = json.load(self._open("/api/cli/result?reqid=%s&from=%d" % (reqid, len(out))))
+            out += r.get("results", [])
             if r["state"] == "done":
-                return r["results"]
+                return out
             time.sleep(0.05)
 
 
@@ -126,15 +139,16 @@ def main():
 
     cmds = table()
     unexpected = []
-    for res in cli.run(cmds):
+    for cmd, res in cli.run(cmds):
         if res["ok"]:
             continue
-        want = EXPECTED_FAILURES.get(res["cmd"])
+        want = EXPECTED_FAILURES.get(cmd)
         if want and want in res["reply"]:
             continue
-        unexpected.append((res["cmd"], res["reply"]))
+        unexpected.append((cmd, res["reply"]))
     print("commands offered by autocomplete : %d" % len(cmds))
     print("answered                         : %d" % (len(cmds) - len(unexpected)))
+    print("sequence cap reported by the node: %d" % cli.max_cmds)
     for cmd, reply in unexpected:
         print("   FAIL  %-30s %s" % (cmd, reply))
     failures += unexpected
@@ -142,7 +156,7 @@ def main():
     results = cli.run([c for probe in ROUND_TRIPS for c in probe[:2]])
     print("\nround-trips                      : %d" % len(ROUND_TRIPS))
     for i, (setc, getc, want) in enumerate(ROUND_TRIPS):
-        setr, getr = results[i * 2], results[i * 2 + 1]
+        setr, getr = results[i * 2][1], results[i * 2 + 1][1]
         if setr["ok"] and getr["reply"] == want:
             continue
         print("   FAIL  %-30s got %r, wanted %r (set: %s)"

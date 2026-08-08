@@ -169,6 +169,48 @@ static inline uint32_t confirmRebootAt(uint32_t now) {
 }
 
 // --------------------------------------------------------------------------
+// CLI sequences (/api/cli). The terminal shares this one deferred-command slot
+// with config saves rather than owning a second MAX_BATCH array: both drain on
+// the loop task, both are single-slot, and a duplicate would cost ~8 KB of
+// permanently resident RAM. Sharing also makes a save and a CLI run mutually
+// exclusive, which they must be.
+//
+// Two things differ from a config save:
+//  1. results stream. A save's results appear only when the whole batch is
+//     Done; a CLI read hands back whatever has executed so far, so a pasted
+//     sequence fills the terminal command by command.
+//  2. the reboot is not requested by a `reboot` flag on the request but by the
+//     word `reboot` appearing in the sequence. It is deferred rather than
+//     executed, because Board::reboot() does not return and would take the node
+//     down before the client could read a single result.
+// --------------------------------------------------------------------------
+
+// Results returned by one read. Bounds the JSON document built on the
+// async_tcp task; a longer sequence pages across successive reads.
+static const int kCliResultPage = 8;
+
+static inline int cliPageCount(int from, int produced, int page) {
+  const int pending = produced - from;
+  if (pending <= 0) return 0;
+  return pending > page ? page : pending;
+}
+
+// "done" means the client has been handed every result, not merely that
+// execution finished: the last page may still be unread, and a client that
+// stops polling at "done" would lose it.
+static inline bool cliReadIsFinal(State state, int from, int page_count, int total) {
+  return state == State::Done && from + page_count >= total;
+}
+
+// A trailing `reboot` is withheld when any command in the sequence failed,
+// exactly as a config save's is. The operator asked for the reboot, but
+// rebooting into a half-applied config — over a link they may not get back —
+// is the worse failure, and the result body reports the refusal.
+static inline bool cliRebootAllowed(bool has_reboot, bool all_ok) {
+  return has_reboot && all_ok;
+}
+
+// --------------------------------------------------------------------------
 // Reboot fire (.cpp:262-265) and isRebootPending (.cpp:70-74).
 // --------------------------------------------------------------------------
 static inline bool rebootDue(uint32_t reboot_at, uint32_t now) {

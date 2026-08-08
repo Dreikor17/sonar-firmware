@@ -182,6 +182,7 @@ class State:
             "fw": "v1.7.1-mock", "role": "Repeater", "board": "Heltec V3 (mock)",
             "uptime_s": int(time.time() - self.start),
             "runtime_slots": 6, "max_slots": 6, "active_slots": self.active_slots,
+            "max_cmds": CLI_MAX_CMDS,
         }
 
 
@@ -424,8 +425,14 @@ def is_secret_key(key):
 # the same surface the serial console reaches. Auth is the boundary — exactly
 # as it is for the serial console and for remote admin over the mesh.
 # ---------------------------------------------------------------------------
-CLI_MAX_CMDS = 64                    # per POSTed sequence
+# MAX_BATCH in WebConfigServer.h: the CLI shares the config batch's fixed slot,
+# so this is the real cap, reported to the page as status.max_cmds.
+CLI_MAX_CMDS = 24
+CLI_RESULT_PAGE = 8                  # WebConfigBatch::kCliResultPage
 CLI_CMD_SECS = 0.25                  # simulated per-command execution time
+# Board::reboot() does not return, so the firmware answers `reboot` itself and
+# arms the deferred reboot once results have been read (see wcIsDeferredReboot).
+CLI_DEFERRED_REBOOT = "reboot"
 
 # Commands the device answers but that have no config-key equivalent.
 GETTERS = {
@@ -821,14 +828,14 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(cmds, list) or not cmds:
             return self._json(400, {"error": "no commands"})
         if len(cmds) > CLI_MAX_CMDS:
-            return self._json(413, {"error": "too many commands (max %d)" % CLI_MAX_CMDS})
+            return self._json(413, {"error": "too many commands", "max": CLI_MAX_CMDS})
         cmds = [str(c).replace("\r", "").replace("\n", "").strip() for c in cmds]
         cmds = [c for c in cmds if c]
         if not cmds:
             return self._json(400, {"error": "no commands"})
         for c in cmds:
             if len(c) > BATCH_CMD_SIZE - 1:
-                return self._json(400, {"error": "command too long", "cmd": c[:32]})
+                return self._json(400, {"error": "command too long"})
 
         with ST.lock:
             self._cli_advance(ST.cli)
@@ -838,6 +845,7 @@ class Handler(BaseHTTPRequestHandler):
             if ST.cli.get("state") == "running":
                 return self._json(409, {"error": "busy", "reqid": ST.cli.get("reqid", "")})
             ST.cli = {"state": "running", "reqid": reqid, "cmds": cmds, "results": [],
+                      "all_ok": True, "reboot": CLI_DEFERRED_REBOOT in cmds,
                       "next_at": time.time() + CLI_CMD_SECS}
             return self._json(202, {"state": "running", "reqid": reqid, "total": len(cmds)})
 
@@ -850,8 +858,16 @@ class Handler(BaseHTTPRequestHandler):
         while (job.get("state") == "running" and len(job["results"]) < len(job["cmds"])
                and now >= job["next_at"]):
             cmd = job["cmds"][len(job["results"])]
-            ok, reply = run_cli(ST.cfg, cmd)
-            job["results"].append({"cmd": cmd, "ok": ok, "reply": reply})
+            if cmd == CLI_DEFERRED_REBOOT:
+                ok, reply = True, "OK - reboot queued"
+            else:
+                ok, reply = run_cli(ST.cfg, cmd)
+                if cmd.startswith("password "):
+                    reply = "OK"      # never echo the new password back
+            job["all_ok"] = job.get("all_ok", True) and ok
+            # The command is NOT echoed: it may carry a password or token, and
+            # the client matches results to its own sequence by index.
+            job["results"].append({"ok": ok, "reply": reply})
             job["next_at"] = now + CLI_CMD_SECS
         if job.get("state") == "running" and len(job["results"]) == len(job["cmds"]):
             job["state"] = "done"     # stays readable until the next POST
@@ -874,10 +890,20 @@ class Handler(BaseHTTPRequestHandler):
             if j.get("reqid") != reqid:
                 return self._json(404, {"error": "unknown request"})
             self._cli_advance(j)      # one command per CLI_CMD_SECS
-            return self._json(200, {
-                "state": j["state"], "reqid": reqid, "total": len(j["cmds"]),
-                "from": frm, "results": j["results"][frm:],
-            })
+            # Results stream, capped per read so the device's JSON document
+            # stays small; a longer sequence pages across reads. "done" means
+            # the client has been handed everything, not just that execution
+            # finished — a client that stops polling at "done" must lose nothing.
+            page = j["results"][frm:frm + CLI_RESULT_PAGE]
+            final = j["state"] == "done" and frm + len(page) >= len(j["cmds"])
+            body = {"state": "done" if final else "running", "reqid": reqid,
+                    "total": len(j["cmds"]), "from": frm, "results": page}
+            if final:
+                body["all_ok"] = j["all_ok"]
+                body["reboot"] = j["reboot"] and j["all_ok"]
+                if j["reboot"] and not j["all_ok"]:
+                    body["reboot_withheld"] = True
+            return self._json(200, body)
 
     def _scan(self):
         rescan = "rescan=1" in self.path

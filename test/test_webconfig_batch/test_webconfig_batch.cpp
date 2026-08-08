@@ -191,6 +191,47 @@ TEST(WebConfigBatch, StopWarnsOnceAfterTheDeadlineThenKeepsWaiting) {
 }
 
 // --------------------------------------------------------------------------
+// CLI sequences (/api/cli), which share the deferred-command slot
+// --------------------------------------------------------------------------
+TEST(WebConfigBatch, CliReadPagesResultsAndNeverOverrunsWhatHasDrained) {
+  const int page = Batch::kCliResultPage;
+  // Nothing drained past the cursor yet.
+  EXPECT_EQ(0, Batch::cliPageCount(/*from=*/0, /*produced=*/0, page));
+  EXPECT_EQ(0, Batch::cliPageCount(/*from=*/3, /*produced=*/3, page));
+  // Partial progress: hand back exactly what exists.
+  EXPECT_EQ(3, Batch::cliPageCount(0, 3, page));
+  EXPECT_EQ(2, Batch::cliPageCount(5, 7, page));
+  // More available than fits in one read: cap at the page size.
+  EXPECT_EQ(page, Batch::cliPageCount(0, page + 5, page));
+  // A cursor beyond what has drained (stale or crafted) yields nothing rather
+  // than a negative count that would index backwards through the batch.
+  EXPECT_EQ(0, Batch::cliPageCount(/*from=*/9, /*produced=*/4, page));
+}
+
+TEST(WebConfigBatch, CliReadIsDoneOnlyOnceEveryResultHasBeenHandedOver) {
+  // Still executing: never final, however much has been read.
+  EXPECT_FALSE(Batch::cliReadIsFinal(State::Pending, /*from=*/0, /*page=*/8, /*total=*/8));
+  // Execution finished but the client has only seen the first page. Reporting
+  // "done" here would make a client that stops polling lose the rest.
+  EXPECT_FALSE(Batch::cliReadIsFinal(State::Done, /*from=*/0, /*page=*/8, /*total=*/20));
+  EXPECT_FALSE(Batch::cliReadIsFinal(State::Done, /*from=*/8, /*page=*/8, /*total=*/20));
+  // The read that hands over the last result is the final one.
+  EXPECT_TRUE(Batch::cliReadIsFinal(State::Done, /*from=*/16, /*page=*/4, /*total=*/20));
+  // Re-reading past the end stays final (polls after the last page).
+  EXPECT_TRUE(Batch::cliReadIsFinal(State::Done, /*from=*/20, /*page=*/0, /*total=*/20));
+}
+
+TEST(WebConfigBatch, CliRebootIsWithheldWhenAnyCommandInTheSequenceFailed) {
+  EXPECT_TRUE(Batch::cliRebootAllowed(/*has_reboot=*/true, /*all_ok=*/true));
+  // Same rule a config save follows: do not reboot into a half-applied config
+  // over a link the operator may not get back.
+  EXPECT_FALSE(Batch::cliRebootAllowed(true, false));
+  // No `reboot` in the sequence: nothing to allow either way.
+  EXPECT_FALSE(Batch::cliRebootAllowed(false, true));
+  EXPECT_FALSE(Batch::cliRebootAllowed(false, false));
+}
+
+// --------------------------------------------------------------------------
 // Wrap-around guard shared with the production _reboot_at assignments
 // --------------------------------------------------------------------------
 TEST(WebConfigBatch, ScheduleAtNeverReturnsTheUnscheduledSentinel) {

@@ -626,6 +626,7 @@ function boot(){
     // (active_slots: 2 without PSRAM, 5 with). Fall back to the runtime array
     // size for older firmware that doesn't report it.
     st.mode=s.mode;st.authed=s.auth;st.needsSetup=!!s.needs_setup;st.nslots=s.active_slots||s.runtime_slots||6;
+    if(s.max_cmds>0)CLI_MAX=s.max_cmds;
     $("#h-name").textContent=s.name||"MeshCore";
     $("#h-sub").textContent=s.role+" · "+s.fw+" · "+s.board;
     var b=$("#h-badge");b.classList.remove("hide");
@@ -1428,7 +1429,10 @@ function showReboot(msg,reconnect,title){
    Drives autocomplete only — the node remains the authority on what it accepts.
    A trailing space marks a command that takes an argument, so accepting the
    completion leaves the cursor ready for the value. */
-var CLI_MAX=64;               // commands per submitted sequence
+// Commands per submitted sequence. The node reports its own limit (MAX_BATCH,
+// the fixed slot the CLI shares with config saves) in /api/status; this is only
+// the fallback for firmware that doesn't say.
+var CLI_MAX=24;
 // [command, description]
 var CLI_VERBS=[
   ["ver","Firmware version"],
@@ -1967,13 +1971,17 @@ function cliPoll(reqid,cmds,from,status,errs,idles){
       if(idles<5){setTimeout(function(){cliPoll(reqid,cmds,from,status,errs,idles+1)},400);return}
       cliEnd(status,"The node never received the command.");return;
     }
-    (r.results||[]).forEach(function(x){
-      cliEcho("cmd",x.cmd);
+    (r.results||[]).forEach(function(x,i){
+      // The node never echoes the command back — it may hold a password or a
+      // token, and we already have the sequence we sent. Match by index.
+      cliEcho("cmd",cmds[from+i]||"");
       // `ok` is advisory; the node's own OK/Error convention is authoritative
       var ok=(x.ok!=null)?x.ok:!/^\s*(err|error)\b/i.test(x.reply||"");
       if(x.reply)cliEcho(ok?"rep":"err",x.reply);
     });
     from+=(r.results||[]).length;
+    // "running" also covers "finished, but more results are still to be paged
+    // over", so keep polling until the node says done.
     if(r.state!=="done"){
       if(cmds.length>1)status.textContent="running "+from+"/"+cmds.length+"…";
       setTimeout(function(){cliPoll(reqid,cmds,from,status,0,0)},250);
@@ -1981,7 +1989,7 @@ function cliPoll(reqid,cmds,from,status,errs,idles){
     }
     status.remove();
     cliBusy(false);
-    cliAfter(cmds);
+    cliAfter(cmds,r);
   }).catch(function(e){
     if(e.message==="auth"){cliBusy(false);status.remove();return}
     if(e.status===400||e.status===404){cliEnd(status,"The node no longer has a result for this sequence.");return}
@@ -1991,18 +1999,31 @@ function cliPoll(reqid,cmds,from,status,errs,idles){
 }
 // A CLI `set` writes the same prefs the forms edit, so re-read them or the
 // other tabs keep showing stale values.
-function cliAfter(cmds){
-  var touched=false,restart=null;
+function cliAfter(cmds,r){
+  var touched=false;
   cmds.forEach(function(c){
     if(/^password\s/.test(c))cli.pwd=true;
     if(/^(set|password)\s/.test(c))touched=true;
-    if(/^(reboot|clkreboot)$/.test(c))restart=restart||"reboot";
-    if(/^erase$/.test(c))restart=restart||"erase";
-    if(/^(poweroff|shutdown)$/.test(c))restart="off";
   });
   if(touched)loadConfigSoft();
-  if(restart==="off")showReboot("The node is powering off. Reconnect power to bring it back.",false,"Powering off…");
-  else if(restart)showReboot("The node is restarting. This page will try to reconnect automatically.",true);
+  // A `reboot` in the sequence is not run by the CLI — Board::reboot() never
+  // returns, so the node answers it and schedules the restart for after this
+  // read. It withholds it when any command failed, exactly as a config save
+  // does; say which happened rather than leaving the operator to guess.
+  if(r&&r.reboot_withheld){
+    cliEcho("err","Not rebooting — some commands failed. Fix them and run \"reboot\" again.");
+    return;
+  }
+  if(r&&r.reboot){
+    showReboot("The node is restarting. This page will try to reconnect automatically.",true);
+    return;
+  }
+  // clkreboot / poweroff / erase-and-flash take the node down themselves, so
+  // there is no result to wait for.
+  cmds.forEach(function(c){
+    if(/^(poweroff|shutdown)$/.test(c))showReboot("The node is powering off. Reconnect power to bring it back.",false,"Powering off…");
+    else if(/^clkreboot$/.test(c))showReboot("The node is restarting. This page will try to reconnect automatically.",true);
+  });
 }
 
 /* ---------- CLI: fit ----------
