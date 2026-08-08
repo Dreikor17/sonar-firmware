@@ -34,8 +34,44 @@ static inline bool isSecretKey(const char* key) { return wcIsSecretKey(key); }
 // path once the operator has read the results. The rest (clkreboot, poweroff,
 // ota update) do real work on the way down and cannot be faked, so they run
 // normally and the connection drops — the UI warns before sending them.
+// CommonCLI dispatches on a 6-byte PREFIX (memcmp(command, "reboot", 6)), so
+// `reboot now` and `rebooted` reach Board::reboot() too. Matching exactly here
+// let those through to the CLI, which took the node down mid-drain with no
+// results and no deferral — the precise failure the deferral exists to avoid.
+// Whatever CommonCLI would treat as a reboot, this must intercept.
 static inline bool wcIsDeferredReboot(const char* cmd) {
-  return strcmp(cmd, "reboot") == 0;
+  return strncmp(cmd, "reboot", 6) == 0;
+}
+
+// Commands the CLI reaches but the portal cannot honestly serve. Rejected at
+// POST so nothing in the sequence runs, rather than failing halfway with a
+// reply that does not explain itself. Returns the reason, or NULL if fine.
+static const char* wcCliUnavailable(const char* cmd) {
+  // ESP32Board::startOTAUpdate() does `new AsyncWebServer(80)` with no bind
+  // check and answers "Started" regardless. The portal already holds port 80,
+  // so from here it can only leak the allocation, inhibit sleep, and lie.
+  if (strncmp(cmd, "start ota", 9) == 0) {
+    return "start ota needs port 80, which this portal is using. "
+           "Run it from the serial console, or use `ota update`.";
+  }
+  // `clock sync` sets the clock from the CALLER's timestamp. Web requests carry
+  // none (execCommand passes 0), so CommonCLI always rejects it as moving the
+  // clock backwards. `time <epoch>` is the one that works over this transport.
+  if (strncmp(cmd, "clock sync", 10) == 0) {
+    return "clock sync takes its time from the caller, which a web request has "
+           "no way to supply. Use `time <epoch-seconds>` instead.";
+  }
+  // Both write their real output to Serial and hand back a stub the terminal
+  // would render as success. Bare `log` also streams a whole file from the loop
+  // task, stalling the mesh and the radio while it does.
+  if (strcmp(cmd, "log") == 0) {
+    return "log writes the packet log to the serial console, not here, and "
+           "blocks the radio while it does. Use `log start` / `log stop`.";
+  }
+  if (strcmp(cmd, "get acl") == 0) {
+    return "get acl writes to the serial console, not here.";
+  }
+  return NULL;
 }
 // The `password` command echoes the new password back in its reply, and replies
 // are served to the client over the open setup AP. The config path overwrites it
@@ -43,16 +79,9 @@ static inline bool wcIsDeferredReboot(const char* cmd) {
 static inline bool wcCliEchoesSecret(const char* cmd) {
   return strncmp(cmd, "password ", 9) == 0;
 }
-// Success has no single shape across the CLI: setters answer "OK...", getters
-// answer "> value", and a few answer free-form ("File system erase: OK"). Only
-// FAILURE is uniform — an "Err"/"ERR:"/"Error:" prefix. So the CLI must test for
-// the failure prefix, where the config batch can test for "OK" because every
-// allowlisted setter uses it. Testing for "OK" here marked every `get` a
-// failure, which turned the terminal red and withheld requested reboots.
-static inline bool wcCliReplyIsOk(const char* r) {
-  return !((r[0] == 'E' || r[0] == 'e') && (r[1] == 'R' || r[1] == 'r') &&
-           (r[2] == 'R' || r[2] == 'r'));
-}
+// Reply classification lives in WebConfigBatch.h with the rest of the decisions
+// (WebConfigBatch::cliReplyIsFailure / cliReplyGatesReboot / cliWriteSucceeded),
+// so the shapes CommonCLI actually emits are enumerated in one host-tested place.
 
 // Constant-time-ish comparison so login timing doesn't leak a prefix match.
 static bool fixedTimeEquals(const char* a, const char* b, size_t max_len) {
@@ -359,11 +388,14 @@ void WebConfigServer::drainBatch(uint32_t now) {
       // Overwrite it: the command cannot fail, so there is nothing to report.
       // Config entries carry the key; a CLI entry is matched on the command.
       if (wcIsAdminPasswordKey(e.key) || wcCliEchoesSecret(e.cmd)) strcpy(e.reply, "OK");
-      // A config batch is all allowlisted setters, which uniformly answer "OK";
-      // the CLI reaches the whole surface, where only failure has a fixed shape.
-      _batch_all_ok = WebConfigBatch::nextAllOk(
-          _batch_all_ok, _batch_kind == BATCH_CLI ? wcCliReplyIsOk(e.reply)
-                                                  : strncmp(e.reply, "OK", 2) == 0);
+      // What gates the reboot is narrower than "did anything fail": only a
+      // write can leave the node in a config not worth rebooting into, and only
+      // a write has a reply convention ("OK") solid enough to test. Diagnostics
+      // in the sequence neither gate it nor get guessed at.
+      if (_batch_kind != BATCH_CLI || WebConfigBatch::cliReplyGatesReboot(e.cmd)) {
+        _batch_all_ok = WebConfigBatch::nextAllOk(
+            _batch_all_ok, WebConfigBatch::cliWriteSucceeded(e.reply));
+      }
     }
     _batch_last_cmd = millis();
     // Config entries are named by their (non-secret) key. A CLI command is
@@ -1040,6 +1072,17 @@ void WebConfigServer::handleCliPost(AsyncWebServerRequest* req) {
     while (pos > 0 && (e.cmd[pos - 1] == ' ' || e.cmd[pos - 1] == '\t')) pos--;
     e.cmd[pos] = 0;
     if (pos == 0) continue;
+    // Reject before anything runs, so a sequence never half-applies and then
+    // stops on a command that was never going to work here.
+    const char* why = wcCliUnavailable(e.cmd);
+    if (why) {
+      StaticJsonDocument<256> ed;
+      ed["error"] = why;
+      String out;
+      serializeJson(ed, out);
+      req->send(400, "application/json", out);
+      return;
+    }
     e.key[0] = 0;                       // CLI entries have no config key
     if (wcIsDeferredReboot(e.cmd)) defer_reboot = true;
     count++;
@@ -1125,7 +1168,7 @@ void WebConfigServer::handleCliResult(AsyncWebServerRequest* req) {
     JsonObject r = results.createNestedObject();
     // The command is deliberately NOT echoed: it may hold a password or token,
     // and the client already has the sequence it sent. It matches by index.
-    r["ok"] = wcCliReplyIsOk(_batch[i].reply);
+    r["ok"] = !WebConfigBatch::cliReplyIsFailure(_batch[i].reply);
     r["reply"] = (const char*)_batch[i].reply;
   }
   if (final_read) {

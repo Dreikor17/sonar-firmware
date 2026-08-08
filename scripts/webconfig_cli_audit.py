@@ -73,9 +73,15 @@ COMMAND_SOURCES = [
     "examples/simple_repeater/MyMesh.cpp",
 ]
 
-# Firmware commands the table deliberately does not offer.
+# Firmware commands the table deliberately does not offer. Everything below
+# except tls.bundletest is also rejected by /api/cli (wcCliUnavailable), so the
+# portal never pretends to run something it cannot.
 NOT_OFFERED = {
-    "tls.bundletest",   # TLS debugging, not an operator command
+    "tls.bundletest",  # TLS debugging, not an operator command
+    "start ota",       # binds port 80, which the portal is already using
+    "clock sync",      # takes its time from the caller; a web request has none
+    "log",             # streams to Serial and stalls the radio ("log start" is offered)
+    "get acl",         # streams to Serial, returns nothing
 }
 
 
@@ -201,6 +207,22 @@ def main():
         print("   FAIL  %-30s got %r, wanted %r (set: %s)"
               % (getc, got, want, setr["reply"]))
         failures.append((getc, got))
+
+    # Commands the portal refuses must be refused clearly, not run and fudged.
+    print("\nrefused with a reason              : ", end="")
+    refused = []
+    for cmd in sorted(NOT_OFFERED - {"tls.bundletest"}):
+        try:
+            cli._sequence([cmd])
+            refused.append((cmd, "was accepted, expected a 400"))
+        except urllib.error.HTTPError as e:
+            body = json.load(e) if e.code == 400 else {}
+            if e.code != 400 or not body.get("error"):
+                refused.append((cmd, "HTTP %d, expected 400 with a reason" % e.code))
+    print("%d/%d" % (len(NOT_OFFERED) - 1 - len(refused), len(NOT_OFFERED) - 1))
+    for cmd, why in refused:
+        print("   FAIL  %-30s %s" % (cmd, why))
+    failures += refused
 
     print("\n%s" % ("FAILED: %d" % len(failures) if failures else "all clear"))
     return 1 if failures else 0

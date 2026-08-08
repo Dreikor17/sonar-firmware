@@ -333,7 +333,8 @@ def apply_set(cfg, key, val):
     # Strict fallthrough: this function is the single authority on what can be
     # set, for the batch and the CLI alike. Accepting unknown keys here once hid
     # the fact that the CLI could not reach `dutycycle` or `radio.fem.rxgain`.
-    return False, "Error: unknown config key '%s'" % key
+    # Verbatim shape from CommonCLI::handleSetCmd's fallthrough.
+    return False, "unknown config: %s" % key
 
 
 # Payload-type names accepted alongside the decimal form. Mirrors
@@ -432,7 +433,38 @@ CLI_RESULT_PAGE = 8                  # WebConfigBatch::kCliResultPage
 CLI_CMD_SECS = 0.25                  # simulated per-command execution time
 # Board::reboot() does not return, so the firmware answers `reboot` itself and
 # arms the deferred reboot once results have been read (see wcIsDeferredReboot).
-CLI_DEFERRED_REBOOT = "reboot"
+CLI_DEFERRED_REBOOT = "reboot"       # matched as a PREFIX, like CommonCLI does
+
+# Commands the CLI reaches but the portal cannot honestly serve; rejected at
+# POST. Mirrors wcCliUnavailable() in WebConfigServer.cpp.
+CLI_UNAVAILABLE = [
+    ("start ota", True, "start ota needs port 80, which this portal is using. "
+                        "Run it from the serial console, or use `ota update`."),
+    ("clock sync", True, "clock sync takes its time from the caller, which a web request "
+                         "has no way to supply. Use `time <epoch-seconds>` instead."),
+    ("log", False, "log writes the packet log to the serial console, not here, and "
+                   "blocks the radio while it does. Use `log start` / `log stop`."),
+    ("get acl", False, "get acl writes to the serial console, not here."),
+]
+
+
+def cli_unavailable(cmd):
+    for token, is_prefix, why in CLI_UNAVAILABLE:
+        if cmd.startswith(token) if is_prefix else cmd == token:
+            return why
+    return None
+
+
+# Failure replies CommonCLI emits that do NOT start with "Err" — the shapes that
+# made a naive prefix test call them success. Mirrors
+# WebConfigBatch::cliReplyIsFailure.
+def cli_reply_is_failure(reply):
+    if not reply:
+        return False
+    if reply.startswith(("Err", "ERR", "err", "(ERR", "Unknown command",
+                         "unknown config", "??", "Can't find")):
+        return True
+    return ": Err" in reply
 
 # Commands the device answers but that have no config-key equivalent.
 GETTERS = {
@@ -497,7 +529,7 @@ def _cli_get_value(cfg, key):
         return True, SENTINEL if cli_read_key(cfg, key) else "(not set)"
     val = cli_read_key(cfg, key)
     if val is None:
-        return False, "Error: unknown config key '%s'" % key
+        return False, "??: %s" % key      # CommonCLI::handleGetCmd fallthrough
     return True, str(val)
 
 
@@ -542,7 +574,7 @@ def run_cli(cfg, line):
     if cmd in ("poweroff", "shutdown"):
         return True, "OK - powering off"
     if cmd == "erase":
-        return True, "OK - filesystem erased, rebooting"
+        return True, "File system erase: OK"
     if cmd == "memory":
         return True, ("heap free: 142000\nheap min: 118000\n"
                       "largest block: 96000\npsram free: 3980000")
@@ -559,8 +591,10 @@ def run_cli(cfg, line):
         if len(parts) != 2 or not _hex64(parts[0]):
             return False, "Err - bad params"
         return True, "OK"
-    if cmd == "clock sync":
-        return True, "OK - clock set: %s UTC" % time.strftime("%H:%M - %d/%m/%Y", time.gmtime())
+    if cmd.startswith("clock sync"):
+        # Rejected at POST, but modelled anyway: over the web the caller's
+        # timestamp is 0, so CommonCLI always takes this branch.
+        return False, "(ERR: clock cannot go backwards)"
     if cmd == "region":
         return True, "US915"
     if cmd == "sensor list":
@@ -628,7 +662,7 @@ def run_cli(cfg, line):
         # key is *readable* rejected write-only and computed ones (`dutycycle`,
         # `prv.key`, `radio.fem.rxgain`).
         return apply_set(cfg, key, val.strip())
-    return False, "Error: unknown command '%s'" % cmd[:40]
+    return False, "Unknown command"
 
 
 def valid_reqid(reqid):
@@ -859,6 +893,9 @@ class Handler(BaseHTTPRequestHandler):
         for c in cmds:
             if len(c) > BATCH_CMD_SIZE - 1:
                 return self._json(400, {"error": "command too long"})
+            why = cli_unavailable(c)
+            if why:
+                return self._json(400, {"error": why})
 
         with ST.lock:
             self._cli_advance(ST.cli)
@@ -868,7 +905,8 @@ class Handler(BaseHTTPRequestHandler):
             if ST.cli.get("state") == "running":
                 return self._json(409, {"error": "busy", "reqid": ST.cli.get("reqid", "")})
             ST.cli = {"state": "running", "reqid": reqid, "cmds": cmds, "results": [],
-                      "all_ok": True, "reboot": CLI_DEFERRED_REBOOT in cmds,
+                      "all_ok": True,
+                      "reboot": any(c.startswith(CLI_DEFERRED_REBOOT) for c in cmds),
                       "next_at": time.time() + CLI_CMD_SECS}
             return self._json(202, {"state": "running", "reqid": reqid, "total": len(cmds)})
 
@@ -881,13 +919,17 @@ class Handler(BaseHTTPRequestHandler):
         while (job.get("state") == "running" and len(job["results"]) < len(job["cmds"])
                and now >= job["next_at"]):
             cmd = job["cmds"][len(job["results"])]
-            if cmd == CLI_DEFERRED_REBOOT:
-                ok, reply = True, "OK - reboot queued"
+            if cmd.startswith(CLI_DEFERRED_REBOOT):
+                reply = "OK - reboot queued"
             else:
-                ok, reply = run_cli(ST.cfg, cmd)
+                _, reply = run_cli(ST.cfg, cmd)
                 if cmd.startswith("password "):
                     reply = "OK"      # never echo the new password back
-            job["all_ok"] = job.get("all_ok", True) and ok
+            ok = not cli_reply_is_failure(reply)
+            # Only writes gate the reboot, and only on the "OK" convention every
+            # setter keeps (WebConfigBatch::cliReplyGatesReboot).
+            if cmd.startswith(("set ", "password ")):
+                job["all_ok"] = job.get("all_ok", True) and reply.startswith("OK")
             # The command is NOT echoed: it may carry a password or token, and
             # the client matches results to its own sequence by index.
             job["results"].append({"ok": ok, "reply": reply})
