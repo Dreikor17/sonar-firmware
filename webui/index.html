@@ -629,6 +629,7 @@ function boot(){
     // size for older firmware that doesn't report it.
     st.mode=s.mode;st.authed=s.auth;st.needsSetup=!!s.needs_setup;st.nslots=s.active_slots||s.runtime_slots||6;
     if(s.max_cmds>0)CLI_MAX=s.max_cmds;
+    st.fw=s.fw||"";st.role=s.role||"";st.board=s.board||"";
     $("#h-name").textContent=s.name||"MeshCore";
     $("#h-sub").textContent=s.role+" · "+s.fw+" · "+s.board;
     var b=$("#h-badge");b.classList.remove("hide");
@@ -1636,8 +1637,23 @@ function cliEcho(cls,text){
 }
 function cliGap(){var d=cliEcho("gap","");return d}
 function cliClear(){$("#term-out").innerHTML="";cliBanner();$("#term-in").focus()}
+// build.sh composes FIRMWARE_VERSION as base[.build][-observer][-channel]-hash,
+// e.g. v1.16.0.5-observer-beta-dev-a1b2c3d. A plain `pio run` never goes through
+// build.sh, so it keeps the header default (v1.16.0) with no build number, no
+// hash, and — deliberately — no OTA_MANIFEST_BASE, so such a node cannot update
+// itself. Worth saying out loud: the version alone does not make that obvious.
+function cliChannel(fw){
+  if(/-dev(-|$)/.test(fw))return"dev channel";        // OTA_CHANNEL_TAG=beta-dev
+  if(/-beta(-|$)/.test(fw))return"beta channel";
+  if(/^v?\d+\.\d+\.\d+$/.test(fw))return"local build — not from CI, OTA not configured";
+  return"release channel";
+}
 function cliBanner(){
-  cliEcho("sys","MeshCore · "+($("#h-sub").textContent||""));
+  // Full string, unabbreviated: the 4th component is the published build number
+  // and the trailing token is the commit, which is what identifies a build.
+  var ch=cliChannel(st.fw||"");
+  cliEcho("sys","MeshCore "+(st.fw||"unknown version")+(ch?"  ("+ch+")":""));
+  cliEcho("sys",(st.role||"")+" · "+(st.board||""));
   if(st.mode==="setup"){
     // The wizard refuses to finish without an admin password; nothing stops a
     // console-driven setup from rebooting on the factory one, so say so here

@@ -48,6 +48,11 @@ sys.path.insert(0, HERE)
 from webconfig_minify import strip_source  # noqa: E402
 
 MINIFY = False
+# Overridable with --fw-version to exercise the console's channel labelling:
+#   v1.16.0.5-observer-a1b2c3d            release
+#   v1.16.0.5-observer-beta-dev-a1b2c3d   dev
+#   v1.16.0                               local build, no OTA
+FW_VERSION = "v1.16.0.5-observer-a1b2c3d"
 
 SENTINEL = "********"
 ADMIN_PASSWORD = "password"          # matches the default ADMIN_PASSWORD build flag
@@ -179,7 +184,10 @@ class State:
             "auth": authed,
             "needs_setup": self.cfg["wifi"]["ssid"] == "",
             "name": self.cfg["radio"]["name"], "node_id": "a1b2c3d4e5f60718",
-            "fw": "v1.7.1-mock", "role": "Repeater", "board": "Heltec V3 (mock)",
+            # Shaped like build.sh's EMBEDDED_VERSION_STRING
+            # (base[.build][-observer][-channel]-hash) so the console's channel
+            # labelling is exercised against a real version, not "v1.x-mock".
+            "fw": FW_VERSION, "role": "Repeater", "board": "Heltec V3 (mock)",
             "uptime_s": int(time.time() - self.start),
             "runtime_slots": 6, "max_slots": 6, "active_slots": self.active_slots,
             "max_cmds": CLI_MAX_CMDS,
@@ -560,7 +568,9 @@ def run_cli(cfg, line):
     if cmd == "":
         return True, ""
     if cmd == "ver":
-        return True, "v1.7.1-mock (observer)"
+        # Same source as /api/status's fw on the device: both are
+        # FIRMWARE_VERSION, so they must not disagree here either.
+        return True, "%s (Build: 6 Jun 2026)" % FW_VERSION
     if cmd == "board":
         return True, "Heltec V3 (mock)"
     if cmd == "clock":
@@ -1005,15 +1015,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global ST, PORT, MINIFY
+    global ST, PORT, MINIFY, FW_VERSION
     ap = argparse.ArgumentParser(description="Mock WebConfig portal backend")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--setup", action="store_true", help="first-boot setup wizard mode")
     ap.add_argument("--active-slots", type=int, default=5, help="server slots to expose (2 or 5)")
+    ap.add_argument("--fw-version", default=FW_VERSION,
+                    help="version string to report, shaped like build.sh's embedded one")
     ap.add_argument("--minify", action="store_true",
                     help="serve the comment-stripped page the device ships, not the source")
     args = ap.parse_args()
     ST, PORT, MINIFY = State(args), args.port, args.minify
+    FW_VERSION = args.fw_version
 
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     mode = "SETUP (wizard)" if args.setup else "LAN (login: %s)" % ADMIN_PASSWORD
