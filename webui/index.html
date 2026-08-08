@@ -1926,8 +1926,10 @@ function cliConfirm(cmds){
   // rebooting is what commits the node to normal operation.
   if(st.mode==="setup"&&!cli.pwd&&cmds.some(function(c){return /^(reboot|clkreboot)$/.test(c)})){
     var p=document.createElement("div");p.className="w";
-    p.textContent="⚠ No password command has run here. Set the admin password before rebooting, "+
-      "or the node keeps the factory one.";
+    // The node enforces this too (handleCliPost) — this is the earlier, kinder
+    // half of the same rule, so the operator finds out before sending.
+    p.textContent="⚠ Set the admin password first: run \"password <new-password>\". "+
+      "The node will refuse to finish setup on the factory one.";
     box.appendChild(p);
   }
   var btns=document.createElement("div");btns.className="btns";

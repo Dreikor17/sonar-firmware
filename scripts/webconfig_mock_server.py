@@ -156,6 +156,7 @@ class State:
         self.session = None            # cookie token when logged in (LAN mode)
         self.batch = {"state": "idle"}
         self.cli = {"state": "idle"}   # deferred CLI sequence, see /api/cli
+        self.admin_pwd_set = False     # satisfies the initial-setup invariant
         self.scan_started = None
 
     # ---- auth -------------------------------------------------------------
@@ -467,6 +468,17 @@ def cli_unavailable(cmd):
 # Failure replies CommonCLI emits that do NOT start with "Err" — the shapes that
 # made a naive prefix test call them success. Mirrors
 # WebConfigBatch::cliReplyIsFailure.
+def cli_reads_secret(cmd):
+    """Commands that READ a secret. CommonCLI gates these on the caller being
+    the serial console; the portal is not, so the value is masked here the way
+    CommonCLI masks it for remote callers. Mirrors wcCliReadsSecret()."""
+    if not cmd.startswith("get "):
+        return False
+    key = cmd[4:].strip()
+    return key in ("prv.key", "guest.password", "alert.psk", "bridge.secret") \
+        or is_secret_key(key)
+
+
 def cli_reply_is_failure(reply):
     if not reply:
         return False
@@ -907,6 +919,15 @@ class Handler(BaseHTTPRequestHandler):
             why = cli_unavailable(c)
             if why:
                 return self._json(400, {"error": why})
+        # Same invariant handleConfigPost enforces (see wcCliUnavailable's
+        # neighbour in WebConfigServer.cpp): first onboarding is committed by the
+        # reboot, and must not commit the factory password onto someone's LAN.
+        if (ST.setup_mode and ST.initial_setup and not ST.admin_pwd_set
+                and not any(c.startswith("password ") for c in cmds)
+                and (any(c.startswith(CLI_DEFERRED_REBOOT) for c in cmds)
+                     or any(c.startswith("set wifi.ssid ") for c in cmds))):
+            return self._json(400, {"error": "admin password required for initial setup — "
+                                             "run `password <new-password>` first"})
 
         with ST.lock:
             self._cli_advance(ST.cli)
@@ -936,6 +957,11 @@ class Handler(BaseHTTPRequestHandler):
                 _, reply = run_cli(ST.cfg, cmd)
                 if cmd.startswith("password "):
                     reply = "OK"      # never echo the new password back
+                    ST.admin_pwd_set = True
+                elif cli_reads_secret(cmd):
+                    val = reply[2:] if reply.startswith("> ") else reply
+                    reply = ("> (not set)" if val in ("", "(not set)")
+                             else "> ******** (serial only)")
             ok = not cli_reply_is_failure(reply)
             # Only writes gate the reboot, and only on the "OK" convention every
             # setter keeps (WebConfigBatch::cliReplyGatesReboot).

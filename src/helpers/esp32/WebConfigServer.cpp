@@ -79,6 +79,34 @@ static const char* wcCliUnavailable(const char* cmd) {
 static inline bool wcCliEchoesSecret(const char* cmd) {
   return strncmp(cmd, "password ", 9) == 0;
 }
+
+// CommonCLI splits its surface by CALLER, not by command: a serial caller
+// (sender_timestamp 0, physical access) reads secrets in plaintext, while a
+// remote one gets "******** (serial only)". Its own comments say so — "Serial
+// only (WiFi creds grant LAN access); remote sees set/unset".
+//
+// execCommand passes 0, which is what makes `erase`, `stats-*` and `set freq`
+// reachable from the terminal at all. Left alone, that also claims
+// physical-access trust for an HTTP request: `get prv.key` would hand this
+// node's identity to anyone associated with the open setup AP, and `get
+// wifi.pwd` would hand over the operator's network. Reading a secret and
+// writing one are not the same capability — the wizard has always been able to
+// REPLACE these; nothing in the portal could ever READ them, because
+// /api/config masks them (wcIsSecretKey).
+//
+// So the command surface stays whole and only the READ is masked, restoring the
+// distinction CommonCLI intended for a caller who is not at the serial port.
+// Which commands those are lives in WebConfigKeys.h (wcIsSecretReadCommand),
+// beside the rest of the secret classification and host-tested with it.
+
+// Keep the set/unset signal, which is the useful part and what CommonCLI itself
+// reports remotely; only the value goes. A getter answers "> value".
+static void wcMaskSecretReply(char* reply) {
+  const char* val = reply;
+  if (val[0] == '>' && val[1] == ' ') val += 2;
+  const bool unset = (val[0] == 0 || strcmp(val, "(not set)") == 0);
+  strcpy(reply, unset ? "> (not set)" : "> ******** (serial only)");
+}
 // Reply classification lives in WebConfigBatch.h with the rest of the decisions
 // (WebConfigBatch::cliReplyIsFailure / cliReplyGatesReboot / cliWriteSucceeded),
 // so the shapes CommonCLI actually emits are enumerated in one host-tested place.
@@ -388,7 +416,13 @@ void WebConfigServer::drainBatch(uint32_t now) {
       // reply, and replies are served to the client over the open setup AP.
       // Overwrite it: the command cannot fail, so there is nothing to report.
       // Config entries carry the key; a CLI entry is matched on the command.
-      if (wcIsAdminPasswordKey(e.key) || wcCliEchoesSecret(e.cmd)) strcpy(e.reply, "OK");
+      const bool set_admin_pwd = wcIsAdminPasswordKey(e.key) || wcCliEchoesSecret(e.cmd);
+      if (set_admin_pwd) strcpy(e.reply, "OK");
+      // Satisfies the initial-setup invariant for the rest of this session, so
+      // the operator can set the password and configure WiFi in separate steps
+      // (the form batch always sends them together and needs no such memory).
+      if (set_admin_pwd) _admin_pwd_set = true;
+      if (_batch_kind == BATCH_CLI && wcIsSecretReadCommand(e.cmd)) wcMaskSecretReply(e.reply);
       // What gates the reboot is narrower than "did anything fail": only a
       // write can leave the node in a config not worth rebooting into, and only
       // a write has a reply convention ("OK") solid enough to test. Diagnostics
@@ -1047,7 +1081,7 @@ void WebConfigServer::handleCliPost(AsyncWebServerRequest* req) {
   }
 
   int count = 0;
-  bool defer_reboot = false;
+  bool defer_reboot = false, seq_sets_pwd = false, seq_sets_ssid = false;
   for (JsonVariant v : cmds) {
     const char* raw = v.as<const char*>();
     if (!raw) continue;
@@ -1089,10 +1123,25 @@ void WebConfigServer::handleCliPost(AsyncWebServerRequest* req) {
     }
     e.key[0] = 0;                       // CLI entries have no config key
     if (wcIsDeferredReboot(e.cmd)) defer_reboot = true;
+    if (strncmp(e.cmd, "password ", 9) == 0) seq_sets_pwd = true;
+    if (strncmp(e.cmd, "set wifi.ssid ", 14) == 0) seq_sets_ssid = true;
     count++;
   }
   if (count == 0) {
     req->send(400, "application/json", "{\"error\":\"no commands\"}");
+    return;
+  }
+
+  // The same invariant handleConfigPost enforces, and for the same reason: the
+  // reboot is what commits first onboarding, and a node that reboots onto the
+  // LAN still holding the factory password is a known credential on someone
+  // else's network. The terminal warned about this client-side, which is a
+  // reminder, not a rule — a pasted script or a direct POST ignored it.
+  if (_mode == MODE_SETUP && _initial_setup && !seq_sets_pwd && !_admin_pwd_set &&
+      (defer_reboot || seq_sets_ssid)) {
+    req->send(400, "application/json",
+              "{\"error\":\"admin password required for initial setup — "
+              "run `password <new-password>` first\"}");
     return;
   }
 

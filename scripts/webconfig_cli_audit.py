@@ -105,7 +105,10 @@ ROUND_TRIPS = [
     ("set mqtt.neighbors on", "get mqtt.neighbors", "on"),
     ("set path.hash.mode 2", "get path.hash.mode", "2"),
     ("set mqtt.iata den", "get mqtt.iata", "DEN"),
-    ("set guest.password hunter2", "get guest.password", "********"),
+    # Secret reads are masked back down for an HTTP caller, in CommonCLI's own
+    # words for a non-serial one (wcIsSecretReadCommand).
+    ("set guest.password hunter2", "get guest.password", "******** (serial only)"),
+    ("set wifi.pwd hunter2", "get wifi.pwd", "******** (serial only)"),
 ]
 
 

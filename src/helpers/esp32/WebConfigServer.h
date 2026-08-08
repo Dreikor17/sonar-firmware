@@ -136,6 +136,10 @@ private:
   bool _stopping = false;
   bool _was_setup_ap = false;
   bool _initial_setup = false;
+  // A `password` command has succeeded this session. Lets the CLI satisfy the
+  // initial-setup invariant across separate submissions; the form batch always
+  // sends the password with the rest, so it never needed the memory.
+  bool _admin_pwd_set = false;
   char _ap_ssid[33] = {0};
 
   // Currently attached session, also used by the display's setup-info poll.
