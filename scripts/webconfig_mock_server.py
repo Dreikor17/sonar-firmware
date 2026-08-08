@@ -9,6 +9,11 @@ pending -> done result polling, aggregate-success reboot gating, secret masking
 So the browser drives the actual portal JS (wizard, save/poll/reqid, effective
 value handling, reboot overlay, stats, scan) against realistic responses.
 
+/api/cli is the CLI terminal's backend and has no firmware counterpart yet: it
+is the proposed contract (202 + reqid, streamed per-command results) executed
+against a CommonCLI-shaped interpreter, so the terminal UI can be designed
+against realistic single- and multi-line replies before any of it goes on-device.
+
 It does NOT run the C++ handlers (that's what test/ gtest covers) or the
 AsyncTCP transport — it's a frontend + contract harness.
 
@@ -122,6 +127,7 @@ class State:
         self.start = time.time()
         self.session = None            # cookie token when logged in (LAN mode)
         self.batch = {"state": "idle"}
+        self.cli = {"state": "idle"}   # deferred CLI sequence, see /api/cli
         self.scan_started = None
 
     # ---- auth -------------------------------------------------------------
@@ -199,6 +205,15 @@ def apply_set(cfg, key, val):
         global ADMIN_PASSWORD
         ADMIN_PASSWORD = val
         return True, "OK"
+
+    if key in ("freq", "bw", "sf", "cr"):
+        # single-component radio setters, reachable from the CLI but not from
+        # the form batch (which always sends the whole `radio` combo)
+        try:
+            cfg["radio"][key] = int(val) if key in ("sf", "cr") else float(val)
+        except ValueError:
+            return False, "Error: expected a number"
+        return True, "OK - reboot to apply"
 
     if key == "radio":
         try:
@@ -340,6 +355,134 @@ def is_secret_key(key):
     return key == "wifi.pwd" or bool(re.match(r"^mqtt[1-6]\.(password|token)$", key))
 
 
+# ---------------------------------------------------------------------------
+# CLI command execution (backs /api/cli), mirroring CommonCLI enough to give
+# the terminal UI realistic single- and multi-line replies.
+#
+# The portal's `set` batch is allowlisted (WebConfigKeys.h) because it is driven
+# by form fields; the CLI is deliberately NOT, since its whole point is reaching
+# the same surface the serial console reaches. Auth is the boundary — exactly
+# as it is for the serial console and for remote admin over the mesh.
+# ---------------------------------------------------------------------------
+CLI_MAX_CMDS = 64                    # per POSTed sequence
+CLI_CMD_SECS = 0.25                  # simulated per-command execution time
+
+# Commands the device answers but that have no config-key equivalent.
+GETTERS = {
+    "freq": lambda c: "%.3f" % c["radio"]["freq"],
+    "bw": lambda c: "%.2f" % c["radio"]["bw"],
+    "sf": lambda c: str(c["radio"]["sf"]),
+    "cr": lambda c: str(c["radio"]["cr"]),
+    "public.key": lambda c: "a1b2c3d4" * 8,
+    "wifi.status": lambda c: (
+        "SSID: %s\nIP: 192.168.1.42\nRSSI: -58 dBm\nUptime: %dm"
+        % (c["wifi"]["ssid"] or "(not set)", int(time.time() - ST.start) // 60)),
+    "mqtt.status": lambda c: cli_mqtt_status(c),
+    "mqtt.presets": lambda c: "\n".join(
+        "%2d. %s%s" % (i + 1, n, "" if nd == "none" else "  (needs %s)" % nd)
+        for i, (n, nd) in enumerate(PRESETS)),
+}
+
+
+def cli_mqtt_status(cfg):
+    lines = []
+    for i, s in enumerate(cfg["mqtt"]["slots"][:ST.active_slots]):
+        if s["preset"] == "none":
+            lines.append("slot %d: unconfigured" % (i + 1))
+        else:
+            lines.append("slot %d: %-16s connected  tx=%d err=0"
+                         % (i + 1, s["preset"], 100 + int(time.time() - ST.start)))
+    return "\n".join(lines)
+
+
+def cli_get(cfg, key):
+    if key in GETTERS:
+        return True, GETTERS[key](cfg)
+    if is_secret_key(key):
+        # The serial console prints these; the portal is reachable over the LAN,
+        # so it masks them the same way /api/config does.
+        return True, SENTINEL if cli_read_key(cfg, key) else "(not set)"
+    val = cli_read_key(cfg, key)
+    if val is None:
+        return False, "Error: unknown config key '%s'" % key
+    return True, str(val)
+
+
+def cli_read_key(cfg, key):
+    """Current value of a `set` key, or None when the key is unknown."""
+    m = re.match(r"^mqtt([1-6])\.(\w+)$", key)
+    if m:
+        slot = cfg["mqtt"]["slots"][int(m.group(1)) - 1]
+        return slot.get(m.group(2))
+    for table in (BOOL_KEYS, INT_KEYS, FLOAT_KEYS, STR_KEYS, SECRET_STR_KEYS):
+        if key in table:
+            sec, f = table[key]
+            v = cfg[sec][f]
+            return ("on" if v else "off") if key in BOOL_KEYS else v
+    # keys apply_set() special-cases, so they appear in none of the tables above
+    r = cfg["radio"]
+    return {
+        "name": r["name"], "lat": r["lat"], "lon": r["lon"],
+        "radio": "%.3f,%.2f,%d,%d" % (r["freq"], r["bw"], r["sf"], r["cr"]),
+        "bw": r["bw"], "sf": r["sf"], "cr": r["cr"],
+        "mqtt.iata": cfg["mqtt"]["iata"], "mqtt.owner": cfg["mqtt"]["owner"],
+    }.get(key)
+
+
+def run_cli(cfg, line):
+    """Execute one command line. Returns (ok, reply); reply may be multi-line."""
+    cmd = line.strip()
+    if cmd == "":
+        return True, ""
+    if cmd == "ver":
+        return True, "v1.7.1-mock (observer)"
+    if cmd == "board":
+        return True, "Heltec V3 (mock)"
+    if cmd == "clock":
+        return True, time.strftime("%d/%m/%Y %H:%M:%S", time.gmtime()) + " UTC"
+    if cmd == "advert":
+        return True, "OK - Advert sent (zero hop)"
+    if cmd == "advert.zerohop":
+        return True, "OK - Advert sent (zero hop)"
+    if cmd in ("reboot", "clkreboot"):
+        return True, "OK - rebooting"
+    if cmd in ("poweroff", "shutdown"):
+        return True, "OK - powering off"
+    if cmd == "erase":
+        return True, "OK - filesystem erased, rebooting"
+    if cmd == "memory":
+        return True, ("heap free: 142000\nheap min: 118000\n"
+                      "largest block: 96000\npsram free: 3980000")
+    if cmd == "neighbors":
+        return True, ("d4e5f60718  -71 dBm  snr 9.5   2m ago\n"
+                      "1122334455  -94 dBm  snr 2.0  14m ago")
+    if cmd == "clear stats":
+        return True, "OK - stats cleared"
+    if cmd.startswith("stats-"):
+        return True, "recv=512 sent=88 rx_err=3 airtime=41s"
+    if cmd == "log":
+        return True, "packet log: 128 entries, 14 KB"
+    if cmd.startswith("log "):
+        return True, "OK"
+    if cmd.startswith("password "):
+        global ADMIN_PASSWORD
+        ADMIN_PASSWORD = cmd[9:]
+        return True, "OK - password changed"
+    if cmd.startswith("time "):
+        return True, "OK - clock set"
+    if cmd.startswith("get "):
+        return cli_get(cfg, cmd[4:].strip())
+    if cmd.startswith("set "):
+        rest = cmd[4:].strip()
+        key, _, val = rest.partition(" ")
+        if not key:
+            return False, "Error: set what?"
+        if cli_read_key(cfg, key) is None and not re.match(r"^mqtt[1-6]\.", key):
+            return False, "Error: unknown config key '%s'" % key
+        return apply_set(cfg, key, val.strip())
+    return False, "Error: unknown command '%s'" % cmd[:40]
+
+
 def valid_reqid(reqid):
     return isinstance(reqid, str) and bool(re.fullmatch(r"[0-9A-Fa-f]{16}", reqid))
 
@@ -393,6 +536,10 @@ class Handler(BaseHTTPRequestHandler):
             if self._need_auth():
                 return
             return self._config_result()
+        if path == "/api/cli/result":
+            if self._need_auth():
+                return
+            return self._cli_result()
         if path == "/api/stats":
             if self._need_auth():
                 return
@@ -415,6 +562,10 @@ class Handler(BaseHTTPRequestHandler):
             if self._need_auth():
                 return
             return self._config_post()
+        if path == "/api/cli":
+            if self._need_auth():
+                return
+            return self._cli_post()
         if path == "/api/reboot":
             if self._need_auth():
                 return
@@ -524,6 +675,84 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {
                 "state": "done", "reqid": b["reqid"], "all_ok": b["all_ok"],
                 "reboot": b["reboot"] and b["all_ok"], "results": b["results"],
+            })
+
+    # ---- CLI ---------------------------------------------------------------
+    # Same 202 + reqid + poll shape as /api/config, for the same reason: the
+    # commands have to run on the main loop, not the web server's task. The
+    # difference is that results stream -- a pasted sequence fills the terminal
+    # command by command instead of appearing all at once at the end.
+    def _cli_post(self):
+        raw = self._read_body()
+        if len(raw) > 8192:
+            return self._json(413, {"error": "body too large"})
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            return self._json(400, {"error": "bad json"})
+        reqid = body.get("reqid", "")
+        if not valid_reqid(reqid):
+            return self._json(400, {"error": "bad reqid"})
+        cmds = body.get("cmds")
+        if not isinstance(cmds, list) or not cmds:
+            return self._json(400, {"error": "no commands"})
+        if len(cmds) > CLI_MAX_CMDS:
+            return self._json(413, {"error": "too many commands (max %d)" % CLI_MAX_CMDS})
+        cmds = [str(c).replace("\r", "").replace("\n", "").strip() for c in cmds]
+        cmds = [c for c in cmds if c]
+        if not cmds:
+            return self._json(400, {"error": "no commands"})
+        for c in cmds:
+            if len(c) > BATCH_CMD_SIZE - 1:
+                return self._json(400, {"error": "command too long", "cmd": c[:32]})
+
+        with ST.lock:
+            self._cli_advance(ST.cli)
+            if ST.cli.get("state") != "idle" and ST.cli.get("reqid") == reqid:
+                return self._json(202, {"state": ST.cli["state"], "reqid": reqid,
+                                        "total": len(ST.cli["cmds"])})
+            if ST.cli.get("state") == "running":
+                return self._json(409, {"error": "busy", "reqid": ST.cli.get("reqid", "")})
+            ST.cli = {"state": "running", "reqid": reqid, "cmds": cmds, "results": [],
+                      "next_at": time.time() + CLI_CMD_SECS}
+            return self._json(202, {"state": "running", "reqid": reqid, "total": len(cmds)})
+
+    @staticmethod
+    def _cli_advance(job):
+        """Run whichever queued commands are now due. Execution belongs to the
+        node's loop, not to the client's polling — a client that walks away must
+        not leave the executor claimed forever."""
+        now = time.time()
+        while (job.get("state") == "running" and len(job["results"]) < len(job["cmds"])
+               and now >= job["next_at"]):
+            cmd = job["cmds"][len(job["results"])]
+            ok, reply = run_cli(ST.cfg, cmd)
+            job["results"].append({"cmd": cmd, "ok": ok, "reply": reply})
+            job["next_at"] = now + CLI_CMD_SECS
+        if job.get("state") == "running" and len(job["results"]) == len(job["cmds"]):
+            job["state"] = "done"     # stays readable until the next POST
+
+    def _cli_result(self):
+        query = parse_qs(urlsplit(self.path).query)
+        reqid = query.get("reqid", [""])[0]
+        if not valid_reqid(reqid):
+            return self._json(400, {"error": "bad reqid"})
+        # `from` lets the client ask only for results it has not rendered yet,
+        # so a long sequence isn't re-sent on every poll.
+        try:
+            frm = max(0, int(query.get("from", ["0"])[0]))
+        except ValueError:
+            frm = 0
+        with ST.lock:
+            j = ST.cli
+            if j.get("state") == "idle":
+                return self._json(200, {"state": "idle", "reqid": reqid})
+            if j.get("reqid") != reqid:
+                return self._json(404, {"error": "unknown request"})
+            self._cli_advance(j)      # one command per CLI_CMD_SECS
+            return self._json(200, {
+                "state": j["state"], "reqid": reqid, "total": len(j["cmds"]),
+                "from": frm, "results": j["results"][frm:],
             })
 
     def _scan(self):
