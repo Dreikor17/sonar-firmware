@@ -27,6 +27,10 @@ header svg{flex:none}
 .hmeta div{font-size:12px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .badge{margin-left:auto;flex:none;font-size:11px;font-weight:650;padding:3px 9px;border-radius:99px;background:var(--chip);color:var(--mut)}
 .badge.setup{background:#f3e8d3;color:#8a5c00}
+.hicon{flex:none;margin-left:8px;padding:3px 8px;border:1px solid var(--in-line);border-radius:7px;
+  background:var(--in-bg);color:var(--mut);cursor:pointer;line-height:1.3;
+  font:700 12px/1.3 ui-monospace,Menlo,Consolas,monospace}
+.hicon:hover{color:var(--acc);border-color:var(--acc)}
 @media (prefers-color-scheme:dark){.badge.setup{background:#3a2f14;color:#e0b45c}}
 main{max-width:640px;margin:0 auto;padding:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;box-shadow:var(--shadow);margin-bottom:14px}
@@ -143,6 +147,9 @@ body.tab-cli{padding-bottom:0}
 .term-hd button{flex:none;background:none;border:1px solid #2a333f;border-radius:5px;
   color:var(--tdim);font:inherit;padding:1px 8px;cursor:pointer}
 .term-hd button:hover{color:var(--tf);border-color:#3d4a5a}
+/* narrow phone: the buttons crowd the host label off. `help` is also a command
+   (and the banner says so), so it is the one that gives way. */
+@media(max-width:430px){.term-hd .opt{display:none}}
 .term-out{flex:1;overflow-y:auto;overflow-x:hidden;padding:10px;-webkit-overflow-scrolling:touch}
 .term-out>div{white-space:pre-wrap;word-break:break-word}
 .term-out .cmd{color:#fff}
@@ -210,6 +217,12 @@ body.tab-cli{padding-bottom:0}
     <div id="h-sub">connecting&hellip;</div>
   </div>
   <span class="badge hide" id="h-badge"></span>
+  <!-- Setup-mode escape hatch: skip the guided steps and paste a prepared
+       config straight into the console. Deliberately quiet — the wizard is
+       still the path for everyone who isn't looking for this. -->
+  <button class="hicon hide" id="h-console" type="button" onclick="enterConsole()"
+          title="Console — skip setup and paste a prepared config"
+          aria-label="Open console">&gt;_</button>
 </header>
 <main>
 
@@ -496,7 +509,9 @@ body.tab-cli{padding-bottom:0}
       <div class="term" id="term">
         <div class="term-hd">
           <b id="term-host">meshcore</b><span class="sp"></span>
-          <button type="button" onmousedown="event.preventDefault()" onclick="cliHelp()">help</button>
+          <button type="button" class="hide" id="term-setup" onmousedown="event.preventDefault()"
+                  onclick="showWizard()">&larr; setup</button>
+          <button type="button" class="opt" onmousedown="event.preventDefault()" onclick="cliHelp()">help</button>
           <button type="button" onmousedown="event.preventDefault()" onclick="cliClear()">clear</button>
         </div>
         <div class="term-out" id="term-out"></div>
@@ -612,6 +627,9 @@ function boot(){
     $("#h-sub").textContent=s.role+" · "+s.fw+" · "+s.board;
     var b=$("#h-badge");b.classList.remove("hide");
     if(s.mode==="setup"){b.textContent="SETUP";b.classList.add("setup")}else{b.textContent="LAN"}
+    // Only in setup mode: in LAN mode the console is a tab, and the header is
+    // also on screen before login, where no shortcut into it belongs.
+    $("#h-console").classList.toggle("hide",s.mode!=="setup");
     return api("/api/presets").catch(function(){return{presets:[]}});
   }).then(function(p){
     st.presets=p.presets||[];
@@ -623,7 +641,9 @@ function boot(){
   });
 }
 
-function show(v){["#v-login","#v-wizard","#v-app"].forEach(function(id){$(id).classList.add("hide")});$(v).classList.remove("hide");updateSaveBar()}
+function show(v){["#v-login","#v-wizard","#v-app"].forEach(function(id){$(id).classList.add("hide")});$(v).classList.remove("hide");
+  document.body.classList.remove("tab-cli");   // re-armed by the tab click when the CLI is the one shown
+  updateSaveBar()}
 function showLogin(){show("#v-login")}
 
 /* ---------- login ---------- */
@@ -1066,12 +1086,16 @@ function loadConfigSoft(){ // re-sync accepted values without clobbering chips/r
 /* ---------- tabs / app ---------- */
 function enterApp(){
   show("#v-app");
-  // Setup mode authenticates by proximity — there is no admin password yet. The
-  // form batch is allowlisted (WebConfigKeys.h) so that is safe there, but the
-  // CLI is the entire command surface, `erase` and `set prv.key` included, so
-  // it stays behind a real login.
-  $('#tabs button[data-t="cli"]').classList.toggle("hide",st.mode==="setup");
   loadConfig().catch(function(e){if(e.message!=="auth")toast("Failed to load config")});
+}
+// Setup-mode shortcut: straight past the guided steps into the terminal, for
+// operators who already have a config to paste. Setup mode authenticates by
+// proximity to the AP, so this hands the whole command surface to anyone in
+// range — the same trust the wizard already extends, since it can set the admin
+// password and reflash the node's identity too.
+function enterConsole(){
+  enterApp();
+  $('#tabs button[data-t="cli"]').click();
 }
 $("#tabs").addEventListener("click",function(ev){
   var b=ev.target.closest("button");if(!b)return;
@@ -1542,7 +1566,7 @@ var CLI_SLOT=[
 ];
 var CLI_TYPES="req,response,txt_msg,ack,advert,grp_txt,grp_data,anon_req,path,trace,multipart,control,raw_custom".split(",");
 
-var cli={built:0,tbl:[],hist:[],hix:-1,draft:"",sug:[],sel:-1,busy:false,shown:false};
+var cli={built:0,tbl:[],hist:[],hix:-1,draft:"",sug:[],sel:-1,busy:false,shown:false,pwd:false};
 
 // Rebuilt when the slot count changes: `active_slots` decides how many
 // mqttN.* keys actually exist on this board.
@@ -1596,6 +1620,13 @@ function cliGap(){var d=cliEcho("gap","");return d}
 function cliClear(){$("#term-out").innerHTML="";cliBanner();$("#term-in").focus()}
 function cliBanner(){
   cliEcho("sys","MeshCore · "+($("#h-sub").textContent||""));
+  if(st.mode==="setup"){
+    // The wizard refuses to finish without an admin password; nothing stops a
+    // console-driven setup from rebooting on the factory one, so say so here
+    // rather than only warning at the point of reboot.
+    cliEcho("sys","Setup mode — paste a prepared config, then finish with "+
+      "\"password <new>\" and \"reboot\". \"← setup\" returns to the guided steps.");
+  }
   cliEcho("sys","Type help for a summary, or a prefix and Tab to complete.");
 }
 function cliHelp(){
@@ -1855,6 +1886,14 @@ function cliConfirm(cmds){
     r.textContent="⚠ This "+risks.join("; and ")+".";
     box.appendChild(r);
   }
+  // Onboarding by paste skips the wizard's mandatory admin-password step, and
+  // rebooting is what commits the node to normal operation.
+  if(st.mode==="setup"&&!cli.pwd&&cmds.some(function(c){return /^(reboot|clkreboot)$/.test(c)})){
+    var p=document.createElement("div");p.className="w";
+    p.textContent="⚠ No password command has run here. Set the admin password before rebooting, "+
+      "or the node keeps the factory one.";
+    box.appendChild(p);
+  }
   var btns=document.createElement("div");btns.className="btns";
   var go=document.createElement("button");go.className="go";
   go.textContent=one?"Run":("Run "+cmds.length+" commands");
@@ -1949,6 +1988,7 @@ function cliPoll(reqid,cmds,from,status,errs,idles){
 function cliAfter(cmds){
   var touched=false,restart=null;
   cmds.forEach(function(c){
+    if(/^password\s/.test(c))cli.pwd=true;
     if(/^(set|password)\s/.test(c))touched=true;
     if(/^(reboot|clkreboot)$/.test(c))restart=restart||"reboot";
     if(/^erase$/.test(c))restart=restart||"erase";
@@ -1965,7 +2005,7 @@ function cliAfter(cmds){
    actually left, so size the terminal from that while the CLI tab is open. */
 function cliFit(){
   var vv=window.visualViewport,t=$("#term");
-  if(!t||$("#t-cli").classList.contains("hide"))return;
+  if(!t||$("#t-cli").classList.contains("hide")||$("#v-app").classList.contains("hide"))return;
   t.style.height="";                       // back to the stylesheet's height
   if(!vv)return;
   var base=t.offsetHeight;
@@ -1987,6 +2027,7 @@ if(window.visualViewport){
 }
 function enterCli(){
   $("#term-host").textContent="meshcore@"+($("#h-name").textContent||"node");
+  $("#term-setup").classList.toggle("hide",st.mode!=="setup");
   if(!cli.shown){cli.shown=true;cliBanner()}
   window.scrollTo(0,0);   // the terminal is the whole tab; show all of it
   cliFit();
