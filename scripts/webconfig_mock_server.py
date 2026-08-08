@@ -33,6 +33,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +41,13 @@ from urllib.parse import parse_qs, urlsplit
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INDEX_HTML = os.path.join(HERE, "..", "webui", "index.html")
+
+sys.path.insert(0, HERE)
+# The build-time comment stripper, shared so --minify serves byte-for-byte what
+# the generator embeds rather than a second implementation that could drift.
+from webconfig_minify import strip_source  # noqa: E402
+
+MINIFY = False
 
 SENTINEL = "********"
 ADMIN_PASSWORD = "password"          # matches the default ADMIN_PASSWORD build flag
@@ -582,6 +590,12 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self.send_error(500, "webui/index.html not found")
             return
+        if MINIFY:
+            # Serve what the device actually serves. The generator strips
+            # comments and indentation before compressing, so --minify is how
+            # you exercise those bytes in a browser rather than trusting that
+            # stripping a 100 KB page never changes its behaviour.
+            html = strip_source(html.decode("utf-8")).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(html)))
@@ -790,17 +804,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global ST, PORT
+    global ST, PORT, MINIFY
     ap = argparse.ArgumentParser(description="Mock WebConfig portal backend")
     ap.add_argument("--port", type=int, default=8080)
     ap.add_argument("--setup", action="store_true", help="first-boot setup wizard mode")
     ap.add_argument("--active-slots", type=int, default=5, help="server slots to expose (2 or 5)")
+    ap.add_argument("--minify", action="store_true",
+                    help="serve the comment-stripped page the device ships, not the source")
     args = ap.parse_args()
-    ST, PORT = State(args), args.port
+    ST, PORT, MINIFY = State(args), args.port, args.minify
 
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     mode = "SETUP (wizard)" if args.setup else "LAN (login: %s)" % ADMIN_PASSWORD
-    print("WebConfig mock backend — %s" % mode)
+    print("WebConfig mock backend — %s%s" % (mode, "  [minified]" if MINIFY else ""))
     print("  open http://localhost:%d/   (Ctrl-C to stop)" % args.port)
     try:
         srv.serve_forever()

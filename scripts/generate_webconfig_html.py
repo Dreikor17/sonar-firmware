@@ -14,23 +14,38 @@
 # hashes two small files and returns, so running it from esp32_base on every
 # ESP32 build is negligible even for targets that don't compile the portal.
 #
+# Comments and indentation are stripped before compressing (see strip_source).
+# The source page is heavily commented by house style and none of it is worth
+# flash, so the page ships smaller than it reads.
+#
 # Output: src/helpers/esp32/WebConfigHtml.h
 #   WEBCONFIG_HTML_GZ[]   - gzipped page (PROGMEM)
 #   WEBCONFIG_HTML_GZ_LEN - byte length
 #   WEBCONFIG_HTML_ETAG   - quoted strong ETag (sha256 prefix of the gz body)
+#
+# Runnable outside SCons to inspect exactly what gets shipped:
+#   python3 scripts/generate_webconfig_html.py --emit /tmp/shipped.html
+# or served directly by the mock backend with its --minify flag.
 
 import gzip
 import hashlib
 import os
 import sys
 
-Import("env")  # noqa: F821
+try:
+    Import("env")  # noqa: F821
+except NameError:
+    pass           # running standalone (--emit), not as a PIO extra_script
 
 SOURCE = os.path.join("webui", "index.html")
 OUTPUT = os.path.join("src", "helpers", "esp32", "WebConfigHtml.h")
 # __file__ is not defined inside PIO/SCons-executed extra_scripts
 SCRIPT = os.path.join("scripts", "generate_webconfig_html.py")
+MINIFIER = os.path.join("scripts", "webconfig_minify.py")
 HASH_MARKER = "// build-inputs-sha256: "
+
+sys.path.insert(0, os.path.join(os.getcwd(), "scripts"))
+from webconfig_minify import check_stripped, strip_source  # noqa: E402
 
 
 def status(msg):
@@ -38,15 +53,16 @@ def status(msg):
 
 
 def content_hash():
-    # Hash the source page and this generator so any change to either forces a
-    # regenerate, independent of file timestamps.
+    # Hash the source page, this generator and the minifier so any change to
+    # any of them forces a regenerate, independent of file timestamps.
     h = hashlib.sha256()
     with open(SOURCE, "rb") as f:
         h.update(f.read())
-    if os.path.isfile(SCRIPT):
-        h.update(b"\0")
-        with open(SCRIPT, "rb") as f:
-            h.update(f.read())
+    for path in (SCRIPT, MINIFIER):
+        if os.path.isfile(path):
+            h.update(b"\0")
+            with open(path, "rb") as f:
+                h.update(f.read())
     return h.hexdigest()
 
 
@@ -63,17 +79,37 @@ def stored_hash():
     return None
 
 
+def shipped_page():
+    """The exact bytes the device serves: the source page, stripped."""
+    with open(SOURCE, "r", encoding="utf-8") as f:
+        raw = f.read()
+    stripped = strip_source(raw)
+    problem = check_stripped(raw, stripped)
+    if problem:
+        status("ERROR: comment stripping corrupted the page (%s)" % problem)
+        sys.exit(2)
+    return raw, stripped
+
+
 def main():
     if not os.path.isfile(SOURCE):
         status("ERROR: %s not found" % SOURCE)
         sys.exit(2)
 
+    if "--emit" in sys.argv:
+        dest = sys.argv[sys.argv.index("--emit") + 1]
+        src, stripped = shipped_page()
+        with open(dest, "w", encoding="utf-8") as f:
+            f.write(stripped)
+        status("%s -> %s (%d -> %d bytes)" % (SOURCE, dest, len(src), len(stripped)))
+        return
+
     src_hash = content_hash()
     if os.path.isfile(OUTPUT) and stored_hash() == src_hash:
         return
 
-    with open(SOURCE, "rb") as f:
-        raw = f.read()
+    src, stripped = shipped_page()
+    raw = stripped.encode("utf-8")
 
     # mtime=0 keeps the gzip output (and therefore the ETag) deterministic
     gz = gzip.compress(raw, compresslevel=9, mtime=0)
@@ -100,7 +136,8 @@ def main():
     with open(OUTPUT, "w") as f:
         f.write("\n".join(lines))
 
-    status("%s -> %s (%d bytes raw, %d bytes gzipped)" % (SOURCE, OUTPUT, len(raw), len(gz)))
+    status("%s -> %s (%d bytes source, %d stripped, %d gzipped)"
+           % (SOURCE, OUTPUT, len(src.encode("utf-8")), len(raw), len(gz)))
 
 
 main()
