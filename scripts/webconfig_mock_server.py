@@ -187,7 +187,8 @@ class State:
             # Shaped like build.sh's EMBEDDED_VERSION_STRING
             # (base[.build][-observer][-channel]-hash) so the console's channel
             # labelling is exercised against a real version, not "v1.x-mock".
-            "fw": FW_VERSION, "role": "Repeater", "board": "Heltec V3 (mock)",
+            "fw": FW_VERSION, "build_date": "6 Jun 2026",
+            "role": "Repeater", "board": "Heltec V3 (mock)",
             "uptime_s": int(time.time() - self.start),
             "runtime_slots": 6, "max_slots": 6, "active_slots": self.active_slots,
             "max_cmds": CLI_MAX_CMDS,

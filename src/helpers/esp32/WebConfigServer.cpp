@@ -112,9 +112,10 @@ static portMUX_TYPE s_wc_route_mux = portMUX_INITIALIZER_UNLOCKED;
 
 WebConfigServer::WebConfigServer(NodePrefs* prefs, MQTTPrefs* obs, Callbacks* callbacks,
                                  const uint8_t* pub_key, const char* fw_ver,
+                                 const char* build_date,
                                  const char* role, const char* board_name)
     : _prefs(prefs), _obs(obs), _cb(callbacks), _pub_key(pub_key),
-      _fw_ver(fw_ver), _role(role), _board_name(board_name) {
+      _fw_ver(fw_ver), _build_date(build_date), _role(role), _board_name(board_name) {
   _mux = xSemaphoreCreateMutex();
 }
 
@@ -571,6 +572,9 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   for (int i = 0; i < 8; i++) sprintf(&node_id[i * 2], "%02x", _pub_key[i]);
   doc["node_id"] = node_id;
   doc["fw"] = _fw_ver;
+  // The page shows a trimmed version — base + build number + channel — and
+  // pairs it with this, the way `ver` does. Both come from the same defines.
+  doc["build_date"] = _build_date;
   doc["role"] = _role;
   doc["board"] = _board_name;
   doc["uptime_s"] = millis() / 1000;

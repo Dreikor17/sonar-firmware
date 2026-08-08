@@ -64,7 +64,7 @@ public:
   };
 
   WebConfigServer(NodePrefs* prefs, MQTTPrefs* obs, Callbacks* callbacks,
-                  const uint8_t* pub_key, const char* fw_ver,
+                  const uint8_t* pub_key, const char* fw_ver, const char* build_date,
                   const char* role, const char* board_name);
   ~WebConfigServer();
 
@@ -125,6 +125,7 @@ private:
   Callbacks* _cb;
   const uint8_t* _pub_key;
   const char* _fw_ver;
+  const char* _build_date;
   const char* _role;
   const char* _board_name;
 
