@@ -64,7 +64,33 @@ def table():
     return gets + plain
 
 
-# set -> get pairs, checking a value survives the round trip.
+# Where top-level commands are implemented. MyMesh handles a few before
+# delegating to CommonCLI, which is exactly how discover.* stayed missing from
+# the table for so long: grepping CommonCLI alone does not see them.
+COMMAND_SOURCES = [
+    "src/helpers/CommonCLI.cpp",
+    "src/helpers/CommonCLI_Observer.cpp",
+    "examples/simple_repeater/MyMesh.cpp",
+]
+
+# Firmware commands the table deliberately does not offer.
+NOT_OFFERED = {
+    "tls.bundletest",   # TLS debugging, not an operator command
+}
+
+
+def firmware_commands():
+    """Top-level command literals the firmware dispatches on."""
+    found = set()
+    for rel in COMMAND_SOURCES:
+        path = os.path.join(HERE, "..", rel)
+        try:
+            src = open(path, encoding="utf-8").read()
+        except OSError:
+            continue
+        for lit in re.findall(r'(?:mem|str)n?cmp\(\s*command\s*,\s*"([^"]+)"', src):
+            found.add(lit.strip())
+    return found - NOT_OFFERED
 ROUND_TRIPS = [
     ("set radio.watchdog 30", "get radio.watchdog", "30"),
     ("set dutycycle 25", "get dutycycle", "25.0"),
@@ -153,15 +179,28 @@ def main():
         print("   FAIL  %-30s %s" % (cmd, reply))
     failures += unexpected
 
+    # The reverse direction: a command the firmware implements but the table
+    # never offers is invisible to the check above, because the check only ever
+    # drives what the table already knows about.
+    offered = " ".join(cmds) + " " + " ".join(
+        re.findall(r'\["([^"]+)","', open(INDEX_HTML, encoding="utf-8").read()))
+    missing = sorted(c for c in firmware_commands() if c not in offered)
+    print("\nfirmware commands not in the table: %d" % len(missing))
+    for c in missing:
+        print("   MISSING  %s" % c)
+    failures += [(c, "not offered by autocomplete") for c in missing]
+
     results = cli.run([c for probe in ROUND_TRIPS for c in probe[:2]])
     print("\nround-trips                      : %d" % len(ROUND_TRIPS))
     for i, (setc, getc, want) in enumerate(ROUND_TRIPS):
         setr, getr = results[i * 2][1], results[i * 2 + 1][1]
-        if setr["ok"] and getr["reply"] == want:
+        # `get` answers "> value"; compare the value, as the terminal displays it
+        got = re.sub(r"^>\s?", "", getr["reply"])
+        if setr["ok"] and got == want:
             continue
         print("   FAIL  %-30s got %r, wanted %r (set: %s)"
-              % (getc, getr["reply"], want, setr["reply"]))
-        failures.append((getc, getr["reply"]))
+              % (getc, got, want, setr["reply"]))
+        failures.append((getc, got))
 
     print("\n%s" % ("FAILED: %d" % len(failures) if failures else "all clear"))
     return 1 if failures else 0

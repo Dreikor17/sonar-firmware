@@ -43,6 +43,16 @@ static inline bool wcIsDeferredReboot(const char* cmd) {
 static inline bool wcCliEchoesSecret(const char* cmd) {
   return strncmp(cmd, "password ", 9) == 0;
 }
+// Success has no single shape across the CLI: setters answer "OK...", getters
+// answer "> value", and a few answer free-form ("File system erase: OK"). Only
+// FAILURE is uniform — an "Err"/"ERR:"/"Error:" prefix. So the CLI must test for
+// the failure prefix, where the config batch can test for "OK" because every
+// allowlisted setter uses it. Testing for "OK" here marked every `get` a
+// failure, which turned the terminal red and withheld requested reboots.
+static inline bool wcCliReplyIsOk(const char* r) {
+  return !((r[0] == 'E' || r[0] == 'e') && (r[1] == 'R' || r[1] == 'r') &&
+           (r[2] == 'R' || r[2] == 'r'));
+}
 
 // Constant-time-ish comparison so login timing doesn't leak a prefix match.
 static bool fixedTimeEquals(const char* a, const char* b, size_t max_len) {
@@ -349,10 +359,11 @@ void WebConfigServer::drainBatch(uint32_t now) {
       // Overwrite it: the command cannot fail, so there is nothing to report.
       // Config entries carry the key; a CLI entry is matched on the command.
       if (wcIsAdminPasswordKey(e.key) || wcCliEchoesSecret(e.cmd)) strcpy(e.reply, "OK");
-      // Success convention across every allowlisted setter is an "OK" prefix
-      // (the UI relies on the same test); anything else is a rejection.
-      _batch_all_ok = WebConfigBatch::nextAllOk(_batch_all_ok,
-                                                strncmp(e.reply, "OK", 2) == 0);
+      // A config batch is all allowlisted setters, which uniformly answer "OK";
+      // the CLI reaches the whole surface, where only failure has a fixed shape.
+      _batch_all_ok = WebConfigBatch::nextAllOk(
+          _batch_all_ok, _batch_kind == BATCH_CLI ? wcCliReplyIsOk(e.reply)
+                                                  : strncmp(e.reply, "OK", 2) == 0);
     }
     _batch_last_cmd = millis();
     // Config entries are named by their (non-secret) key. A CLI command is
@@ -1114,7 +1125,7 @@ void WebConfigServer::handleCliResult(AsyncWebServerRequest* req) {
     JsonObject r = results.createNestedObject();
     // The command is deliberately NOT echoed: it may hold a password or token,
     // and the client already has the sequence it sent. It matches by index.
-    r["ok"] = strncmp(_batch[i].reply, "OK", 2) == 0;
+    r["ok"] = wcCliReplyIsOk(_batch[i].reply);
     r["reply"] = (const char*)_batch[i].reply;
   }
   if (final_read) {

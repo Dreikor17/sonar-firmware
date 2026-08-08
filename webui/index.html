@@ -150,7 +150,9 @@ body.tab-cli{padding-bottom:0}
 .term-out>div{white-space:pre-wrap;word-break:break-word}
 .term-out .cmd{color:#fff}
 .term-out .cmd:before{content:"> ";color:var(--tgrn)}
-.term-out .rep{color:#a9b7c6}
+/* A reply is green because it succeeded; red is reserved for a node that said
+   no. Anything else reads every `get` as a failure. */
+.term-out .rep{color:#7ee787}
 .term-out .err{color:var(--terr)}
 .term-out .sys{color:var(--tdim)}
 .term-out .gap{height:.55em}
@@ -1444,6 +1446,11 @@ var CLI_VERBS=[
   ["memory","Heap and PSRAM free/min/largest block"],
   ["neighbors","Nodes heard recently, with RSSI and age"],
   ["neighbor.remove ","Drop one neighbour {64-hex-char-key}"],
+  // Handled by MyMesh before it delegates to CommonCLI — a whole second
+  // command surface the table missed until discover.* turned up absent.
+  ["discover.neighbors","Ask neighbours to identify themselves"],
+  ["discover.scopes","Collect neighbour scopes (needs the neighbors build)"],
+  ["setperm ","Set a node's ACL permissions {64-hex-char-key} {int8}"],
   ["advert","Send an advert now (flooded)"],
   ["advert.zerohop","Send an advert neighbours will not repeat"],
   ["tempradio ","Try radio params without saving {freq,bw,sf,cr}"],
@@ -1480,6 +1487,7 @@ var CLI_VERBS=[
   ["reboot","Restart the node"],
   ["clkreboot","Restart the node, preserving the clock"],
   ["poweroff","Power the node off"],
+  ["shutdown","Power the node off (same as poweroff)"],
   ["erase","Erase the filesystem — settings and identity"]
 ];
 /* [key, description, mode, values]
@@ -1490,6 +1498,7 @@ var CLI_KEYS=[
   ["lat","Advert latitude",0],
   ["lon","Advert longitude",0],
   ["public.key","This node's public key",1],
+  ["acl","Access control list (per-node permissions)",1],
   ["prv.key","Restore an identity {64-hex-char-key}",2],
   ["role","Node role",1],
   ["radio","Radio parameters {freq,bw,sf,cr}",0],
@@ -1975,9 +1984,14 @@ function cliPoll(reqid,cmds,from,status,errs,idles){
       // The node never echoes the command back — it may hold a password or a
       // token, and we already have the sequence we sent. Match by index.
       cliEcho("cmd",cmds[from+i]||"");
-      // `ok` is advisory; the node's own OK/Error convention is authoritative
-      var ok=(x.ok!=null)?x.ok:!/^\s*(err|error)\b/i.test(x.reply||"");
-      if(x.reply)cliEcho(ok?"rep":"err",x.reply);
+      // `ok` is advisory; the node's own convention is authoritative, and only
+      // failure has a fixed shape there ("Err"/"ERR:"/"Error:").
+      var ok=(x.ok!=null)?x.ok:!/^\s*err/i.test(x.reply||"");
+      // Getters answer "> value" — that leading marker is the serial console's
+      // way of setting a value apart, and here it collides with the prompt glyph
+      // that means "you typed this". Drop it; the colour already says "reply".
+      var reply=(x.reply||"").replace(/^>\s?/,"");
+      if(reply)cliEcho(ok?"rep":"err",reply);
     });
     from+=(r.results||[]).length;
     // "running" also covers "finished, but more results are still to be paged

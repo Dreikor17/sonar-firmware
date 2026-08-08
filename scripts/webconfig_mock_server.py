@@ -449,6 +449,7 @@ GETTERS = {
         "%2d. %s%s" % (i + 1, n, "" if nd == "none" else "  (needs %s)" % nd)
         for i, (n, nd) in enumerate(PRESETS)),
     "role": lambda c: "Repeater",
+    "acl": lambda c: "a1b2c3d4e5f60718  perms 3\n1122334455667788  perms 1",
     # not its own pref: the CLI derives it from airtime_factor both ways
     "dutycycle": lambda c: "%.1f" % (100.0 / (c["radio"]["af"] + 1)),
     "mqtt.config.valid": lambda c: (
@@ -475,6 +476,18 @@ def cli_mqtt_status(cfg):
 
 
 def cli_get(cfg, key):
+    """Reply to `get <key>`.
+
+    CommonCLI::handleGetCmd answers `> value` — the marker sets the value apart
+    on the serial console. Reproduced here because it is load-bearing: a reply
+    that starts with "> " does not start with "OK", which is what made the
+    firmware's first cut mark every getter a failure.
+    """
+    ok, val = _cli_get_value(cfg, key)
+    return (ok, "> " + val) if ok else (ok, val)
+
+
+def _cli_get_value(cfg, key):
     if key in GETTERS:
         val = GETTERS[key](cfg)
         return (True, val) if val is not None else (False, "Error: unsupported")
@@ -536,6 +549,16 @@ def run_cli(cfg, line):
     if cmd == "neighbors":
         return True, ("d4e5f60718  -71 dBm  snr 9.5   2m ago\n"
                       "1122334455  -94 dBm  snr 2.0  14m ago")
+    # Handled by MyMesh::handleCommand before it delegates to CommonCLI.
+    if cmd == "discover.neighbors":
+        return True, "OK - Discover sent"
+    if cmd == "discover.scopes":
+        return True, "OK - scopes queued (18s discovery remaining)"
+    if cmd.startswith("setperm "):
+        parts = cmd[8:].split()
+        if len(parts) != 2 or not _hex64(parts[0]):
+            return False, "Err - bad params"
+        return True, "OK"
     if cmd == "clock sync":
         return True, "OK - clock set: %s UTC" % time.strftime("%H:%M - %d/%m/%Y", time.gmtime())
     if cmd == "region":
