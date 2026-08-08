@@ -142,14 +142,10 @@ canvas{width:100%;height:56px;display:block}
 body.tab-cli{padding-bottom:0}
 .term-hd{display:flex;align-items:center;gap:8px;flex:none;padding:6px 10px;
   background:#11161d;border-bottom:1px solid #202832;font-size:.82em;color:var(--tdim)}
-.term-hd b{font-weight:500;color:var(--tgrn);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .term-hd .sp{flex:1}
 .term-hd button{flex:none;background:none;border:1px solid #2a333f;border-radius:5px;
   color:var(--tdim);font:inherit;padding:1px 8px;cursor:pointer}
 .term-hd button:hover{color:var(--tf);border-color:#3d4a5a}
-/* narrow phone: the buttons crowd the host label off. `help` is also a command
-   (and the banner says so), so it is the one that gives way. */
-@media(max-width:430px){.term-hd .opt{display:none}}
 .term-out{flex:1;overflow-y:auto;overflow-x:hidden;padding:10px;-webkit-overflow-scrolling:touch}
 .term-out>div{white-space:pre-wrap;word-break:break-word}
 .term-out .cmd{color:#fff}
@@ -508,10 +504,10 @@ body.tab-cli{padding-bottom:0}
     <div class="card" style="padding:12px">
       <div class="term" id="term">
         <div class="term-hd">
-          <b id="term-host">meshcore</b><span class="sp"></span>
+          <span class="sp"></span>
           <button type="button" class="hide" id="term-setup" onmousedown="event.preventDefault()"
                   onclick="showWizard()">&larr; setup</button>
-          <button type="button" class="opt" onmousedown="event.preventDefault()" onclick="cliHelp()">help</button>
+          <button type="button" onmousedown="event.preventDefault()" onclick="cliHelp()">help</button>
           <button type="button" onmousedown="event.preventDefault()" onclick="cliClear()">clear</button>
         </div>
         <div class="term-out" id="term-out"></div>
@@ -2026,7 +2022,6 @@ if(window.visualViewport){
   window.visualViewport.addEventListener("scroll",cliFit);
 }
 function enterCli(){
-  $("#term-host").textContent="meshcore@"+($("#h-name").textContent||"node");
   $("#term-setup").classList.toggle("hide",st.mode!=="setup");
   if(!cli.shown){cli.shown=true;cliBanner()}
   window.scrollTo(0,0);   // the terminal is the whole tab; show all of it
