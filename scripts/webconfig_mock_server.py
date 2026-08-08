@@ -113,7 +113,22 @@ def default_config(setup_mode):
             "interval": 5, "timezone": "MST7MDT,M3.2.0,M11.1.0", "timezone_offset": -7,
             "ntp": "pool.ntp.org", "owner": "", "email": "", "snmp": False,
             "snmp_community": "public",
+            "neighbors": False, "neighbors_interval": 24,
             "slots": [_slot() for _ in range(6)],
+        },
+        # Settings the CLI reaches but no portal form does, so they are absent
+        # from /api/config (see config_json) and live only here. Without them
+        # the terminal answers "unknown config key" for perfectly real commands.
+        "cli": {
+            "radio.watchdog": 0, "int.thresh": 0, "agc.reset.interval": 0,
+            "direct.txdelay": 0.0, "multi.acks": 0, "allow.read.only": False,
+            "path.hash.mode": 0, "owner.info": "", "guest.password": "",
+            "adc.multiplier": 1.0,
+            "alert": False, "alert.psk": "", "alert.hashtag": "",
+            "alert.region": "", "alert.interval": 15,
+            "alert.mqtt": False, "alert.wifi": False,
+            "bridge.enabled": False, "bridge.source": "rx", "bridge.baud": 115200,
+            "bridge.delay": 0, "bridge.channel": 0, "bridge.secret": "",
         },
     }
 
@@ -151,6 +166,7 @@ class State:
     # ---- config serialization (masks secrets, like handleConfigGet) -------
     def config_json(self):
         c = copy.deepcopy(self.cfg)
+        c.pop("cli")                       # CLI-only settings: not part of this contract
         c["wifi"]["pwd"] = SENTINEL if self.cfg["wifi"]["pwd"] else ""
         for s in c["mqtt"]["slots"]:
             s["password"] = SENTINEL if s["password"] else ""
@@ -176,13 +192,15 @@ class State:
 BOOL_KEYS = {"cad": ("radio", "cad"), "radio.rxgain": ("radio", "rxgain"),
              "repeat": ("radio", "repeat"), "mqtt.status": ("mqtt", "status"),
              "mqtt.packets": ("mqtt", "packets"), "mqtt.raw": ("mqtt", "raw"),
-             "mqtt.rx": ("mqtt", "rx"), "snmp": ("mqtt", "snmp")}
+             "mqtt.rx": ("mqtt", "rx"), "snmp": ("mqtt", "snmp"),
+             "mqtt.neighbors": ("mqtt", "neighbors")}
 INT_KEYS = {"tx": ("radio", "tx"), "flood.max": ("radio", "flood_max"),
             "flood.max.advert": ("radio", "flood_max_advert"),
             "flood.max.unscoped": ("radio", "flood_max_unscoped"),
             "advert.interval": ("radio", "advert_interval"),
             "flood.advert.interval": ("radio", "flood_advert_interval"),
             "mqtt.interval": ("mqtt", "interval"),
+            "mqtt.neighbors.interval": ("mqtt", "neighbors_interval"),
             "timezone.offset": ("mqtt", "timezone_offset")}
 FLOAT_KEYS = {"lat": ("radio", "lat"), "lon": ("radio", "lon"),
               "af": ("radio", "af"), "rxdelay": ("radio", "rxdelay"),
@@ -193,6 +211,16 @@ STR_KEYS = {"name": ("radio", "name"), "wifi.ssid": ("wifi", "ssid"),
             "mqtt.email": ("mqtt", "email"), "timezone": ("mqtt", "timezone"),
             "snmp.community": ("mqtt", "snmp_community"), "mqtt.tx": ("mqtt", "tx")}
 SECRET_STR_KEYS = {"wifi.pwd": ("wifi", "pwd")}
+
+# The CLI-only settings, typed the same way so apply_set/cli_read_key reach them
+# through the existing lookups rather than a parallel code path.
+for _k, _v in default_config(False)["cli"].items():
+    _t = {bool: BOOL_KEYS, int: INT_KEYS, float: FLOAT_KEYS, str: STR_KEYS}[type(_v)]
+    _t[_k] = ("cli", _k)
+SECRET_STR_KEYS.update({k: ("cli", k) for k in
+                        ("guest.password", "alert.psk", "bridge.secret")})
+for _k in SECRET_STR_KEYS:
+    STR_KEYS.pop(_k, None)
 
 
 def _hex64(v):
@@ -212,6 +240,19 @@ def apply_set(cfg, key, val):
         # reply carries no secret either.
         global ADMIN_PASSWORD
         ADMIN_PASSWORD = val
+        return True, "OK"
+
+    if key == "radio.fem.rxgain":
+        return False, "Error: unsupported"   # no FEM on the mock board, see GETTERS
+
+    if key == "dutycycle":
+        try:
+            dc = float(val)
+        except ValueError:
+            return False, "Error: expected a number"
+        if not 0 < dc <= 100:
+            return False, "Error, must be 1-100"
+        cfg["radio"]["af"] = 100.0 / dc - 1   # the CLI stores it as airtime_factor
         return True, "OK"
 
     if key in ("freq", "bw", "sf", "cr"):
@@ -242,6 +283,12 @@ def apply_set(cfg, key, val):
             return False, "Error: IATA code must be exactly 3 letters/digits (e.g. DEN)"
         cfg["mqtt"]["iata"] = val.upper()
         return True, "OK"
+
+    if key == "prv.key":
+        # write-only by design: the identity goes in, nothing reads it back
+        if not _hex64(val):
+            return False, "Error: private key must be 64 hex characters"
+        return True, "OK - identity restored, reboot to apply"
 
     if key == "mqtt.owner":
         if val == "":
@@ -282,7 +329,10 @@ def apply_set(cfg, key, val):
         sec, f = STR_KEYS[key]
         cfg[sec][f] = val
         return True, "OK"
-    return True, "OK"   # unknown-but-allowlisted: accept (mock is lenient here)
+    # Strict fallthrough: this function is the single authority on what can be
+    # set, for the batch and the CLI alike. Accepting unknown keys here once hid
+    # the fact that the CLI could not reach `dutycycle` or `radio.fem.rxgain`.
+    return False, "Error: unknown config key '%s'" % key
 
 
 # Payload-type names accepted alongside the decimal form. Mirrors
@@ -360,7 +410,9 @@ def apply_slot_set(cfg, idx, field, val):
 
 
 def is_secret_key(key):
-    return key == "wifi.pwd" or bool(re.match(r"^mqtt[1-6]\.(password|token)$", key))
+    # The serial console prints these back; the portal is reachable over the
+    # LAN, so it masks them in `get` replies the way /api/config already does.
+    return key in SECRET_STR_KEYS or bool(re.match(r"^mqtt[1-6]\.(password|token)$", key))
 
 
 # ---------------------------------------------------------------------------
@@ -389,6 +441,18 @@ GETTERS = {
     "mqtt.presets": lambda c: "\n".join(
         "%2d. %s%s" % (i + 1, n, "" if nd == "none" else "  (needs %s)" % nd)
         for i, (n, nd) in enumerate(PRESETS)),
+    "role": lambda c: "Repeater",
+    # not its own pref: the CLI derives it from airtime_factor both ways
+    "dutycycle": lambda c: "%.1f" % (100.0 / (c["radio"]["af"] + 1)),
+    "mqtt.config.valid": lambda c: (
+        "yes" if any(s["preset"] != "none" for s in c["mqtt"]["slots"]) else "no - no slot configured"),
+    "mqtt.ntp.diag": lambda c: "last sync: 42s ago via %s (offset +0.011s)" % (c["mqtt"]["ntp"] or "none"),
+    "mqtt.stats": lambda c: ("published: %d\ndropped: 0\nqueue: 0/24\nreconnects: 1"
+                             % (100 + int(time.time() - ST.start))),
+    # Runtime-gated on the real device (Board::canControlLoRaFemLna), not
+    # compiled out — the command exists everywhere and the board answers for
+    # itself. The mock board is a Heltec V3, which has no FEM.
+    "radio.fem.rxgain": lambda c: None,
 }
 
 
@@ -405,7 +469,8 @@ def cli_mqtt_status(cfg):
 
 def cli_get(cfg, key):
     if key in GETTERS:
-        return True, GETTERS[key](cfg)
+        val = GETTERS[key](cfg)
+        return (True, val) if val is not None else (False, "Error: unsupported")
     if is_secret_key(key):
         # The serial console prints these; the portal is reachable over the LAN,
         # so it masks them the same way /api/config does.
@@ -464,6 +529,50 @@ def run_cli(cfg, line):
     if cmd == "neighbors":
         return True, ("d4e5f60718  -71 dBm  snr 9.5   2m ago\n"
                       "1122334455  -94 dBm  snr 2.0  14m ago")
+    if cmd == "clock sync":
+        return True, "OK - clock set: %s UTC" % time.strftime("%H:%M - %d/%m/%Y", time.gmtime())
+    if cmd == "region":
+        return True, "US915"
+    if cmd == "sensor list":
+        return True, "0: battery (mV)\n1: temperature (C)\n2: humidity (%)"
+    if cmd.startswith("sensor get "):
+        return True, "> 22.4"
+    if cmd.startswith("sensor set "):
+        return True, "OK"
+    if cmd.startswith("gps advert "):
+        mode = cmd[11:]
+        if mode not in ("none", "share", "prefs"):
+            return False, "Error, must be none, share or prefs"
+        return True, "OK - advert position: %s" % mode
+    if cmd in ("gps on", "gps off"):
+        return True, "OK - GPS %s" % cmd[4:]
+    if cmd == "gps sync":
+        return True, "OK - clock and location set from GPS"
+    if cmd == "gps setloc":
+        return True, "OK - lat/lon set from the current fix"
+    if cmd == "gps":
+        return True, "GPS: no fix (0 satellites)"
+    if cmd in ("powersaving on", "powersaving off"):
+        return True, "OK - power saving %s" % cmd[12:]
+    if cmd == "powersaving":
+        return True, "off"
+    if cmd.startswith("alert test"):
+        if not ST.cfg["cli"]["alert.psk"]:
+            return False, "Error: alert channel not configured (set alert.psk or set alert.hashtag)"
+        return True, "OK - test alert sent"
+    if cmd.startswith("ota "):
+        return True, ("v1.7.2 available (current v1.7.1-mock)" if cmd == "ota check"
+                      else "OK - downloading v1.7.2, will reboot when flashed")
+    if cmd.startswith("start webconfig"):
+        return True, "OK - already running (you are using it)"
+    if cmd == "stop webconfig":
+        return True, "OK - portal stopping"
+    if cmd == "start ota":
+        return True, "OK - upload AP raised at 192.168.4.1"
+    if cmd.startswith("neighbor.remove "):
+        return (True, "OK") if _hex64(cmd[16:]) else (False, "ERR: bad pubkey")
+    if cmd.startswith("tempradio "):
+        return True, "OK - temporary radio params applied (not saved)"
     if cmd == "clear stats":
         return True, "OK - stats cleared"
     if cmd.startswith("stats-"):
@@ -485,8 +594,9 @@ def run_cli(cfg, line):
         key, _, val = rest.partition(" ")
         if not key:
             return False, "Error: set what?"
-        if cli_read_key(cfg, key) is None and not re.match(r"^mqtt[1-6]\.", key):
-            return False, "Error: unknown config key '%s'" % key
+        # apply_set owns the "is this settable" decision; gating on whether the
+        # key is *readable* rejected write-only and computed ones (`dutycycle`,
+        # `prv.key`, `radio.fem.rxgain`).
         return apply_set(cfg, key, val.strip())
     return False, "Error: unknown command '%s'" % cmd[:40]
 
