@@ -1438,7 +1438,7 @@ bool MyMesh::startWebConfig(bool force_ap, char* reply) {
   }
   if (!_webconfig) {
     _webconfig = new WebConfigServer(&_prefs, _cli.getObserverPrefs(), this,
-                                     self_id.pub_key, getFirmwareVer(), getRole(),
+                                     self_id.pub_key, getFirmwareVer(), getBuildDate(), getRole(),
                                      _cli.getBoard()->getManufacturerName());
   }
   if (force_ap) {

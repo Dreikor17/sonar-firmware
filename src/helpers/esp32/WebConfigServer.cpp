@@ -28,6 +28,89 @@ static const char SECRET_SENTINEL[] = "********";
 static inline bool isAllowedSetKey(const char* key) { return wcIsAllowedSetKey(key); }
 static inline bool isSecretKey(const char* key) { return wcIsSecretKey(key); }
 
+// Commands whose CLI handler never returns would take the node down mid-drain,
+// before the client could read a single result. `reboot` is deferred instead:
+// it is not passed to the CLI at all, and the batch arms the ordinary reboot
+// path once the operator has read the results. The rest (clkreboot, poweroff,
+// ota update) do real work on the way down and cannot be faked, so they run
+// normally and the connection drops — the UI warns before sending them.
+// CommonCLI dispatches on a 6-byte PREFIX (memcmp(command, "reboot", 6)), so
+// `reboot now` and `rebooted` reach Board::reboot() too. Matching exactly here
+// let those through to the CLI, which took the node down mid-drain with no
+// results and no deferral — the precise failure the deferral exists to avoid.
+// Whatever CommonCLI would treat as a reboot, this must intercept.
+static inline bool wcIsDeferredReboot(const char* cmd) {
+  return strncmp(cmd, "reboot", 6) == 0;
+}
+
+// Commands the CLI reaches but the portal cannot honestly serve. Rejected at
+// POST so nothing in the sequence runs, rather than failing halfway with a
+// reply that does not explain itself. Returns the reason, or NULL if fine.
+static const char* wcCliUnavailable(const char* cmd) {
+  // ESP32Board::startOTAUpdate() does `new AsyncWebServer(80)` with no bind
+  // check and answers "Started" regardless. The portal already holds port 80,
+  // so from here it can only leak the allocation, inhibit sleep, and lie.
+  if (strncmp(cmd, "start ota", 9) == 0) {
+    return "start ota needs port 80, which this portal is using. "
+           "Run it from the serial console, or use `ota update`.";
+  }
+  // `clock sync` sets the clock from the CALLER's timestamp. Web requests carry
+  // none (execCommand passes 0), so CommonCLI always rejects it as moving the
+  // clock backwards. `time <epoch>` is the one that works over this transport.
+  if (strncmp(cmd, "clock sync", 10) == 0) {
+    return "clock sync takes its time from the caller, which a web request has "
+           "no way to supply. Use `time <epoch-seconds>` instead.";
+  }
+  // Both write their real output to Serial and hand back a stub the terminal
+  // would render as success. Bare `log` also streams a whole file from the loop
+  // task, stalling the mesh and the radio while it does.
+  if (strcmp(cmd, "log") == 0) {
+    return "log writes the packet log to the serial console, not here, and "
+           "blocks the radio while it does. Use `log start` / `log stop`.";
+  }
+  if (strcmp(cmd, "get acl") == 0) {
+    return "get acl writes to the serial console, not here.";
+  }
+  return NULL;
+}
+// The `password` command echoes the new password back in its reply, and replies
+// are served to the client over the open setup AP. The config path overwrites it
+// by key; a CLI entry has no key, so match on the command itself.
+static inline bool wcCliEchoesSecret(const char* cmd) {
+  return strncmp(cmd, "password ", 9) == 0;
+}
+
+// CommonCLI splits its surface by CALLER, not by command: a serial caller
+// (sender_timestamp 0, physical access) reads secrets in plaintext, while a
+// remote one gets "******** (serial only)". Its own comments say so — "Serial
+// only (WiFi creds grant LAN access); remote sees set/unset".
+//
+// execCommand passes 0, which is what makes `erase`, `stats-*` and `set freq`
+// reachable from the terminal at all. Left alone, that also claims
+// physical-access trust for an HTTP request: `get prv.key` would hand this
+// node's identity to anyone associated with the open setup AP, and `get
+// wifi.pwd` would hand over the operator's network. Reading a secret and
+// writing one are not the same capability — the wizard has always been able to
+// REPLACE these; nothing in the portal could ever READ them, because
+// /api/config masks them (wcIsSecretKey).
+//
+// So the command surface stays whole and only the READ is masked, restoring the
+// distinction CommonCLI intended for a caller who is not at the serial port.
+// Which commands those are lives in WebConfigKeys.h (wcIsSecretReadCommand),
+// beside the rest of the secret classification and host-tested with it.
+
+// Keep the set/unset signal, which is the useful part and what CommonCLI itself
+// reports remotely; only the value goes. A getter answers "> value".
+static void wcMaskSecretReply(char* reply) {
+  const char* val = reply;
+  if (val[0] == '>' && val[1] == ' ') val += 2;
+  const bool unset = (val[0] == 0 || strcmp(val, "(not set)") == 0);
+  strcpy(reply, unset ? "> (not set)" : "> ******** (serial only)");
+}
+// Reply classification lives in WebConfigBatch.h with the rest of the decisions
+// (WebConfigBatch::cliReplyIsFailure / cliReplyGatesReboot / cliWriteSucceeded),
+// so the shapes CommonCLI actually emits are enumerated in one host-tested place.
+
 // Constant-time-ish comparison so login timing doesn't leak a prefix match.
 static bool fixedTimeEquals(const char* a, const char* b, size_t max_len) {
   size_t la = strnlen(a, max_len), lb = strnlen(b, max_len);
@@ -50,6 +133,17 @@ struct WCLock {
 WebConfigServer* WebConfigServer::_active = NULL;
 AsyncWebServer* WebConfigServer::_host = NULL;
 
+// Out-of-line definitions for the in-class-initialised constants. An in-class
+// initialiser is only a declaration under C++11 (what the xtensa-esp32
+// toolchain builds with), so any use that binds a reference rather than reading
+// the value — ArduinoJson takes its argument as `const T&` — needs the symbol to
+// exist. Comparisons like `count >= MAX_BATCH` never did, which is why this only
+// surfaced when MAX_BATCH started being reported in JSON, and then only on the
+// targets where the compiler happened not to fold it.
+const int WebConfigServer::MAX_BATCH;
+const size_t WebConfigServer::MAX_BODY;
+const uint32_t WebConfigServer::STOP_WARN_MS;
+
 // Protects the permanent route host's active-session pointer and handler
 // references across the loop and async_tcp cores. The critical sections only
 // copy a pointer/update a counter; handlers themselves never run under it.
@@ -57,9 +151,10 @@ static portMUX_TYPE s_wc_route_mux = portMUX_INITIALIZER_UNLOCKED;
 
 WebConfigServer::WebConfigServer(NodePrefs* prefs, MQTTPrefs* obs, Callbacks* callbacks,
                                  const uint8_t* pub_key, const char* fw_ver,
+                                 const char* build_date,
                                  const char* role, const char* board_name)
     : _prefs(prefs), _obs(obs), _cb(callbacks), _pub_key(pub_key),
-      _fw_ver(fw_ver), _role(role), _board_name(board_name) {
+      _fw_ver(fw_ver), _build_date(build_date), _role(role), _board_name(board_name) {
   _mux = xSemaphoreCreateMutex();
 }
 
@@ -315,20 +410,51 @@ void WebConfigServer::drainBatch(uint32_t now) {
     // WiFi regardless, so a concurrent GET waiting on it costs nothing extra.
     {
       WCLock lock(_mux);
-      _cb->execCommand(e.cmd, e.reply);
+      // A CLI `reboot` is answered here rather than executed: Board::reboot()
+      // does not return, so running it would take the node down before the
+      // operator could read whether the preceding commands succeeded. The
+      // batch arms the ordinary deferred reboot on the first result read.
+      if (_batch_kind == BATCH_CLI && wcIsDeferredReboot(e.cmd)) {
+        // Deliberately non-committal: whether the reboot actually happens is
+        // not known until the whole sequence has run (it is withheld if any
+        // command failed), and a later command could still fail after this one.
+        strcpy(e.reply, "OK - reboot queued");
+      } else {
+        _cb->execCommand(e.cmd, e.reply);
+      }
       if (e.reply[0] == 0) strcpy(e.reply, "OK");
       // The upstream `password` command echoes the new password back in its
       // reply, and replies are served to the client over the open setup AP.
       // Overwrite it: the command cannot fail, so there is nothing to report.
-      if (wcIsAdminPasswordKey(e.key)) strcpy(e.reply, "OK");
-      // Success convention across every allowlisted setter is an "OK" prefix
-      // (the UI relies on the same test); anything else is a rejection.
-      _batch_all_ok = WebConfigBatch::nextAllOk(_batch_all_ok,
-                                                strncmp(e.reply, "OK", 2) == 0);
+      // Config entries carry the key; a CLI entry is matched on the command.
+      const bool set_admin_pwd = wcIsAdminPasswordKey(e.key) || wcCliEchoesSecret(e.cmd);
+      if (set_admin_pwd) strcpy(e.reply, "OK");
+      // Satisfies the initial-setup invariant for the rest of this session, so
+      // the operator can set the password and configure WiFi in separate steps
+      // (the form batch always sends them together and needs no such memory).
+      if (set_admin_pwd) _admin_pwd_set = true;
+      if (_batch_kind == BATCH_CLI && wcIsSecretReadCommand(e.cmd)) wcMaskSecretReply(e.reply);
+      // What gates the reboot is narrower than "did anything fail": only a
+      // write can leave the node in a config not worth rebooting into, and only
+      // a write has a reply convention ("OK") solid enough to test. Diagnostics
+      // in the sequence neither gate it nor get guessed at.
+      if (_batch_kind != BATCH_CLI || WebConfigBatch::cliReplyGatesReboot(e.cmd)) {
+        _batch_all_ok = WebConfigBatch::nextAllOk(
+            _batch_all_ok, WebConfigBatch::cliWriteSucceeded(e.reply));
+      }
     }
     _batch_last_cmd = millis();
-    Serial.printf("WC: cmd %d/%d '%s' took %lums\n", (int)_batch_next, (int)_batch_count,
-                  e.key, (unsigned long)(_batch_last_cmd - t0));
+    // Config entries are named by their (non-secret) key. A CLI command is
+    // deliberately not logged: the operator can see what they typed, and a
+    // `set wifi.pwd` or `password` from the terminal must not reach the serial
+    // log, which is a different audience from the browser session.
+    if (_batch_kind == BATCH_CLI) {
+      Serial.printf("WC: cli %d/%d took %lums\n", (int)_batch_next, (int)_batch_count,
+                    (unsigned long)(_batch_last_cmd - t0));
+    } else {
+      Serial.printf("WC: cmd %d/%d '%s' took %lums\n", (int)_batch_next, (int)_batch_count,
+                    e.key, (unsigned long)(_batch_last_cmd - t0));
+    }
     if (!WebConfigBatch::drainFinished(_batch_next, _batch_count)) {
       return;  // more commands next tick
     }
@@ -418,6 +544,10 @@ void WebConfigServer::registerRoutes() {
   _server->on("/api/config", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleConfigGet); });
   _server->on("/api/config", HTTP_POST, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleConfigPost); },
               NULL, collectBody);
+  // Same specific-route-first rule as /api/config above.
+  _server->on("/api/cli/result", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleCliResult); });
+  _server->on("/api/cli", HTTP_POST, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleCliPost); },
+              NULL, collectBody);
   _server->on("/api/stats", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleStats); });
   _server->on("/api/scan", HTTP_GET, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleScan); });
   _server->on("/api/reboot", HTTP_POST, [](AsyncWebServerRequest* r) { dispatchRequest(r, &WebConfigServer::handleReboot); });
@@ -487,6 +617,9 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   for (int i = 0; i < 8; i++) sprintf(&node_id[i * 2], "%02x", _pub_key[i]);
   doc["node_id"] = node_id;
   doc["fw"] = _fw_ver;
+  // The page shows a trimmed version — base + build number + channel — and
+  // pairs it with this, the way `ver` does. Both come from the same defines.
+  doc["build_date"] = _build_date;
   doc["role"] = _role;
   doc["board"] = _board_name;
   doc["uptime_s"] = millis() / 1000;
@@ -495,6 +628,10 @@ void WebConfigServer::handleStatus(AsyncWebServerRequest* req) {
   // Servers the UI should expose: only as many as can actually be active at
   // once (2 without PSRAM, 5 with). Configuring more never connects.
   doc["active_slots"] = MQTTBridge::getMaxActiveSlots();
+  // Commands the terminal may submit at once. The CLI shares the config
+  // batch's fixed slot, so the cap is MAX_BATCH — reported rather than
+  // duplicated in the page, which cannot know how this build was sized.
+  doc["max_cmds"] = MAX_BATCH;
 
   AsyncResponseStream* res = req->beginResponseStream("application/json");
   serializeJson(doc, *res);
@@ -781,6 +918,7 @@ void WebConfigServer::handleConfigPost(AsyncWebServerRequest* req) {
     req->send(400, "application/json", "{\"error\":\"no changes\"}");
     return;
   }
+  _batch_kind = BATCH_CONFIG;
   _batch_count = count;
   _batch_next = 0;
   _batch_reboot = reboot_after;
@@ -820,8 +958,13 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
   // fires but no branch print follows, the handler is blocked on _mux.
   Serial.printf("WC: result entry mode=%d state=%d\n", (int)_mode, (int)_batch_state);
   WCLock lock(_mux);
-  const WebConfigBatch::ResultOutcome outcome = WebConfigBatch::classifyResult(
-      toSpecState(_batch_state), strcmp(requested_reqid.c_str(), _batch_reqid) == 0);
+  // A CLI sequence occupying the shared slot is not a config save, whatever the
+  // reqid says: its entries have no `key` and its results belong to the
+  // terminal's reader. Treat it as unknown here (and vice versa there).
+  const bool mine = (_batch_kind == BATCH_CONFIG) &&
+                    (strcmp(requested_reqid.c_str(), _batch_reqid) == 0);
+  const WebConfigBatch::ResultOutcome outcome =
+      WebConfigBatch::classifyResult(toSpecState(_batch_state), mine);
   if (outcome == WebConfigBatch::ResultOutcome::Idle) {
     Serial.println("WC: result read -> idle");
     StaticJsonDocument<64> idle;
@@ -872,6 +1015,238 @@ void WebConfigServer::handleConfigResult(AsyncWebServerRequest* req) {
     _reboot_at = WebConfigBatch::confirmRebootAt(millis());
   }
 
+  AsyncResponseStream* res = req->beginResponseStream("application/json");
+  serializeJson(doc, *res);
+  req->send(res);
+}
+
+// ---------------------------------------------------------------------------
+// CLI terminal (/api/cli). Same 202 + reqid + poll contract as a config save,
+// and for the same reason: CommonCLI touches prefs, the radio and the
+// filesystem, none of which may be reached from the async_tcp task. The
+// commands go into the shared deferred slot and tick() drains them.
+//
+// Unlike a save this is NOT allowlisted. That is the point: the terminal exists
+// to reach what the serial console reaches, and execCommand() passes
+// sender_timestamp 0, so it gets the same local privilege the serial console
+// has. Authentication is the boundary — as it is for serial (physical access)
+// and for remote admin over the mesh (the admin password).
+// ---------------------------------------------------------------------------
+
+// Commands whose CLI handler never returns would take the node down mid-drain,
+// before the client could read a single result. `reboot` is deferred instead:
+// it is not passed to the CLI at all, and the batch arms the ordinary reboot
+// path once the operator has read the results. The rest (clkreboot, poweroff,
+// ota update) do real work on the way down and cannot be faked, so they run
+// normally and the connection drops — the UI warns before sending them.
+void WebConfigServer::handleCliPost(AsyncWebServerRequest* req) {
+  if (_mode == MODE_OFF) { req->send(503); return; }
+  if (!checkAuth(req)) { req->send(401, "application/json", "{\"error\":\"auth\"}"); return; }
+  if (req->_tempObject == NULL) {
+    req->send(413, "application/json", "{\"error\":\"body too large\"}");
+    return;
+  }
+  const char* body = (const char*)req->_tempObject;
+  DynamicJsonDocument doc(6144);
+  if (!body || deserializeJson(doc, body) != DeserializationError::Ok) {
+    req->send(400, "application/json", "{\"error\":\"bad json\"}");
+    return;
+  }
+  const char* reqid = doc["reqid"] | "";
+  if (!wcIsValidReqId(reqid)) {
+    req->send(400, "application/json", "{\"error\":\"bad reqid\"}");
+    return;
+  }
+  JsonArray cmds = doc["cmds"];
+  if (cmds.isNull()) {
+    req->send(400, "application/json", "{\"error\":\"no commands\"}");
+    return;
+  }
+
+  WCLock lock(_mux);
+  // Replay/Busy exactly as a config save classifies them: a repeated POST is
+  // acknowledged rather than executed twice, and a different sequence while one
+  // is still draining is refused.
+  const WebConfigBatch::State bstate = toSpecState(_batch_state);
+  const bool reqid_matches = (strcmp(reqid, _batch_reqid) == 0);
+  const WebConfigBatch::PostOutcome pre =
+      WebConfigBatch::classifyPost(bstate, reqid_matches, 1 /* count unknown yet */, false);
+  if (pre == WebConfigBatch::PostOutcome::Replay) {
+    StaticJsonDocument<96> ack;
+    ack["state"] = (bstate == WebConfigBatch::State::Done) ? "done" : "running";
+    ack["total"] = _batch_count;
+    ack["reqid"] = (const char*)_batch_reqid;
+    String out;
+    serializeJson(ack, out);
+    req->send(202, "application/json", out);
+    return;
+  }
+  if (pre == WebConfigBatch::PostOutcome::Busy) {
+    StaticJsonDocument<96> bd;
+    bd["error"] = "busy";
+    bd["reqid"] = (const char*)_batch_reqid;
+    String out;
+    serializeJson(bd, out);
+    req->send(409, "application/json", out);
+    return;
+  }
+
+  int count = 0;
+  bool defer_reboot = false, seq_sets_pwd = false, seq_sets_ssid = false;
+  for (JsonVariant v : cmds) {
+    const char* raw = v.as<const char*>();
+    if (!raw) continue;
+    if (count >= MAX_BATCH) {
+      StaticJsonDocument<96> ed;
+      ed["error"] = "too many commands";
+      ed["max"] = MAX_BATCH;
+      String out;
+      serializeJson(ed, out);
+      req->send(413, "application/json", out);
+      return;
+    }
+    // Strip CR/LF so one entry cannot smuggle a second command past the
+    // operator's confirmation, and skip whatever is left blank.
+    BatchEntry& e = _batch[count];
+    int pos = 0;
+    for (const char* p = raw; *p; p++) {
+      if (*p == '\r' || *p == '\n') continue;
+      if (pos == 0 && (*p == ' ' || *p == '\t')) continue;   // leading space
+      if (pos >= (int)sizeof(e.cmd) - 1) {
+        req->send(400, "application/json", "{\"error\":\"command too long\"}");
+        return;
+      }
+      e.cmd[pos++] = *p;
+    }
+    while (pos > 0 && (e.cmd[pos - 1] == ' ' || e.cmd[pos - 1] == '\t')) pos--;
+    e.cmd[pos] = 0;
+    if (pos == 0) continue;
+    // Reject before anything runs, so a sequence never half-applies and then
+    // stops on a command that was never going to work here.
+    const char* why = wcCliUnavailable(e.cmd);
+    if (why) {
+      StaticJsonDocument<256> ed;
+      ed["error"] = why;
+      String out;
+      serializeJson(ed, out);
+      req->send(400, "application/json", out);
+      return;
+    }
+    e.key[0] = 0;                       // CLI entries have no config key
+    if (wcIsDeferredReboot(e.cmd)) defer_reboot = true;
+    if (strncmp(e.cmd, "password ", 9) == 0) seq_sets_pwd = true;
+    if (strncmp(e.cmd, "set wifi.ssid ", 14) == 0) seq_sets_ssid = true;
+    count++;
+  }
+  if (count == 0) {
+    req->send(400, "application/json", "{\"error\":\"no commands\"}");
+    return;
+  }
+
+  // The same invariant handleConfigPost enforces, and for the same reason: the
+  // reboot is what commits first onboarding, and a node that reboots onto the
+  // LAN still holding the factory password is a known credential on someone
+  // else's network. The terminal warned about this client-side, which is a
+  // reminder, not a rule — a pasted script or a direct POST ignored it.
+  if (_mode == MODE_SETUP && _initial_setup && !seq_sets_pwd && !_admin_pwd_set &&
+      (defer_reboot || seq_sets_ssid)) {
+    req->send(400, "application/json",
+              "{\"error\":\"admin password required for initial setup — "
+              "run `password <new-password>` first\"}");
+    return;
+  }
+
+  _batch_kind = BATCH_CLI;
+  _batch_count = count;
+  _batch_next = 0;
+  _batch_reboot = defer_reboot;
+  _batch_reboot_armed = false;
+  _batch_all_ok = true;
+  strncpy(_batch_reqid, reqid, sizeof(_batch_reqid) - 1);
+  _batch_reqid[sizeof(_batch_reqid) - 1] = 0;
+  _batch_state = BATCH_PENDING;         // tick() picks it up on the loop task
+  Serial.printf("WC: cli POST accepted, %d cmds, reboot=%d\n", count, (int)defer_reboot);
+
+  StaticJsonDocument<96> ack;
+  ack["state"] = "running";
+  ack["total"] = count;
+  ack["reqid"] = (const char*)_batch_reqid;
+  String out;
+  serializeJson(ack, out);
+  req->send(202, "application/json", out);
+}
+
+void WebConfigServer::handleCliResult(AsyncWebServerRequest* req) {
+  if (_mode == MODE_OFF) { req->send(503); return; }
+  if (!checkAuth(req)) { req->send(401, "application/json", "{\"error\":\"auth\"}"); return; }
+  if (!req->hasParam("reqid")) {
+    req->send(400, "application/json", "{\"error\":\"bad reqid\"}");
+    return;
+  }
+  String requested_reqid = req->getParam("reqid")->value();
+  if (!wcIsValidReqId(requested_reqid.c_str())) {
+    req->send(400, "application/json", "{\"error\":\"bad reqid\"}");
+    return;
+  }
+  int from = 0;
+  if (req->hasParam("from")) {
+    from = req->getParam("from")->value().toInt();
+    if (from < 0) from = 0;
+  }
+
+  WCLock lock(_mux);
+  // A config save occupying the slot is not this client's sequence, whatever
+  // the reqid says; treat it as unknown rather than serving `set` results
+  // through the terminal's reader.
+  const bool mine = (_batch_kind == BATCH_CLI) &&
+                    (strcmp(requested_reqid.c_str(), _batch_reqid) == 0);
+  const WebConfigBatch::ResultOutcome outcome =
+      WebConfigBatch::classifyResult(toSpecState(_batch_state), mine);
+  if (outcome == WebConfigBatch::ResultOutcome::Idle) {
+    StaticJsonDocument<64> idle;
+    idle["state"] = "idle";
+    idle["reqid"] = requested_reqid;
+    String out;
+    serializeJson(idle, out);
+    req->send(200, "application/json", out);
+    return;
+  }
+  if (outcome == WebConfigBatch::ResultOutcome::Unknown) {
+    req->send(404, "application/json", "{\"error\":\"unknown request\"}");
+    return;
+  }
+
+  // Results stream: hand back whatever has drained since the client's cursor,
+  // capped so the document stays small on the async_tcp task.
+  const int produced = _batch_next;
+  const int page = WebConfigBatch::cliPageCount(from, produced, WebConfigBatch::kCliResultPage);
+  const bool final_read = WebConfigBatch::cliReadIsFinal(toSpecState(_batch_state),
+                                                         from, page, _batch_count);
+  DynamicJsonDocument doc(4096);
+  doc["state"] = final_read ? "done" : "running";
+  doc["reqid"] = (const char*)_batch_reqid;
+  doc["total"] = _batch_count;
+  doc["from"] = from;
+  JsonArray results = doc.createNestedArray("results");
+  for (int i = from; i < from + page; i++) {
+    JsonObject r = results.createNestedObject();
+    // The command is deliberately NOT echoed: it may hold a password or token,
+    // and the client already has the sequence it sent. It matches by index.
+    r["ok"] = !WebConfigBatch::cliReplyIsFailure(_batch[i].reply);
+    r["reply"] = (const char*)_batch[i].reply;
+  }
+  if (final_read) {
+    doc["all_ok"] = _batch_all_ok;
+    const bool rebooting = WebConfigBatch::cliRebootAllowed(_batch_reboot, _batch_all_ok);
+    doc["reboot"] = rebooting;
+    // Tell the operator why a `reboot` they asked for is not happening.
+    if (_batch_reboot && !_batch_all_ok) doc["reboot_withheld"] = true;
+    if (WebConfigBatch::shouldArmConfirmReboot(toSpecState(_batch_state), _batch_reboot,
+                                               _batch_all_ok, _batch_reboot_armed)) {
+      _batch_reboot_armed = true;
+      _reboot_at = WebConfigBatch::confirmRebootAt(millis());
+    }
+  }
   AsyncResponseStream* res = req->beginResponseStream("application/json");
   serializeJson(doc, *res);
   req->send(res);
