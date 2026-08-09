@@ -259,7 +259,7 @@ float MyMesh::getAirtimeBudgetFactor() const {
 }
 
 bool MyMesh::getCADEnabled() const {
-  return true; // hardware CAD before TX (no CLI toggle on companion; enabled by default)
+  return false; // hardware CAD before TX (disabled by default, until configurable)
 }
 
 int MyMesh::getInterferenceThreshold() const {
