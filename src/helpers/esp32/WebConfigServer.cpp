@@ -133,6 +133,17 @@ struct WCLock {
 WebConfigServer* WebConfigServer::_active = NULL;
 AsyncWebServer* WebConfigServer::_host = NULL;
 
+// Out-of-line definitions for the in-class-initialised constants. An in-class
+// initialiser is only a declaration under C++11 (what the xtensa-esp32
+// toolchain builds with), so any use that binds a reference rather than reading
+// the value — ArduinoJson takes its argument as `const T&` — needs the symbol to
+// exist. Comparisons like `count >= MAX_BATCH` never did, which is why this only
+// surfaced when MAX_BATCH started being reported in JSON, and then only on the
+// targets where the compiler happened not to fold it.
+const int WebConfigServer::MAX_BATCH;
+const size_t WebConfigServer::MAX_BODY;
+const uint32_t WebConfigServer::STOP_WARN_MS;
+
 // Protects the permanent route host's active-session pointer and handler
 // references across the loop and async_tcp cores. The critical sections only
 // copy a pointer/update a counter; handlers themselves never run under it.
