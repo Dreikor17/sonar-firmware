@@ -2,6 +2,7 @@
 
 #include "MeshCore.h"
 #include <ArduinoJson.h>
+#include "MQTTPayloadBuilder.h"
 #include <Mesh.h>
 #include <Timezone.h>
 
@@ -153,28 +154,34 @@ public:
     size_t buffer_size
   );
 
-  struct NeighborsMessageEntry {
-    const char* pubkey_hex;
-    float snr;
-    uint32_t heard_secs_ago;
-    const char* scopes;
-    const char* status;
-  };
-
-  /**
-   * Build neighbors table JSON for meshcore/{iata}/{device}/neighbors topic.
-   */
+  // Neighbors table entry + JSON builder. The layout logic lives in the pure,
+  // host-tested MQTTPayloadBuilder; this is the firmware-facing alias/delegate,
+  // matching the status/packet/raw builders.
+  using NeighborsMessageEntry = MQTTPayloadBuilder::NeighborsMessageEntry;
   static int buildNeighborsMessage(
     JsonDocument& doc,
     const char* origin,
     const char* origin_id,
     const char* timestamp,
     const char* self_scopes,
+    const char* self_default_scope,
     const NeighborsMessageEntry* neighbors,
     int neighbor_count,
     char* buffer,
-    size_t buffer_size
+    size_t buffer_size,
+    int total_neighbors = -1,
+    int queried_neighbors = -1,
+    bool truncated = false
   );
+  static size_t measureNeighborsMessageBase(
+    const char* origin,
+    const char* origin_id,
+    const char* timestamp,
+    const char* self_scopes,
+    const char* self_default_scope,
+    int total_neighbors
+  );
+  static size_t measureNeighborsMessageEntry(const NeighborsMessageEntry& neighbor);
 
   /**
    * Convert packet to JSON message

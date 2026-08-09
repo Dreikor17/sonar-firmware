@@ -6,6 +6,7 @@
 #include <helpers/ClientACL.h>
 #include <helpers/MQTTPresets.h>  // For MAX_MQTT_SLOTS (used in NodePrefs struct layout)
 #include <helpers/RegionMap.h>
+#include <helpers/ConfigSerializer.h>
 
 #if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE) || defined(WITH_MQTT_BRIDGE)
 #define WITH_BRIDGE
@@ -20,254 +21,187 @@
 #define LOOP_DETECT_MODERATE  2
 #define LOOP_DETECT_STRICT    3
 
-struct NodePrefs { // persisted to file
-  float airtime_factor;
+class NodePrefs : public ConfigSerializer {
+public:
+  // in-memory backing data
+  float airtime_factor = 0;
   char node_name[32];
-  double node_lat, node_lon;
+  double node_lat = 0, node_lon = 0;
   char password[16];
-  float freq;
-  int8_t tx_power_dbm;
-  uint8_t disable_fwd;
-  uint8_t advert_interval;       // minutes / 2
-  uint8_t rx_boosted_gain;       // power settings (file offset 79)
-  uint8_t flood_advert_interval; // hours
-  float rx_delay_base;
-  float tx_delay_factor;
+  float freq = 0;
+  int8_t tx_power_dbm = 0;
+  uint8_t disable_fwd = 0;
+  uint8_t advert_interval = 0;       // minutes / 2
+  uint8_t flood_advert_interval = 0; // hours
+  float rx_delay_base = 0;
+  float tx_delay_factor = 0;
   char guest_password[16];
-  float direct_tx_delay_factor;
-  uint32_t guard;
-  uint8_t sf;
-  uint8_t cr;
-  uint8_t allow_read_only;
-  uint8_t multi_acks;
-  float bw;
-  uint8_t flood_max;
-  uint8_t flood_max_unscoped;
-  uint8_t flood_max_advert;
-  uint8_t interference_threshold;
-  uint8_t agc_reset_interval; // secs / 4
-  uint8_t path_hash_mode;   // which path mode to use when sending
+  float direct_tx_delay_factor = 0;
+  uint32_t guard = 0;
+  uint8_t sf = 0;
+  uint8_t cr = 0;
+  uint8_t allow_read_only = 0;
+  uint8_t multi_acks = 0;
+  float bw = 0;
+  uint8_t flood_max = 0;
+  uint8_t flood_max_unscoped = 0;
+  uint8_t flood_max_advert = 0;
+  uint8_t interference_threshold = 0;
+  uint8_t agc_reset_interval = 0; // secs / 4
   // Bridge settings
-  uint8_t bridge_enabled; // boolean
-  uint16_t bridge_delay;  // milliseconds (default 500 ms)
-  uint8_t bridge_pkt_src; // 0 = logTx, 1 = logRx (default logRx)
-  uint32_t bridge_baud;   // 9600, 19200, 38400, 57600, 115200 (default 115200)
-  uint8_t bridge_channel; // 1-14 (ESP-NOW only)
+  uint8_t bridge_enabled = 0; // boolean
+  uint16_t bridge_delay = 0;  // milliseconds (default 500 ms)
+  uint8_t bridge_pkt_src = 0; // 0 = logTx, 1 = logRx (fresh installs default to logRx)
+  uint32_t bridge_baud = 0;   // 9600, 19200, 38400, 57600, 115200 (default 115200)
+  uint8_t bridge_channel = 0; // 1-14 (ESP-NOW only)
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
   // Power setting
-  uint8_t powersaving_enabled; // boolean
+  uint8_t powersaving_enabled = 0; // boolean
   // Gps settings
-  uint8_t gps_enabled;
-  uint32_t gps_interval; // in seconds
-  uint8_t advert_loc_policy;
-  uint32_t discovery_mod_timestamp;
-  float adc_multiplier;
+  uint8_t gps_enabled = 0;
+  uint32_t gps_interval = 0; // in seconds
+  uint8_t advert_loc_policy = 0;
+  uint32_t discovery_mod_timestamp = 0;
+  float adc_multiplier = 0;
   char owner_info[120];
+  uint8_t rx_boosted_gain = 0; // power settings
+  uint8_t radio_fem_rxgain = 0; // LoRa FEM RX-gain (LNA); hardware driving is wired per-board
+  uint8_t path_hash_mode = 0;   // which path mode to use when sending
+  uint8_t loop_detect = 0;
+  uint8_t cad_enabled = 0;      // hardware Channel Activity Detection before TX (boolean)
+  uint8_t extra_sf[4];
 
-  uint8_t loop_detect;
+  // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) are not in NodePrefs.
+  // They live in MQTTPrefs, persisted separately to /mqtt_prefs, so this struct
+  // stays aligned with upstream. See struct MQTTPrefs below.
 
-  // Restored from upstream (dropped by the 22eb9b87 revert). Persisted at the same
-  // /com_prefs offsets upstream uses (293, 294) so the file stays upstream-aligned.
-  uint8_t radio_fem_rxgain;  // LoRa FEM RX-gain (LNA); default on. Hardware driving is
-                             // wired per-board in the FEM-restore change; persisted here.
-  uint8_t cad_enabled;       // hardware Channel Activity Detection before TX; default off
+private:
+  class RadioPrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("freq", _parent->freq);
+      def("bw", _parent->bw);
+      def("sf", _parent->sf);
+      def("cr", _parent->cr);
+      def("cad", _parent->cad_enabled);
+      def("int_thr", _parent->interference_threshold);
+      def("rxgain", _parent->rx_boosted_gain);
+      def("fem_rxgain", _parent->radio_fem_rxgain);
+      def("tx", _parent->tx_power_dbm);
+      def("af", _parent->airtime_factor);
+      def("rxdelay", _parent->rx_delay_base);
+      def("f_txdelay", _parent->tx_delay_factor);
+      def("d_txdelay", _parent->direct_tx_delay_factor);
+      def("agc_int", _parent->agc_reset_interval);
+      def("hash_mode", _parent->path_hash_mode);
+      def("multi_ack", _parent->multi_acks);
+    }
+  public:
+    RadioPrefs(NodePrefs* parent) : _parent(parent) { }
+  };
+  RadioPrefs radio;
 
-  // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) were moved out of
-  // NodePrefs into MQTTPrefs (persisted to /mqtt_prefs) so this struct stays
-  // aligned with upstream. See struct MQTTPrefs below.
+  class BridgePrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("en", _parent->bridge_enabled); // boolean
+      def("delay", _parent->bridge_delay);  // milliseconds (default 500 ms)
+      def("src", _parent->bridge_pkt_src); // 0 = logTx, 1 = logRx
+      def("baud", _parent->bridge_baud);   // 9600, 19200, 38400, 57600, 115200 (default 115200)
+      def("ch", _parent->bridge_channel); // 1-14 (ESP-NOW only)
+      def("secret", _parent->bridge_secret, sizeof(_parent->bridge_secret)); // for XOR encryption of bridge packets (ESP-NOW only)
+    }
+  public:
+    BridgePrefs(NodePrefs* parent) : _parent(parent) { }
+  };
+  BridgePrefs bridge;
+
+  class GPSPrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("en", _parent->gps_enabled); // boolean
+      def("int", _parent->gps_interval);   // interval in seconds
+      def("adv_loc", _parent->advert_loc_policy);
+    }
+  public:
+    GPSPrefs(NodePrefs* parent) : _parent(parent) { }
+  };
+  GPSPrefs gps;
+
+  class PowerPrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("adc_mult", _parent->adc_multiplier);
+      def("pwr_sav_en", _parent->powersaving_enabled);
+    }
+  public:
+    PowerPrefs(NodePrefs* parent) : _parent(parent) { }
+  };
+  PowerPrefs power;
+
+  class RepeatPrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("disable", _parent->disable_fwd);
+      def("f_max", _parent->flood_max);
+      def("f_max_uns", _parent->flood_max_unscoped);
+      def("f_max_adv", _parent->flood_max_advert);
+      def("loop", _parent->loop_detect);
+    }
+  public:
+    RepeatPrefs(NodePrefs* parent) : _parent(parent) { }
+  };
+  RepeatPrefs repeat;
+
+  class RoomPrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("rd_only", _parent->allow_read_only);
+    }
+  public:
+    RoomPrefs(NodePrefs* parent) : _parent(parent) { }
+  };
+  RoomPrefs room;
+
+protected:
+  void structure() override {
+    def("name", node_name, sizeof(node_name));
+    def("pass", password, sizeof(password));
+    def("guest", guest_password, sizeof(guest_password));
+    def("owner", owner_info, sizeof(owner_info));
+    def("adv_int", advert_interval);
+    def("f_adv_int", flood_advert_interval);
+    def("lat", node_lat);
+    def("lon", node_lon);
+    def("disc_mod", discovery_mod_timestamp);  // gates 'since'-filtered DISCOVER replies
+    def("radio", radio);
+    def("bridge", bridge);
+    def("gps", gps);
+    def("repeat", repeat);
+    def("room", room);
+    def("power", power);
+  }
+
+public:
+  NodePrefs() : ConfigSerializer(), bridge(this), gps(this), radio(this), power(this), repeat(this), room(this) {
+    node_name[0] = 0;
+    password[0] = 0;
+    guest_password[0] = 0;
+    bridge_secret[0] = 0;
+    owner_info[0] = 0;
+  }
 };
 
 #ifdef WITH_MQTT_BRIDGE
-// Old MQTT preferences layout (pre-slot firmware) — used only for migration detection
-struct OldMQTTPrefs {
-  char mqtt_origin[32];
-  char mqtt_iata[8];
-  uint8_t mqtt_status_enabled;
-  uint8_t mqtt_packets_enabled;
-  uint8_t mqtt_raw_enabled;
-  uint8_t mqtt_tx_enabled;
-  uint32_t mqtt_status_interval;
-  char wifi_ssid[32];
-  char wifi_password[64];
-  uint8_t wifi_power_save;
-  char timezone_string[32];
-  int8_t timezone_offset;
-  char mqtt_server[64];
-  uint16_t mqtt_port;
-  char mqtt_username[32];
-  char mqtt_password[64];
-  uint8_t mqtt_analyzer_us_enabled;
-  uint8_t mqtt_analyzer_eu_enabled;
-  char mqtt_owner_public_key[65];
-  char mqtt_email[64];
-};
-
-// MQTT preferences stored in separate file to avoid conflicts with upstream NodePrefs changes
-struct MQTTPrefs {
-  // MQTT settings
-  char mqtt_origin[32];     // Device name for MQTT topics
-  char mqtt_iata[8];        // IATA code for MQTT topics
-  uint8_t mqtt_status_enabled;   // Enable status messages
-  uint8_t mqtt_packets_enabled;  // Enable packet messages
-  uint8_t mqtt_raw_enabled;      // Enable raw messages
-  uint8_t mqtt_tx_enabled;       // Enable TX packet uplinking
-  uint32_t mqtt_status_interval; // Status publish interval (ms)
-
-  // WiFi settings
-  char wifi_ssid[32];       // WiFi SSID
-  char wifi_password[64];  // WiFi password
-  uint8_t wifi_power_save; // WiFi power save mode: 0=min, 1=none, 2=max (default: 1=none)
-
-  // Timezone settings
-  char timezone_string[32]; // Timezone string (e.g., "America/Los_Angeles")
-  int8_t timezone_offset;   // Timezone offset in hours (-12 to +14) - fallback
-
-  // Slot presets (up to MAX_MQTT_SLOTS)
-  char mqtt_slot_preset[MAX_MQTT_SLOTS][24]; // e.g. "analyzer-us", "meshmapper", "custom", "none"
-
-  // Per-slot custom broker settings (only used when preset is "custom")
-  char mqtt_slot_host[MAX_MQTT_SLOTS][64];
-  uint16_t mqtt_slot_port[MAX_MQTT_SLOTS];
-  char mqtt_slot_username[MAX_MQTT_SLOTS][32];
-  char mqtt_slot_password[MAX_MQTT_SLOTS][64];
-
-  // Shared authentication
-  char mqtt_owner_public_key[65]; // Owner public key (hex string)
-  char mqtt_email[64]; // Owner email address
-
-  // Per-slot extended fields
-  char mqtt_slot_token[MAX_MQTT_SLOTS][48];    // Per-slot token (e.g., MeshRank account token)
-  char mqtt_slot_topic[MAX_MQTT_SLOTS][96];    // Per-slot custom topic template (custom preset only)
-  char mqtt_slot_audience[MAX_MQTT_SLOTS][64];  // JWT audience (non-empty enables JWT auth for custom slots)
-
-  uint8_t mqtt_rx_enabled;       // Enable RX packet uplinking (default: on)
-  char mqtt_ntp_server[64];      // Custom NTP server; empty = pool.ntp.org
-
-  // Observer non-MQTT settings (moved out of NodePrefs so this file stays aligned
-  // with upstream). New fields are appended here so a shorter /mqtt_prefs payload
-  // from an earlier v1 firmware still loads; the missing tail keeps its default.
-  uint8_t snmp_enabled;            // boolean
-  char snmp_community[24];         // community string (default "public")
-  uint8_t radio_watchdog_minutes;  // 0=disabled, 1-120 minutes (observer-only radio recovery)
-  uint8_t alert_enabled;           // 0 = off (default)
-  char alert_psk_hex[33];          // 32 hex chars + null; empty = alerts disabled
-  uint16_t alert_wifi_minutes;     // WiFi-down threshold (0 = disabled), default 30
-  uint16_t alert_mqtt_minutes;     // MQTT-down threshold (0 = disabled), default 240
-  uint16_t alert_min_interval_min; // min minutes between same-fault alerts, default 60
-  char alert_hashtag[24];          // readback for `get alert.hashtag`
-  char alert_region[31];           // optional region override; empty = default_scope
-
-  // Neighbors publishing (PSRAM boards only). Appended at the end of the observer
-  // tail so a shorter /mqtt_prefs payload from earlier firmware still loads with
-  // these defaulting off (see applyMQTTDefaults); keeps the format at VERSION 1.
-  uint8_t mqtt_neighbors_enabled;    // Periodic neighbors/scopes MQTT publish (PSRAM boards only)
-  uint32_t mqtt_neighbors_interval;  // Neighbors publish interval (ms), default 24h, range 12-336h
-};
-
-// Neighbor discovery is scheduled with the wrap-safe millis() helpers, whose
-// signed-delta comparison requires intervals below INT32_MAX milliseconds.
-// Two weeks stays comfortably inside that range.
-static const uint32_t MQTT_NEIGHBORS_MIN_INTERVAL_HOURS = 12;
-static const uint32_t MQTT_NEIGHBORS_MAX_INTERVAL_HOURS = 336;
-static const uint32_t MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS = 24;
-static const uint32_t MQTT_NEIGHBORS_MIN_INTERVAL_MS = MQTT_NEIGHBORS_MIN_INTERVAL_HOURS * 3600000UL;
-static const uint32_t MQTT_NEIGHBORS_MAX_INTERVAL_MS = MQTT_NEIGHBORS_MAX_INTERVAL_HOURS * 3600000UL;
-static const uint32_t MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS = MQTT_NEIGHBORS_DEFAULT_INTERVAL_HOURS * 3600000UL;
-
-// /mqtt_prefs is written with an 8-byte header so the format is self-describing.
-// Files with no header are legacy (versionless) and detected by size in loadMQTTPrefs.
-// The magic leads with a non-ASCII byte so it can never collide with the first
-// bytes of a legacy file, whose payload starts with the mqtt_origin string.
-static const uint8_t MQTT_PREFS_MAGIC[4] = {0xF5, 'M', 'Q', 'P'};
-static const uint16_t MQTT_PREFS_VERSION = 1;  // bump when the MQTTPrefs payload layout changes incompatibly
-
-struct MQTTPrefsHeader {
-  uint8_t  magic[4];    // MQTT_PREFS_MAGIC
-  uint16_t version;     // MQTT_PREFS_VERSION
-  uint16_t payload_len; // sizeof(MQTTPrefs) at write time (sanity / forward-compat)
-};
-
-// 3-slot MQTTPrefs layout — used for migrating from 3-slot to 6-slot format.
-// Changing array sizes from [3] to [6] shifts all field offsets, so raw file.read()
-// into the new struct would corrupt data. This struct preserves the old binary layout.
-struct ThreeSlotMQTTPrefs {
-  char mqtt_origin[32];
-  char mqtt_iata[8];
-  uint8_t mqtt_status_enabled;
-  uint8_t mqtt_packets_enabled;
-  uint8_t mqtt_raw_enabled;
-  uint8_t mqtt_tx_enabled;
-  uint32_t mqtt_status_interval;
-  char wifi_ssid[32];
-  char wifi_password[64];
-  uint8_t wifi_power_save;
-  char timezone_string[32];
-  int8_t timezone_offset;
-  char mqtt_slot_preset[3][24];
-  char mqtt_slot_host[3][64];
-  uint16_t mqtt_slot_port[3];
-  char mqtt_slot_username[3][32];
-  char mqtt_slot_password[3][64];
-  char mqtt_owner_public_key[65];
-  char mqtt_email[64];
-  uint8_t _legacy_analyzer_us_enabled;
-  uint8_t _legacy_analyzer_eu_enabled;
-  char _legacy_mqtt_server[64];
-  uint16_t _legacy_mqtt_port;
-  char _legacy_mqtt_username[32];
-  char _legacy_mqtt_password[64];
-  char mqtt_slot_token[3][48];
-  char mqtt_slot_topic[3][96];
-};
-
-// Versionless 6-slot layout as shipped on mqtt-bridge-implementation-flex (the
-// several-thousand-device deployed fleet). This is the current MQTTPrefs minus the
-// observer tail, and it still carries the now-removed `_legacy_*` fields mid-struct.
-// loadMQTTPrefs reads a headerless file of this size into this struct, then
-// field-copies (dropping `_legacy_*`) into the compact versioned MQTTPrefs.
-struct Legacy6SlotMQTTPrefs {
-  char mqtt_origin[32];
-  char mqtt_iata[8];
-  uint8_t mqtt_status_enabled;
-  uint8_t mqtt_packets_enabled;
-  uint8_t mqtt_raw_enabled;
-  uint8_t mqtt_tx_enabled;
-  uint32_t mqtt_status_interval;
-  char wifi_ssid[32];
-  char wifi_password[64];
-  uint8_t wifi_power_save;
-  char timezone_string[32];
-  int8_t timezone_offset;
-  char mqtt_slot_preset[MAX_MQTT_SLOTS][24];
-  char mqtt_slot_host[MAX_MQTT_SLOTS][64];
-  uint16_t mqtt_slot_port[MAX_MQTT_SLOTS];
-  char mqtt_slot_username[MAX_MQTT_SLOTS][32];
-  char mqtt_slot_password[MAX_MQTT_SLOTS][64];
-  char mqtt_owner_public_key[65];
-  char mqtt_email[64];
-  uint8_t _legacy_analyzer_us_enabled;
-  uint8_t _legacy_analyzer_eu_enabled;
-  char _legacy_mqtt_server[64];
-  uint16_t _legacy_mqtt_port;
-  char _legacy_mqtt_username[32];
-  char _legacy_mqtt_password[64];
-  char mqtt_slot_token[MAX_MQTT_SLOTS][48];
-  char mqtt_slot_topic[MAX_MQTT_SLOTS][96];
-  char mqtt_slot_audience[MAX_MQTT_SLOTS][64];
-  uint8_t mqtt_rx_enabled;
-  char mqtt_ntp_server[64];
-};
-
-// The legacy layouts above describe files already written to the deployed fleet's
-// flash, so their sizes are frozen forever — loadMQTTPrefs() tells the eras apart
-// by file size and reads each file as a raw struct dump. These asserts pin the
-// layouts on every target toolchain; if one fires, the compiler (or an edit to a
-// legacy struct or MAX_MQTT_SLOTS) has changed a layout and fleet files would be
-// read at wrong offsets.
-static_assert(sizeof(MQTTPrefsHeader) == 8, "versioned /mqtt_prefs header must stay 8 bytes");
-static_assert(sizeof(OldMQTTPrefs) == 472, "frozen pre-slot /mqtt_prefs layout changed");
-static_assert(sizeof(ThreeSlotMQTTPrefs) == 1464, "frozen 3-slot /mqtt_prefs layout changed");
-static_assert(sizeof(Legacy6SlotMQTTPrefs) == 2904, "frozen deployed-fleet /mqtt_prefs layout changed");
+#include <helpers/MQTTPrefsStorage.h>
+static_assert(MQTT_PREFS_SLOT_COUNT == MAX_MQTT_SLOTS,
+              "MQTT prefs layout and slot count must change together");
 
 // Observer settings captured from the trailing block of an old-format /com_prefs
 // (fork firmware that predates the NodePrefs -> MQTTPrefs split). loadPrefsInt()
@@ -359,15 +293,33 @@ public:
     return false;
   };
 
+  // Browser-based config portal (ESP32 WITH_MQTT_BRIDGE builds override).
+  // force_ap=true requests the SoftAP setup portal even when WiFi is configured.
+  // Returns true if handled (reply filled either way when true).
+  virtual bool startWebConfig(bool force_ap, char* reply) {
+    (void)force_ap; (void)reply;
+    return false;
+  };
+  virtual bool stopWebConfig(char* reply) {
+    (void)reply;
+    return false;
+  };
+
   // Probe all configured NTP servers for connectivity (verbose=serial console gets a
   // detailed table; otherwise reply gets a compact "<server> ok|fail" list).
   virtual bool runMqttNtpDiag(char* reply, size_t reply_size, bool verbose) {
     return false; // WITH_MQTT_BRIDGE builds override
   };
 
-  virtual void setRxBoostedGain(bool enable) {
-    // no op by default
+  virtual bool setRxBoostedGain(bool enable) {
+    return false; // CommonCLI reports unsupported if not overridden by wrapper
   };
+
+  #if defined(USE_LR2021)
+  virtual bool configSideDetectors(const uint8_t sideDetSFs[], uint8_t num, float bw) {
+    return false; // Override in wrapper
+  }
+  #endif
 
   // Fault-alert channel hooks (see NodePrefs::alert_*). The default no-op
   // implementations keep CLI commands harmless on builds that don't wire up
@@ -388,6 +340,12 @@ public:
   }
 };
 
+#ifdef WITH_MQTT_BRIDGE
+namespace MQTTPrefsAtomicStore {
+class LegacyUpgradeGate;
+}
+#endif
+
 class CommonCLI {
   mesh::RTCClock* _rtc;
   NodePrefs* _prefs;
@@ -400,19 +358,18 @@ class CommonCLI {
 #ifdef WITH_MQTT_BRIDGE
   MQTTPrefs _mqtt_prefs;
   LegacyObserverTail _legacy_tail;
-  // /mqtt_prefs carries a version newer than this firmware understands (a downgrade).
-  // The in-memory prefs run on defaults and saveMQTTPrefs() must not overwrite the
-  // file, or the first `set` command would destroy the newer config.
+  // /mqtt_prefs is newer, corrupt, or temporarily unreadable. The in-memory prefs
+  // run on defaults and saveMQTTPrefs() must not overwrite the source file.
   bool _mqtt_prefs_hold = false;
 #endif
-  bool _com_prefs_needs_upgrade = false;  // old-format /com_prefs detected; rewrite once after load
+  bool _com_prefs_needs_upgrade = false;  // old-format legacy prefs detected; rewrite once after load
 
   mesh::RTCClock* getRTCClock() { return _rtc; }
   void savePrefs();
   void loadPrefsInt(FILESYSTEM* _fs, const char* filename);
 #ifdef WITH_MQTT_BRIDGE
-  void loadMQTTPrefs(FILESYSTEM* fs);
-  void saveMQTTPrefs(FILESYSTEM* fs);
+  void loadMQTTPrefs(FILESYSTEM* fs, MQTTPrefsAtomicStore::LegacyUpgradeGate* legacy_upgrade);
+  bool saveMQTTPrefs(FILESYSTEM* fs);
 #endif
 
   void handleRegionCmd(char* command, char* reply);
@@ -434,7 +391,7 @@ public:
       : _board(&board), _rtc(&rtc), _sensors(&sensors), _region_map(&region_map), _acl(&acl), _prefs(prefs), _callbacks(callbacks) { }
 
   void loadPrefs(FILESYSTEM* _fs);
-  void savePrefs(FILESYSTEM* _fs);
+  bool savePrefs(FILESYSTEM* _fs, bool save_mqtt = true);
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   mesh::MainBoard* getBoard() { return _board; }
   uint8_t buildAdvertData(uint8_t node_type, uint8_t* app_data);

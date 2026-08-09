@@ -3,6 +3,9 @@ PIO_CONFIG_JSON=$(pio project config --json-output)
 
 #!/usr/bin/env bash
 
+# exit when any command fails
+set -e
+
 global_usage() {
   cat - <<EOF
 Usage:
@@ -33,6 +36,9 @@ $ sh build.sh build-repeater-firmwares
 
 Build all chat room server firmwares
 $ sh build.sh build-room-server-firmwares
+
+Build all kiss radio firmwares
+$ sh build.sh build-kiss-radio-firmwares
 
 Environment Variables:
   DISABLE_DEBUG=1: Disables all debug logging flags (MESH_DEBUG, MESH_PACKET_LOGGING, etc.)
@@ -143,14 +149,15 @@ build_firmware() {
   fi
 
   # set firmware version string (used for the output filename)
-  # e.g: v1.0.0-abcdef — or v1.16.0.5-abcdef with a build number. The build
-  # number is now IN the filename so the web flasher's Version dropdown (parsed
-  # from the asset name by the /releases Worker) shows the true published build,
-  # matching the embedded version that `ver` reports. Every filename parser
-  # (flasher gen-slim-manifests ASSET_RE, the /releases Worker VERSION_RE,
-  # flasher.js stale-URL recovery) accepts an optional 4th ".<n>" component
-  # between version and hash.
-  FIRMWARE_VERSION_STRING="${FIRMWARE_VERSION}${BUILD_NUMBER_SUFFIX}-${COMMIT_HASH}"
+  # e.g: v1.0.0-abcdef — or v1.16.0.5-dev-abcdef with a build number and the
+  # dev channel's FILENAME_CHANNEL_TAG. The build number is now IN the filename
+  # so the web flasher's Version dropdown (parsed from the asset name by the
+  # /releases Worker) shows the true published build, matching the embedded
+  # version that `ver` reports. Every filename parser (flasher gen-slim-manifests
+  # ASSET_RE, the /releases Worker VERSION_RE, flasher.js stale-URL recovery)
+  # accepts an optional 4th ".<n>" component followed by the lowercase
+  # (?:-[a-z]+)? channel tag between version and hash.
+  FIRMWARE_VERSION_STRING="${FIRMWARE_VERSION}${BUILD_NUMBER_SUFFIX}${FILENAME_CHANNEL_TAG:-}-${COMMIT_HASH}"
 
   # craft filename
   # e.g: RAK_4631_Repeater-v1.0.0-SHA
@@ -159,22 +166,47 @@ build_firmware() {
   # Tag the *embedded* version for observer builds, e.g. v1.0.0-observer-abcdef,
   # so `ver`, the MQTT firmware_version/client_version, and SNMP all identify the
   # fork. The filename above carries the same version + build number but no
-  # variant tag: the env name already contains "observer", and the web flasher
-  # keys off that existing pattern.
+  # variant/channel tag: the env name already contains "observer", and the web
+  # flasher keys off that existing pattern.
   VARIANT_TAG=""
   case "$1" in
     *observer*) VARIANT_TAG="-observer" ;;
   esac
 
-  # Embedded version: base + build number (4th component) + variant tag + hash,
-  # e.g. v1.16.0.5-observer-abcdef, so the node reports its build and `ota check`
-  # can show how many builds behind it is.
+  # Optional release-channel marker (e.g. OTA_CHANNEL_TAG=beta -> "-observer-beta"),
+  # so `ver` / MQTT firmware_version / SNMP identify which channel a node runs
+  # without having to infer it from log behavior. Safe for the OTA version logic:
+  # ota_parseVersion() reads only up to the first '-' and ota_extractHash() takes
+  # the token after the LAST '-', so extra tags in between change neither.
+  if [ -n "$OTA_CHANNEL_TAG" ]; then
+    VARIANT_TAG="${VARIANT_TAG}-${OTA_CHANNEL_TAG}"
+  fi
+
+  # Embedded version: base + build number (4th component) + variant/channel tag
+  # + hash, e.g. v1.16.0.5-observer-abcdef, so the node reports its build and
+  # `ota check` can show how many builds behind it is.
   EMBEDDED_VERSION_STRING="${FIRMWARE_VERSION}${BUILD_NUMBER_SUFFIX}${VARIANT_TAG}-${COMMIT_HASH}"
+
+  # Release channel. The observer pull-OTA fetches its slim per-variant manifest
+  # from <OTA_MANIFEST_BASE>/<OTA_VARIANT>.json, so this URL IS the channel: a
+  # device only ever sees updates published under the base it was built with.
+  # Override OTA_MANIFEST_BASE_URL to publish a parallel channel (e.g. beta);
+  # unset gives the production channel.
+  #
+  # Deliberately injected here rather than declared in variants/*/platformio.ini
+  # (where it used to be duplicated 28 times), for symmetry with OTA_VARIANT and
+  # so a plain `pio run` leaves BOTH macros undefined — which is what makes
+  # ESP32Board.cpp's "ERR: OTA not configured (build via build.sh)" guard fire on
+  # dev builds. Do not add a default in a header: that would silently arm OTA on
+  # locally built firmware. Note that PLATFORMIO_BUILD_FLAGS cannot reliably
+  # override a -D coming from build_flags (SCons reorders -U/-D), which is why
+  # the .ini declarations were removed rather than overridden.
+  OTA_MANIFEST_BASE_URL="${OTA_MANIFEST_BASE_URL:-https://observer.gessaman.com/v}"
 
   # add firmware version info to end of existing platformio build flags in environment vars.
   # OTA_VARIANT is the env name ($1) — it selects this build's slim per-variant manifest
   # (<OTA_MANIFEST_BASE>/<OTA_VARIANT>.json) that the observer pull-OTA fetches.
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${EMBEDDED_VERSION_STRING}\"' -DOTA_VARIANT='\"$1\"'"
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${EMBEDDED_VERSION_STRING}\"' -DOTA_VARIANT='\"$1\"' -DOTA_MANIFEST_BASE='\"${OTA_MANIFEST_BASE_URL}\"'"
 
   # disable debug flags if requested
   disable_debug_flags
@@ -268,6 +300,17 @@ build_room_server_firmwares() {
 
 }
 
+build_kiss_modem_firmwares() {
+
+#  # build specific kiss radio firmwares
+#  build_firmware "Heltec_v3_kiss_modem"
+#  build_firmware "RAK_4631_kiss_modem"
+
+  # build all room server firmwares
+  build_all_firmwares_by_suffix "_kiss_modem"
+
+}
+
 build_firmwares() {
   build_companion_firmwares
   build_repeater_firmwares
@@ -304,4 +347,13 @@ elif [[ $1 == "build-repeater-firmwares" ]]; then
   build_repeater_firmwares
 elif [[ $1 == "build-room-server-firmwares" ]]; then
   build_room_server_firmwares
+elif [[ $1 == "build-kiss-radio-firmwares" ]]; then
+  build_kiss_modem_firmwares
+elif [[ $1 == "get-companion-firmwares-to-build" ]]; then
+  get_pio_envs_ending_with_string "_companion_radio_usb"
+  get_pio_envs_ending_with_string "_companion_radio_ble"
+elif [[ $1 == "get-repeater-firmwares-to-build" ]]; then
+  get_pio_envs_ending_with_string "_repeater"
+elif [[ $1 == "get-room-server-firmwares-to-build" ]]; then
+  get_pio_envs_ending_with_string "_room_server"
 fi

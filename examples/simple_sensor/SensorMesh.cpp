@@ -711,7 +711,6 @@ SensorMesh::SensorMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::Millise
   set_radio_at = revert_radio_at = 0;
 
   // defaults
-  memset(&_prefs, 0, sizeof(_prefs));
   _prefs.airtime_factor = 1.0;    // one half
   _prefs.rx_delay_base =   0.0f;  // turn off by default, was 10.0;
   _prefs.tx_delay_factor = 0.5f;   // was 0.25f
@@ -737,6 +736,7 @@ SensorMesh::SensorMesh(mesh::MainBoard& board, mesh::Radio& radio, mesh::Millise
   _prefs.gps_enabled = 0;
   _prefs.gps_interval = 0;
   _prefs.advert_loc_policy = ADVERT_LOC_PREFS;
+  _prefs.radio_fem_rxgain = 1;
 
   memset(default_scope.key, 0, sizeof(default_scope.key));
 }

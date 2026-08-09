@@ -35,33 +35,17 @@ void HeltecTrackerV2Board::begin() {
     loRaFEMControl.setRxModeEnable();
   }
 
-  void HeltecTrackerV2Board::enterDeepSleep(uint32_t secs, int pin_wake_btn) {
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+  void HeltecTrackerV2Board::powerOff() {
+    // Turn off PA. Guarded because this board file is also compiled for the
+    // heltec_tracker_v1_1 envs, which do not define P_LORA_PA_POWER (it is set
+    // only in variants/heltec_tracker_v2/platformio.ini). Same guard idiom
+    // LoRaFEMControl.cpp already uses for this macro.
+#if defined(P_LORA_PA_POWER)
+    digitalWrite(P_LORA_PA_POWER, LOW);
+    rtc_gpio_hold_en((gpio_num_t)P_LORA_PA_POWER);
+#endif
 
-    // Make sure the DIO1 and NSS GPIOs are hold on required levels during deep sleep
-    rtc_gpio_set_direction((gpio_num_t)P_LORA_DIO_1, RTC_GPIO_MODE_INPUT_ONLY);
-    rtc_gpio_pulldown_en((gpio_num_t)P_LORA_DIO_1);
-
-    rtc_gpio_hold_en((gpio_num_t)P_LORA_NSS);
-
-    loRaFEMControl.setRxModeEnableWhenMCUSleep();//It also needs to be enabled in receive mode
-
-    if (pin_wake_btn < 0) {
-      esp_sleep_enable_ext1_wakeup( (1L << P_LORA_DIO_1), ESP_EXT1_WAKEUP_ANY_HIGH);  // wake up on: recv LoRa packet
-    } else {
-      esp_sleep_enable_ext1_wakeup( (1L << P_LORA_DIO_1) | (1L << pin_wake_btn), ESP_EXT1_WAKEUP_ANY_HIGH);  // wake up on: recv LoRa packet OR wake btn
-    }
-
-    if (secs > 0) {
-      esp_sleep_enable_timer_wakeup(secs * 1000000);
-    }
-
-    // Finally set ESP32 into sleep
-    esp_deep_sleep_start();   // CPU halts here and never returns!
-  }
-
-  void HeltecTrackerV2Board::powerOff()  {
-    enterDeepSleep(0);
+    ESP32Board::powerOff();
   }
 
   uint16_t HeltecTrackerV2Board::getBattMilliVolts()  {
@@ -80,7 +64,14 @@ void HeltecTrackerV2Board::begin() {
   }
 
   const char* HeltecTrackerV2Board::getManufacturerName() const {
+    // The v1.1 environment reuses this V2 board implementation (same variant
+    // dir), so report the correct identity per build flag — this string feeds
+    // WebConfig and MQTT status/board metadata.
+#ifdef HELTEC_TRACKER_V1_1
+    return "Heltec Tracker V1.1";
+#else
     return "Heltec Tracker V2";
+#endif
   }
 
   bool HeltecTrackerV2Board::setLoRaFemLnaEnabled(bool enable) {

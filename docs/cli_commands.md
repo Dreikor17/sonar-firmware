@@ -19,6 +19,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
   - [GPS](#gps-when-gps-support-is-compiled-in)
   - [Sensors](#sensors-when-sensor-support-is-compiled-in)
   - [Bridge](#bridge-when-bridge-support-is-compiled-in)
+  - [Ethernet](#ethernet-when-ethernet-support-is-compiled-in)
 
 ---
 
@@ -28,11 +29,24 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 **Usage:** 
 - `reboot`
 
+**Note:** No reply is sent.
+
+---
+
+### Power-off the node
+**Usage:**
+- `poweroff`, or
+- `shutdown`
+
+**Note:** No reply is sent.
+
 ---
 
 ### Reset the clock and reboot
 **Usage:**
 - `clkreboot`
+
+**Note:** No reply is sent.
 
 ---
 
@@ -114,16 +128,18 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
-### Discover neighbor scopes and publish to MQTT (PSRAM observer builds)
+### Discover neighbor scopes (MQTT observer, PSRAM only)
+
+Refreshes the zero-hop neighbor table, then queries each neighbor for its region
+scopes and publishes the assembled table to the MQTT `neighbors` topic once.
 
 **Usage:**
 - `discover.scopes`
 
-Queries cached zero-hop repeater neighbors for flood-allowed region scopes (`ANON_REQ_TYPE_REGIONS`), then publishes a JSON snapshot to each configured MQTT slot's `neighbors` topic. Includes this node's own scopes in the `self` object.
-
-If a zero-hop neighbor discovery is already collecting responses — from `discover.neighbors` or from the periodic `mqtt.neighbors` refresh — the scope queries are queued until its 60-second response window ends, so they run against the refreshed table rather than the stale cache. The reply reports the wait, e.g. `OK - scopes queued (47s discovery remaining)`. A queued request is not cancelled by `set mqtt.neighbors off`.
-
-**Note:** Requires `WITH_MQTT_BRIDGE`, `MAX_NEIGHBOURS`, and PSRAM (`BOARD_HAS_PSRAM`). Returns `Err - not supported (requires PSRAM)` on other builds.
+**Note:** Requires an MQTT observer build with the neighbors feature compiled in
+(all PSRAM boards, plus non-PSRAM boards built with `MQTT_NEIGHBORS_WITHOUT_PSRAM`).
+Elsewhere it replies `Err - neighbors not enabled in this build`. If a
+`discover.neighbors` refresh is already in flight, the scope pass is queued behind it.
 
 ---
 
@@ -275,6 +291,20 @@ If a zero-hop neighbor discovery is already collecting responses — from `disco
 
 ---
 
+#### View or change the LoRa FEM receive-path gain state on supported boards
+**Usage:**
+- `get radio.fem.rxgain`
+- `set radio.fem.rxgain <state>`
+
+**Parameters:**
+- `state`: `on`|`off`
+
+**Notes:**
+- This controls the external LoRa FEM receive-path LNA where the board supports it.
+- This is separate from `radio.rxgain`, which controls the radio chip receive gain mode.
+
+---
+
 ### System
 
 #### View or change this node's name
@@ -289,7 +319,7 @@ If a zero-hop neighbor discovery is already collecting responses — from `disco
 
 **Default:** Varies by board
 
-**Note:** Max length varies. If a location is set, the max length is 24 bytes; 32 otherwise. Emoji and unicode characters may take more than one byte.
+**Note:** Advertised names can use up to 23 bytes when location is included and 31 bytes otherwise. Emoji and Unicode characters may take more than one byte. Names that exceed the available advert space are truncated at a valid UTF-8 code point boundary.
 
 ---
 
@@ -400,6 +430,11 @@ If a zero-hop neighbor discovery is already collecting responses — from `disco
 
 #### View this node's public key
 **Usage:** `get public.key`
+
+---
+
+#### View this node's firmware version
+**Usage:** `ver`
 
 ---
 
@@ -571,6 +606,20 @@ If a zero-hop neighbor discovery is already collecting responses — from `disco
 
 ---
 
+#### Enable or disable hardware Channel Activity Detection (CAD)
+**Usage:**
+- `get cad`
+- `set cad <on|off>`
+
+**Description:** When enabled, the radio performs a hardware Channel Activity Detection scan before transmitting and defers if the channel is busy. Runs independently of `int.thresh` — either, both, or none may be active.
+
+**Parameters:**
+- `on|off`: Enable or disable hardware CAD
+
+**Default:** `off`
+
+---
+
 #### View or change the AGC Reset Interval
 **Usage:**
 - `get agc.reset.interval`
@@ -653,10 +702,21 @@ If a zero-hop neighbor discovery is already collecting responses — from `disco
 **Parameters:**
 - `value`: Maximum flood hop count (0-64) for a packet without a scope (no region set)
 
-**Default:** `0xFF` - indicates it hasn't been set, will track flood.max until it is.
+**Default:** `64` - (`0xFF` indicates it hasn't been set, will track flood.max until it is.)
 
 **Note:** An alternative to `region denyf *`, setting `flood.max.unscoped` to a lower value such as `3` would allow for local unscoped messages to propagate, while preventing noisy neighbors from flooding a local region.
 
+---
+
+#### Limit the number of hops for an advert flood message
+**Usage:**
+- `get flood.max.advert`
+- `set flood.max.advert <value>`
+
+**Parameters:**
+- `value`: Maximum flood hop count (0-64) for an advert packet
+
+**Default:** `8`
 
 ---
 
@@ -1090,6 +1150,43 @@ region save
 
 ---
 
+#### View or change periodic neighbors publishing (MQTT observer, PSRAM only)
+**Usage:**
+- `get mqtt.neighbors`
+- `set mqtt.neighbors <on|off>`
+
+**Parameters:**
+- `on`: periodically discover neighbor scopes and publish the neighbor table to the `neighbors` topic
+- `off`: disable periodic neighbors publishing
+
+**Default:** `off`
+
+> **Note:** Requires a build with the neighbors feature compiled in (all PSRAM
+> boards, plus non-PSRAM boards built with `MQTT_NEIGHBORS_WITHOUT_PSRAM`);
+> elsewhere this replies `Err - neighbors not enabled in this build`. Non-PSRAM
+> builds publish at most 20 neighbours per pass to bound internal-DRAM use, and
+> set `truncated` with the true `total_neighbors` when the table is larger.
+> The setting is read live by the mesh
+> loop — no restart required; enabling it triggers a discovery on the next pass.
+> While enabled, `get mqtt.status` gains a trailing `nbr: <next>/<last>` field
+> (time to next publish, and how the last publish went).
+
+---
+
+#### View or change the neighbors publish interval (MQTT observer, PSRAM only)
+**Usage:**
+- `get mqtt.neighbors.interval`
+- `set mqtt.neighbors.interval <hours>`
+
+**Parameters:**
+- `hours`: how often to publish the neighbor table (12–336, default 24)
+
+**Default:** `24` (hours)
+
+> **Note:** Out-of-range values are rejected (not clamped). Requires a PSRAM board.
+
+---
+
 #### View or change the NTP server (MQTT observer only)
 **Usage:**
 - `get mqtt.ntp`
@@ -1114,28 +1211,6 @@ region save
 - **Over LoRa:** returns a compact `<server> ok|fail` list, one per line.
 
 Requires WiFi connected and the MQTT bridge running.
-
----
-
-#### Periodic neighbors/scopes MQTT publish (PSRAM observer builds)
-
-**Usage:**
-- `get mqtt.neighbors`
-- `set mqtt.neighbors on|off`
-- `get mqtt.neighbors.interval`
-- `set mqtt.neighbors.interval <hours>`
-
-**Parameters:**
-- `hours`: Interval between automatic `discover.scopes` runs (**12-336**, default **24**)
-
-**Note:** Requires PSRAM. Publishes to each configured MQTT slot's `neighbors` topic at QoS 1 (retained only when that preset allows it). Use `discover.scopes` for a one-shot publish.
-
-Automatic publishes run in two stages: first the repeater performs the same 60-second zero-hop refresh as `discover.neighbors`, then it queries the refreshed neighbors for scopes and publishes after those queries complete.
-
-While enabled, `get mqtt.status` reports the schedule as a trailing `nbr: <next>/<last>` field, e.g. `nbr: 3h12m/ok`:
-
-- `<next>` — time until the next automatic publish (`3h12m`, `12m`, `45s`), or `active` while a refresh or scope query is in flight, or `due` when a publish is waiting on the bridge or WiFi to come up.
-- `<last>` — result of the most recent publish attempt: `ok`, `failed`, or `none` if none has been attempted since boot.
 
 ---
 
@@ -1201,5 +1276,27 @@ While enabled, `get mqtt.status` reports the schedule as a trailing `nbr: <next>
 **Usage:** `get pwrmgt.bootmv`
 
 **Note:** Returns an error on boards without power management support.
+
+---
+
+### Ethernet (when Ethernet support is compiled in)
+
+Ethernet support is available on RAK4631 boards with a RAK13800 (W5100S) Ethernet module. Use the `_ethernet` firmware variants (e.g. `RAK_4631_repeater_ethernet`) to enable this feature.
+
+---
+
+#### View Ethernet connection status
+**Usage:**
+- `eth.status`
+
+**Output:**
+- `ETH: <ip>:<port>` when connected (e.g. `ETH: 192.168.1.50:23`)
+- `ETH: not connected` when Ethernet is not active
+
+**Notes:**
+- Available on repeater and room server firmware only. Companion radio ethernet firmware does not expose a CLI.
+- The Ethernet interface obtains an IP address via DHCP automatically on boot.
+- A TCP server listens on port 23 (default) for CLI connections.
+- Connect with any TCP client (e.g. `nc`, PuTTY) to access the same CLI available over serial.
 
 ---
