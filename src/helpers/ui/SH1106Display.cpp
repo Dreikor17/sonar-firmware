@@ -24,18 +24,36 @@ bool SH1106Display::begin()
 {
   // Wire must already be initialised by board.begin() before this is called.
   // Boards with non-standard SH1106 addresses should define DISPLAY_ADDRESS
-  // in their variant/platformio configuration.
-  return i2c_probe(Wire, DISPLAY_ADDRESS) && display.begin(DISPLAY_ADDRESS, true);
+  // in their variant/platformio configuration. Some board revisions may have
+  // different solder-bridge address configurations, so variants can also
+  // provide DISPLAY_ADDRESS_ALT as a fallback.
+  _initialized = false;
+  if (i2c_probe(Wire, DISPLAY_ADDRESS) && display.begin(DISPLAY_ADDRESS, true)) {
+    _initialized = true;
+  }
+#ifdef DISPLAY_ADDRESS_ALT
+  if (!_initialized && DISPLAY_ADDRESS_ALT != DISPLAY_ADDRESS &&
+      i2c_probe(Wire, DISPLAY_ADDRESS_ALT) &&
+      display.begin(DISPLAY_ADDRESS_ALT, true)) {
+    _initialized = true;
+  }
+#endif
+  return _initialized;
 }
 
 void SH1106Display::turnOn()
 {
+  if (!_initialized) return;
   display.oled_command(SH110X_DISPLAYON);
   _isOn = true;
 }
 
 void SH1106Display::turnOff()
 {
+  if (!_initialized) {
+    _isOn = false;
+    return;
+  }
   display.oled_command(SH110X_DISPLAYOFF);
   _isOn = false;
 }
