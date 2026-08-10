@@ -1026,7 +1026,9 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.flood_max_advert = 8;
   _prefs.interference_threshold = 0; // disabled
 #ifdef WITH_MQTT_BRIDGE
-  _prefs.agc_reset_interval = 7;    // 28 seconds (secs/4) — prevents AGC drift on long-running observers
+  // TODO: Re-enable this observer default once AGC reset preserves runtime
+  // radio.rxgain, or earlier if disabling it causes receiver regressions.
+  // _prefs.agc_reset_interval = 7;  // 28 seconds (secs/4)
 #endif
   // Observer defaults (radio_watchdog, alert.*, snmp.*) moved to applyMQTTDefaults()
   // in MQTTDefaults.h — they live in /mqtt_prefs now, not NodePrefs.
