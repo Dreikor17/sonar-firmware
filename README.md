@@ -66,10 +66,59 @@ a Sonar build is based on.
 
 ## Flashing
 
-Attach the `.bin` from a release. For a first install use the merged image
-(`*-merged.bin`) written at offset `0x0`; afterwards the device can update itself over the
-air. A build whose partition layout changed cannot be applied over the air — the release
-notes will say so, and those need a cable.
+Each release carries two images. Which one you want depends on whether the board has
+ever run Sonar before.
+
+**A new or unknown board — `*-merged.bin`, written at offset `0x0`:**
+
+```
+esptool.py --chip esp32s3 write_flash 0x0 <name>-merged.bin
+```
+
+This carries the bootloader, partition table, OTA selector and application together. A
+first flash has to be over USB — there is no way onto a blank board over the network.
+
+**Updating a board already running Sonar — let it update itself:**
+
+```
+ota check     # report what is available, change nothing
+ota update    # download, flash, reboot
+```
+
+The plain `.bin` (no `-merged`) is the application image the device fetches for itself.
+You can write it at `0x10000` over a cable if you prefer, but it will not boot a board
+that has never been flashed.
+
+A release whose partition layout changed cannot be applied over the air — OTA cannot
+rewrite a partition table. The firmware checks this itself and refuses rather than
+bricking; those releases say so in the notes and need a cable.
+
+## First-time setup
+
+A freshly flashed board knows nothing: no network, no broker, no controller. Configure it
+over USB serial (or the built-in config portal), at minimum:
+
+```
+set wifi.ssid <ssid>
+set wifi.pwd <password>
+set mqtt.iata <code>            # its slot in the broker topic tree
+set mqtt.origin <name>          # how it identifies itself
+```
+
+To let a manager task it as a probe, it also needs the controller key it will accept
+commands from — anything not signed by that key is refused, so a compromised broker
+still cannot task it:
+
+```
+set probe.controller <64-hex controller public key>
+set probe on
+```
+
+Neighbour reporting (`set mqtt.neighbors on`) is on by default on a fresh install. A board
+carried over from an earlier build keeps whatever it had, so it may need setting once.
+
+Being reachable is not the same as being permitted: the manager and the broker each keep
+their own list of which nodes may be tasked, and both have to allow it.
 
 ## Credit and license
 
