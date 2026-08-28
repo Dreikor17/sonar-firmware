@@ -159,6 +159,19 @@ void UITask::renderCurrScreen() {
       snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
       _display->print(tmp);
     }
+
+    // Has the controller adopted this node yet? A node cannot put itself into the "issued"
+    // state -- only a controller holding the shipped key can hand it one of its own -- so
+    // this is a truthful answer on the device itself, with nothing to cross-check on a
+    // screen somewhere else. It says whether the node is CLAIMED, not whether it is up.
+    {
+      const uint8_t st = probeControllerKeyState(_node_prefs->probe_controller_pubkey,
+                                                 sizeof(_node_prefs->probe_controller_pubkey));
+      const bool authed = (st == PROBE_CTRL_ISSUED);
+      _display->setCursor(0, 50);
+      _display->setColor(authed ? UIColor::corp_blue : UIColor::warning_txt);
+      _display->print(authed ? "Echo Auth: Yes" : "Echo Auth: No");
+    }
 #endif
   }
 }

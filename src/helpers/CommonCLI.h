@@ -269,6 +269,39 @@ struct LegacyObserverTail {
 };
 #endif
 
+// How this node stands with its controller, for anything that wants to SAY so (the display,
+// diagnostics) rather than enforce it.
+//
+//   0 = no controller key at all -- every command is refused
+//   1 = still the key the image shipped with, shared by every node from this build
+//   2 = a key issued to THIS node, which only a controller that authorised it could have set
+//
+// State 2 is the useful one: a node cannot reach it on its own, so showing it is a truthful
+// answer to "has my controller adopted this node yet?" without asking the controller.
+enum : uint8_t { PROBE_CTRL_NONE = 0, PROBE_CTRL_SHIPPED = 1, PROBE_CTRL_ISSUED = 2 };
+
+static inline uint8_t probeControllerKeyState(const uint8_t* key, size_t len) {
+  if (!key || len < 32) return PROBE_CTRL_NONE;
+  bool any = false;
+  for (size_t i = 0; i < 32; i++) { if (key[i]) { any = true; break; } }
+  if (!any) return PROBE_CTRL_NONE;
+#ifdef PROBE_CONTROLLER_PUBKEY
+  // Rendered and compared as text rather than parsed: this is a display helper, and a hex
+  // parser here would be a second copy of one that already exists on the enforcement path.
+  char hex[65];
+  for (size_t i = 0; i < 32; i++) {
+    static const char* D = "0123456789ABCDEF";
+    hex[i * 2]     = D[(key[i] >> 4) & 0x0F];
+    hex[i * 2 + 1] = D[key[i] & 0x0F];
+  }
+  hex[64] = 0;
+  return strcasecmp(hex, PROBE_CONTROLLER_PUBKEY) == 0 ? PROBE_CTRL_SHIPPED : PROBE_CTRL_ISSUED;
+#else
+  // No shipped key to compare against, so a key being present at all is a deliberate act.
+  return PROBE_CTRL_ISSUED;
+#endif
+}
+
 class CommonCLICallbacks {
 public:
   virtual void savePrefs() = 0;

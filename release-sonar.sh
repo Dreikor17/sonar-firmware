@@ -49,6 +49,42 @@ export OTA_CHANNEL_TAG="sonar"
 # (web flasher, release listing) splits on "-" and takes the trailing token as the hash.
 export FILENAME_CHANNEL_TAG="-sonar"
 
+# --- controller identity -----------------------------------------------------
+# The controller PUBLIC key, compiled in so a node flashed from our release already
+# trusts our Echo and needs no 64-hex paste during provisioning. Public by definition:
+# without the private half it cannot sign a command, and a node still has to be on our
+# broker and approved in Echo before anything reaches it. Nothing secret ships here.
+#
+# A node that has already been given a key keeps it; this only seeds an unset one. After
+# approval Echo moves each node onto a key issued just for it, and from then on this key
+# is accepted by that node for one thing only: issuing it another.
+: "${SONAR_CONTROLLER_PUBKEY:=092167A1C4089D4B5D43E4C9B9EEDCB536649E46B32DFCF644AAB51CC5679CC5}"
+case "$SONAR_CONTROLLER_PUBKEY" in
+  # Refuse a malformed or all-zero key here rather than shipping images that silently
+  # refuse every command -- the symptom on the bench is indistinguishable from a broken
+  # broker, and by then the firmware is already flashed.
+  *[!0-9A-Fa-f]* | "")
+    echo "ERROR: SONAR_CONTROLLER_PUBKEY must be hex" >&2; exit 1 ;;
+esac
+if [ "${#SONAR_CONTROLLER_PUBKEY}" -ne 64 ]; then
+  echo "ERROR: SONAR_CONTROLLER_PUBKEY must be 64 hex chars (got ${#SONAR_CONTROLLER_PUBKEY})" >&2
+  exit 1
+fi
+if [ -z "$(printf '%s' "$SONAR_CONTROLLER_PUBKEY" | tr -d '0')" ]; then
+  echo "ERROR: SONAR_CONTROLLER_PUBKEY is all zeros, which means 'trust nobody'" >&2
+  exit 1
+fi
+# --- shipped-ready defaults -------------------------------------------------
+# The upstream defaults are EU (869.618 / SF8) and leave probing off, so every node would
+# otherwise need re-regioning and three probe settings by hand before it could be adopted.
+# US/CAN radio, matching what the mesh actually runs.
+: "${SONAR_LORA_FREQ:=910.525}"
+: "${SONAR_LORA_BW:=62.5}"
+: "${SONAR_LORA_SF:=7}"
+: "${SONAR_LORA_CR:=5}"
+
+export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS:-} -DPROBE_CONTROLLER_PUBKEY='\"${SONAR_CONTROLLER_PUBKEY}\"' -DSONAR_PROBE_DEFAULTS=1 -DLORA_FREQ=${SONAR_LORA_FREQ} -DLORA_BW=${SONAR_LORA_BW} -DLORA_SF=${SONAR_LORA_SF} -DLORA_CR=${SONAR_LORA_CR}"
+
 # --- build number ------------------------------------------------------------
 # REQUIRED, and must increase with every published build. The firmware compares build
 # numbers only when both its own version and the manifest expose a 4th component; without
@@ -58,7 +94,26 @@ BUILD_NUMBER="${1:?usage: release-sonar.sh <build-number> [env ...]}"
 shift || true
 export FIRMWARE_BUILD_NUMBER="$BUILD_NUMBER"
 
+# The base version. `git describe` is a LAST resort and usually the wrong answer: this
+# tree carries upstream tags like `mbedtls-4k`, and the nearest one has nothing to do with
+# the MeshCore release we are based on. Taking it silently produced a real build named
+# `mbedtls-4k.6` whose version string the device cannot even parse.
 : "${FIRMWARE_VERSION:=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)}"
+
+# So: validate rather than trust. ota_parseVersion() finds the build number by scanning
+# for the THIRD dot, which means the base must be exactly v<major>.<minor>.<patch> -- with
+# anything else the device compares whole strings, never matches, and offers the same
+# update on every check forever.
+case "$FIRMWARE_VERSION" in
+  v[0-9]*.[0-9]*.[0-9]*) ;;
+  *)
+    echo "ERROR: FIRMWARE_VERSION is '$FIRMWARE_VERSION', which is not v<major>.<minor>.<patch>." >&2
+    echo "       It is the base a device compares against, so a malformed one ships a build" >&2
+    echo "       that reports an update available forever. Pass it explicitly:" >&2
+    echo "         FIRMWARE_VERSION=v1.17.1 $0 $BUILD_NUMBER [env ...]" >&2
+    exit 1
+    ;;
+esac
 export FIRMWARE_VERSION
 
 RELEASE_TAG="${FIRMWARE_VERSION}.${FIRMWARE_BUILD_NUMBER}"
@@ -90,6 +145,9 @@ mkdir -p "$DIST/manifests"
 echo "channel : $OTA_MANIFEST_BASE_URL   (tag: $OTA_CHANNEL_TAG)"
 echo "version : ${FIRMWARE_VERSION}.${FIRMWARE_BUILD_NUMBER}"
 echo "binaries: $SONAR_RELEASE_BASE"
+echo "ctrl key: ${SONAR_CONTROLLER_PUBKEY:0:16}… (public; compiled in)"
+echo "radio   : ${SONAR_LORA_FREQ} / ${SONAR_LORA_BW} / SF${SONAR_LORA_SF} / CR${SONAR_LORA_CR}"
+echo "defaults: probe on (slot 1), repeat off, 3-byte hash  --  'set probe.v1 on' still needed per node"
 echo "tag     : $RELEASE_TAG"
 echo
 

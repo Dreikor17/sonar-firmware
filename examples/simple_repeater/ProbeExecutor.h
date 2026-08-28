@@ -50,6 +50,11 @@ class MyMesh;
 // client->isAdmin() (MyMesh.cpp:890) and silently ignores a guest, so a command
 // op without a sealed "pw" would time out with no explanation.
 #define PROBE_OP_COMMAND    0x10
+// Adopt a new controller key. Handled ON THIS NODE -- it never goes out over LoRa, so it
+// takes no session and has no target beyond ourselves. Lets the controller move a node off
+// the shared deployment key onto one issued just for it, so day-to-day tasking no longer
+// depends on a key every node in the field shares.
+#define PROBE_OP_SET_CONTROLLER 0x20
 #define PROBE_OPS_NEED_LOGIN (PROBE_OP_VER_IDENT | PROBE_OP_STATUS | PROBE_OP_TELEMETRY                               | PROBE_OP_COMMAND)
 
 #define PROBE_JOB_ID_LEN 16
@@ -270,6 +275,13 @@ private:
   uint32_t _boot_epoch;       // clock at first sane reading; 0 = not yet known
   uint32_t _seq_next;         // admission counter feeding ProbeSession::seq
   uint32_t _n_expired;        // sessions dropped at dispatch, deadline already passed
+  // The build-time deployment key, if this image was compiled with one. Seeds an unset
+  // pref so a factory-fresh node already trusts its controller, and is accepted as a
+  // signer for PROBE_OP_SET_CONTROLLER *only* -- never for ordinary tasking. That is what
+  // makes recovery possible: a node whose per-node key is lost can still be re-issued one,
+  // without a serial cable, while a stolen deployment key still cannot poll anything.
+  uint8_t  _deploy_key[PUB_KEY_SIZE];
+  bool     _deploy_key_set;
   size_t _result_len;
 
   // Policy
@@ -298,7 +310,8 @@ private:
   void resetActive();
 
   bool verifyCommand(const char* token, size_t len, const char** payload,
-                     size_t* payload_len, uint8_t* reject);
+                     size_t* payload_len, uint8_t* reject,
+                     bool* via_deploy = nullptr);
 
   void resultBegin();
   void resultAppend(const char* fmt, ...);

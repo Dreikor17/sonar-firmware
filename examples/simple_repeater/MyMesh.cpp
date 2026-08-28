@@ -1133,6 +1133,61 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.flood_max_unscoped = 64;
   _prefs.flood_max_advert = 8;
   _prefs.interference_threshold = 0; // disabled
+
+#ifdef SONAR_PROBE_DEFAULTS
+  // A Sonar image exists to be a probe, so it ships ready to be adopted: connect it to
+  // WiFi and the only remaining step is authorising it in the controller. Anything an
+  // operator would otherwise have to set by hand on every single node is a step that gets
+  // forgotten -- twice already on this bench, each time surfacing as "the controller says
+  // nothing happened" with no hint that the node was never listening.
+  //
+  // These are DEFAULTS for a node with no saved prefs. An explicit setting always wins,
+  // and none of this is reachable in an upstream build: the whole block is behind the flag
+  // that release-sonar.sh sets.
+  _prefs.probe_enable = 1;
+  // The first MQTT slot may task us. probe_enable on its own is not enough to be
+  // reachable: the command-topic subscription is registered only for the slot named
+  // here, and the unset marker (0xFF) matches no slot, so a node shipped without this
+  // enables probing and then listens on nothing. That reads as a broker or RF fault
+  // from every direction -- there is no error at either end, because nothing was ever
+  // subscribed to fail. Slot 1 is the one a single-broker node has.
+  //
+  // NOT set here: probe_topic_v1. Offering probe/v1 to a broker that does not know it
+  // is answered with a force-close, which takes this node's ordinary packet and status
+  // uplink down with the tasking channel -- so a default of "on" would break plain
+  // observer duty against any stock broker. It stays an explicit per-node decision.
+  _prefs.probe_control_slot = 0;   // 0 == "probe.slot 1" at the CLI
+  // Allowed to flood. The stock default is off, which is right for a node someone else
+  // owns and wrong for one deployed as a probe -- because with it off a probe cannot poll
+  // at all once its route cache empties, and that is not obvious from anywhere.
+  //
+  // The chain: status and telemetry need a login, a login needs a DIRECT route, and the
+  // only thing that writes a route is handlePathReturn -- which fires on the PATH return
+  // that answers a FLOODED request. The cache is RAM (so a reboot clears it) with an 8h
+  // TTL. So a flood-disabled probe works until the first of those two, then reports
+  // "no_route" forever, for a node it can hear perfectly well. Observed exactly that on the
+  // bench: a repeater 30 feet away, answering a companion, unpollable by two probes.
+  //
+  // The cost is bounded and self-limiting: one flood teaches the route and the rest of the
+  // session goes direct, repeat targets come from cache, and floodHeldOff() backs off a
+  // target that stops answering rather than retrying it forever.
+  _prefs.probe_allow_flood = 1;
+  // No adverts until someone asks for them. The stock default above is one every two
+  // minutes, which is right for a repeater joining a mesh and wrong for this: a Sonar
+  // node is provisioned on a bench, often several at a time, and every board sitting there
+  // freshly flashed would beacon at each other for as long as it takes to configure
+  // them. An observer earns its place by listening, and the mesh learns it from the
+  // traffic it relays and the flood advert below, not from a two-minute heartbeat.
+  // Set `advert.interval` per node if a deployment actually needs one.
+  _prefs.advert_interval = 0;
+  // Forwarding OFF. A probe is there to observe and answer questions; repeating is a
+  // separate job with a continuous airtime cost, and a node doing both is a node whose
+  // airtime cannot be attributed to either.
+  _prefs.disable_fwd = 1;
+  // 3-byte path hashes. Two bytes collide often enough to matter once a mesh is dense,
+  // and the controller resolves observed hops against full pubkeys.
+  _prefs.path_hash_mode = 2;
+#endif
 #ifdef WITH_MQTT_BRIDGE
   // TODO: Re-enable this observer default once AGC reset preserves runtime
   // radio.rxgain, or earlier if disabling it causes receiver regressions.

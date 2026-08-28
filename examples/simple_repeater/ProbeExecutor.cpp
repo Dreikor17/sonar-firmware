@@ -50,6 +50,19 @@ ProbeExecutor::ProbeExecutor()
   _status[0] = 0;
   probeNonceRingInit(&_nonces);
   _boot_epoch = 0;
+  // Parse the build-time deployment key, if this image carries one. Done once here so the
+  // hot paths only ever look at bytes.
+  memset(_deploy_key, 0, sizeof(_deploy_key));
+  _deploy_key_set = false;
+#ifdef PROBE_CONTROLLER_PUBKEY
+  {
+    const char* hex = PROBE_CONTROLLER_PUBKEY;
+    if (strlen(hex) == PUB_KEY_SIZE * 2 &&
+        mesh::Utils::fromHex(_deploy_key, PUB_KEY_SIZE, hex)) {
+      _deploy_key_set = probeControllerKeySet(_deploy_key, sizeof(_deploy_key));
+    }
+  }
+#endif
   _seq_next = 0;
   _n_expired = 0;
 }
@@ -68,6 +81,14 @@ void ProbeExecutor::applyPrefs() {
   // Adjust in place rather than reconstructing: a rebuild zeroes the window and
   // hands back a full budget, so an operator editing probe.max -- or any code
   // path that re-applies prefs -- could refill it at will.
+  // A node that has never been given a controller key trusts the one it was built with,
+  // so a freshly flashed board is usable without anyone pasting 64 hex characters. An
+  // explicitly set key always wins; this only fills the hole.
+  if (_deploy_key_set &&
+      !probeControllerKeySet(_prefs->probe_controller_pubkey,
+                             sizeof(_prefs->probe_controller_pubkey))) {
+    memcpy(_prefs->probe_controller_pubkey, _deploy_key, PUB_KEY_SIZE);
+  }
   _session_limiter.setMaximum(per_hour);
   _packet_guard.setMaximum(probePacketGuardCeiling(_prefs->probe_max_per_hour));
   _applied_max     = _prefs->probe_max_per_hour;
@@ -139,7 +160,7 @@ bool ProbeExecutor::startLocal(const mesh::Identity& target, uint8_t ops_mask,
 // the software Ed25519 path needs roughly 3 KB of stack (src/Identity.cpp:25-28),
 // which is not available on the esp-mqtt event task.
 bool ProbeExecutor::verifyCommand(const char* token, size_t len, const char** payload,
-                                  size_t* payload_len, uint8_t* reject) {
+                                  size_t* payload_len, uint8_t* reject, bool* via_deploy) {
   // Fail closed FIRST, and before anything expensive.
   if (!probeControllerKeySet(_prefs->probe_controller_pubkey,
                              sizeof(_prefs->probe_controller_pubkey))) {
@@ -168,9 +189,19 @@ bool ProbeExecutor::verifyCommand(const char* token, size_t len, const char** pa
   if (!_verify_guard.allow(nowSecs())) { *reject = PRJ_RATE; return false; }
 
   // Signing input is the raw "header.payload" substring, verified in place.
-  mesh::Identity controller(_prefs->probe_controller_pubkey);
   size_t signing_len = hl + 1 + pl;
-  if (!controller.verify(sig, (const uint8_t*)h, (int)signing_len)) {
+  mesh::Identity controller(_prefs->probe_controller_pubkey);
+  if (controller.verify(sig, (const uint8_t*)h, (int)signing_len)) {
+    if (via_deploy) *via_deploy = false;
+  } else if (_deploy_key_set &&
+             memcmp(_deploy_key, _prefs->probe_controller_pubkey, PUB_KEY_SIZE) != 0 &&
+             mesh::Identity(_deploy_key).verify(sig, (const uint8_t*)h, (int)signing_len)) {
+    // Signed by the DEPLOYMENT key while this node is pinned to a different one. Accepted
+    // only so the controller can re-issue a per-node key to a node whose key it has lost --
+    // the caller restricts what this may actually do to PROBE_OP_SET_CONTROLLER. Without
+    // this, losing Echo's key store would strand every field node behind a serial cable.
+    if (via_deploy) *via_deploy = true;
+  } else {
     *reject = PRJ_BAD_SIG; return false;
   }
 
@@ -194,7 +225,8 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot)
   // _verify_guard exactly as it is when probing is enabled.
   {
     const char* payload = NULL; size_t payload_len = 0;
-    if (!verifyCommand(token, len, &payload, &payload_len, &reject)) {
+    bool via_deploy = false;
+    if (!verifyCommand(token, len, &payload, &payload_len, &reject, &via_deploy)) {
       // reject already set; the unauthenticated classes are silent in reportReject
     } else if (!_prefs->probe_enable) {
       reject = PRJ_DISABLED;                    // now only the real controller hears this
@@ -283,6 +315,52 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot)
           // already bounds. Skipped entirely while the clock is unknown (fail-open,
           // exactly as before), since a bogus floor would refuse every valid command.
           reject = PRJ_PREBOOT;
+        } else if (via_deploy && ops != PROBE_OP_SET_CONTROLLER) {
+          // The deployment key is accepted ONLY to re-issue a controller key. It must not
+          // be able to poll, log in, or run a CLI command on anything -- otherwise the
+          // shared key every node ships with would remain a master key for the whole
+          // field, which is the thing per-node keys exist to end.
+          reject = PRJ_NEED_ADMIN;
+        } else if (ops == PROBE_OP_SET_CONTROLLER) {
+          // Self-directed: adopt a new controller key. Never goes out over LoRa, so it
+          // takes no session and no target beyond ourselves. Everything that authorises it
+          // has already been checked above -- signature, freshness, replay ring, and the
+          // mandatory `obs` claim binding this token to THIS node, so a rotation cannot be
+          // replayed against a different one.
+          const char* ctl = NULL; size_t ctl_len = 0;
+          uint8_t newkey[PUB_KEY_SIZE];
+          char ctl_hex[PUB_KEY_SIZE * 2 + 1];
+          if (!probeJsonGetString(js, jl, "ctl", &ctl, &ctl_len) ||
+              ctl_len != PUB_KEY_SIZE * 2) {
+            reject = PRJ_BAD_CMD;
+          } else {
+            memcpy(ctl_hex, ctl, ctl_len);
+            ctl_hex[ctl_len] = 0;
+            if (!mesh::Utils::fromHex(newkey, PUB_KEY_SIZE, ctl_hex) ||
+                !probeControllerKeySet(newkey, sizeof(newkey))) {
+              // Unparseable, or all-zero -- which would mean "trust nobody" and leave the
+              // node unreachable until someone walks to it with a cable.
+              reject = PRJ_BAD_CMD;
+            } else {
+              memcpy(_prefs->probe_controller_pubkey, newkey, PUB_KEY_SIZE);
+              _mesh->savePrefs();            // survive the next reboot, or nothing changed
+              _n_accepted++;
+
+              // Answer through the ordinary result path so the controller can correlate
+              // this like any other job. A throwaway session carries only what the result
+              // needs; nothing is queued and nothing goes on air.
+              ProbeSession ack;
+              memset(&ack, 0, sizeof(ack));
+              memcpy(ack.job_id, job, sizeof(job));
+              ack.reply_slot = reply_slot;
+              ack.from_mqtt  = true;
+              ack.target     = _mesh->self_id;
+              resultBegin();
+              resultAppend(",\"ctl\":\"%s\"", ctl_hex);
+              _mesh->publishProbeResult(ack, PST_OK, PR_NONE, _result, _result_len);
+              return true;
+            }
+          }
         } else if (!have_target || ops == 0 || ops > 0xFF) {
           reject = PRJ_BAD_TARGET;
         } else if (probeNonceSeen(&_nonces, nonce)) {
