@@ -115,6 +115,30 @@ static inline bool mqttBuildProbeTopic(const char* device, bool commands,
   return true;
 }
 
+// The relay channel: frames the controller built for THIS node to key onto the air
+// verbatim.
+//
+// A separate tree from probe/v1 deliberately, at both ends. The broker gates relay with
+// its own default-off switch and its own ACL, so an operator can let a controller task a
+// node without also letting it transmit through that node's radio. Keeping the trees
+// apart is what makes that distinction reach the wire: if relay frames rode probe/v1 the
+// broker could not tell the two apart and the separate gate would be decorative.
+//
+// No rsp direction. A relayed frame's answer is an ordinary mesh reply that this node
+// already uplinks as an observer, so a relay response topic would duplicate a channel
+// that exists.
+static inline bool mqttBuildRelayTopic(const char* device, char* buf, size_t buf_size) {
+  if (!buf || buf_size == 0) return false;
+  buf[0] = '\0';
+  if (!device || device[0] == '\0') return false;   // see the empty-segment guard above
+  int w = snprintf(buf, buf_size, "relay/v1/%s/tx", device);
+  if (w <= 0 || (size_t)w >= buf_size) {
+    buf[0] = '\0';
+    return false;
+  }
+  return true;
+}
+
 static inline bool mqttBuildPublicationTopic(MQTTTopicRouteStyle style, int type,
                                              const char* custom_template,
                                              const char* iata, const char* device,

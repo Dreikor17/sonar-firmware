@@ -662,6 +662,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       _wifi_disconnected_time(0), _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
       _last_slot_reconnect_ms(0),
       _probe_cmd_buffer(nullptr), _probe_cmd_len(0), _probe_cmd_slot(0xFF),
+      _probe_cmd_relay(false),
       _probe_cmd_pending(false),
       _probe_result_seq(0), _probe_results_dropped(0), _probe_cmds_dropped(0)
 #ifdef ESP_PLATFORM
@@ -1735,15 +1736,16 @@ bool MQTTBridge::ensureSlotClient(int index) {
     // Both handlers are identical: ProbeExecutor is entirely topic-agnostic and
     // the payload is a self-contained signed token, so which tree it arrived on
     // carries no meaning to us. The broker is what binds a topic to an identity.
-    auto register_channel = [this, index, &slot](const char* cmd_topic, const char* what) {
+    auto register_channel = [this, index, &slot](const char* cmd_topic, const char* what,
+                                                 bool is_relay) {
       slot.client->onTopic(cmd_topic, 1,
-        [this, index](char* topic, char* payload, int retained, int qos, bool dup) {
+        [this, index, is_relay](char* topic, char* payload, int retained, int qos, bool dup) {
           // esp-mqtt event task. Copy and flag ONLY -- see offerProbeCommand.
           (void)topic; (void)qos; (void)dup;
           // A retained tasking command has no legitimate use: it would be
           // redelivered on every reconnect. Drop it before it reaches the mailbox.
           if (retained) return;
-          if (payload) offerProbeCommand(index, payload, strlen(payload));
+          if (payload) offerProbeCommand(index, payload, strlen(payload), is_relay);
         });
       MQTT_DEBUG_PRINTLN("MQTT%d probe tasking channel (%s): %s", index + 1, what, cmd_topic);
     };
@@ -1757,7 +1759,7 @@ bool MQTTBridge::ensureSlotClient(int index) {
     // denied subscribe on an OLD broker force-closes the socket -- taking the
     // telemetry uplink down on exactly the nodes the rollback meant to protect.
     if (mqttBuildSerialTopic(_iata, _device_id, true, cmd_topic, sizeof(cmd_topic))) {
-      register_channel(cmd_topic, "legacy");
+      register_channel(cmd_topic, "legacy", false);
     } else {
       // Not an error: this is the expected state when IATA is unset or "XXX".
       MQTT_DEBUG_PRINTLN("MQTT%d legacy probe channel unavailable (IATA/device unset)", index + 1);
@@ -1767,9 +1769,23 @@ bool MQTTBridge::ensureSlotClient(int index) {
     // for why flashing must not enable it on its own.
     if (_prefs->probe_topic_v1) {
       if (mqttBuildProbeTopic(_device_id, true, cmd_topic, sizeof(cmd_topic))) {
-        register_channel(cmd_topic, "v1");
+        register_channel(cmd_topic, "v1", false);
       } else {
         MQTT_DEBUG_PRINTLN("MQTT%d probe/v1 channel unavailable (device id unset)", index + 1);
+      }
+    }
+
+    // The relay channel, gated on the node's OWN relay consent rather than on
+    // probe_topic_v1. Subscribing to it while the operator has not enabled relay would
+    // open a mailbox for frames the executor is going to refuse anyway, and on a broker
+    // that does not know the tree a denied subscribe is invisible from here -- so the
+    // subscribe is only worth making once the node would actually act on a frame.
+    if (_prefs->probe_relay_tx) {
+      char relay_topic[128];
+      if (mqttBuildRelayTopic(_device_id, relay_topic, sizeof(relay_topic))) {
+        register_channel(relay_topic, "relay", true);
+      } else {
+        MQTT_DEBUG_PRINTLN("MQTT%d relay channel unavailable (device id unset)", index + 1);
       }
     }
   }
@@ -3775,7 +3791,7 @@ bool MQTTBridge::publishNeighbors() {
 // esp-mqtt event task. Mirrors requestPublishNeighbors, but DROPS an oversized
 // payload instead of clamping it: a truncated signed token must never be handed
 // to the verifier.
-void MQTTBridge::offerProbeCommand(int slot, const char* payload, size_t len) {
+void MQTTBridge::offerProbeCommand(int slot, const char* payload, size_t len, bool via_relay) {
   if (!_probe_cmd_buffer || !payload || len == 0) return;
   if (len >= PROBE_CMD_BUFFER_SIZE) { _probe_cmds_dropped++; return; }
   // Backpressure. Counted, not silent: a command discarded here produces no
@@ -3789,12 +3805,13 @@ void MQTTBridge::offerProbeCommand(int slot, const char* payload, size_t len) {
   _probe_cmd_buffer[len] = '\0';
   _probe_cmd_len = len;
   _probe_cmd_slot = (uint8_t)slot;
+  _probe_cmd_relay = via_relay;
   _probe_cmd_pending.store(true, std::memory_order_release);
 }
 
 // Mesh loop (Core 1).
 bool MQTTBridge::takeProbeCommand(char* dest, size_t dest_size, size_t* out_len,
-                                  uint8_t* out_slot) {
+                                  uint8_t* out_slot, bool* out_relay) {
   if (!dest || dest_size == 0) return false;
   if (!_probe_cmd_pending.load(std::memory_order_acquire)) return false;
 
@@ -3805,6 +3822,7 @@ bool MQTTBridge::takeProbeCommand(char* dest, size_t dest_size, size_t* out_len,
     dest[len] = '\0';
     if (out_len) *out_len = len;
     if (out_slot) *out_slot = _probe_cmd_slot;
+    if (out_relay) *out_relay = _probe_cmd_relay;
     ok = true;
   }
   _probe_cmd_pending.store(false, std::memory_order_release);

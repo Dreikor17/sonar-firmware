@@ -319,6 +319,11 @@ private:
   char*   _probe_cmd_buffer;
   size_t  _probe_cmd_len;
   uint8_t _probe_cmd_slot;
+  // Which tree this command arrived on. Carried through the mailbox so the executor
+  // can bind the relay op to the relay channel: the broker gates relay separately, and
+  // that separation only means anything if the node also refuses a relay frame that
+  // came down the probe channel.
+  bool    _probe_cmd_relay;
   // The esp-mqtt event task release-stores; the mesh loop (Core 1) acquire-loads.
   std::atomic<bool> _probe_cmd_pending;
 
@@ -667,11 +672,12 @@ public:
   // only: no radio, no crypto, no allocation. `len` MUST be strlen(payload) --
   // the MQTT message callback has no length parameter and hands over a
   // NUL-terminated buffer.
-  void offerProbeCommand(int slot, const char* payload, size_t len);
+  void offerProbeCommand(int slot, const char* payload, size_t len, bool via_relay);
 
   // Called from the mesh loop (Core 1). Copies the command out and clears the
   // mailbox. Returns false when nothing is pending.
-  bool takeProbeCommand(char* dest, size_t dest_size, size_t* out_len, uint8_t* out_slot);
+  bool takeProbeCommand(char* dest, size_t dest_size, size_t* out_len, uint8_t* out_slot,
+                        bool* out_relay);
 
   // Called from the mesh loop (Core 1) with a finished, signed result token.
   // Dropped if one is still publishing, or if it exceeds the buffer: a truncated

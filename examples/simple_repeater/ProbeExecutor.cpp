@@ -211,7 +211,7 @@ bool ProbeExecutor::verifyCommand(const char* token, size_t len, const char** pa
   return true;
 }
 
-bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot) {
+bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot, bool via_relay) {
   uint8_t reject = PRJ_NONE;
   char job[PROBE_JOB_ID_LEN + 1]; job[0] = 0;
 
@@ -316,6 +316,18 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot)
           // already bounds. Skipped entirely while the clock is unknown (fail-open,
           // exactly as before), since a bogus floor would refuse every valid command.
           reject = PRJ_PREBOOT;
+        } else if ((ops == PROBE_OP_RELAY_TX) != via_relay) {
+          // Channel and op must agree, BOTH directions, and this has to sit ahead of
+          // every op branch below -- SET_CONTROLLER and MANAGE are handled before the
+          // relay branch, so a guard placed next to relay would let either of them run
+          // when sent down the relay channel.
+          //
+          // A relay frame on the tasking channel would sidestep the broker's separate
+          // relay gate; a tasking op on the relay channel would do the reverse. The
+          // signature says WHO authorised this; the channel says which authority the
+          // broker checked. A command that disagrees with itself is refused, not
+          // reconciled.
+          reject = PRJ_BAD_CMD;
         } else if (via_deploy && ops != PROBE_OP_SET_CONTROLLER) {
           // The deployment key is accepted ONLY to re-issue a controller key. It must not
           // be able to poll, log in, or run a CLI command on anything -- otherwise the

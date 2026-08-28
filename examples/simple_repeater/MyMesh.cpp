@@ -1953,9 +1953,10 @@ void MyMesh::loop() {
   if (bridge) {
     size_t cmd_len = 0;
     uint8_t cmd_slot = 0xFF;
+    bool cmd_relay = false;
     if (bridge->takeProbeCommand(probe.commandBuffer(), probe.commandBufferSize(),
-                                 &cmd_len, &cmd_slot)) {
-      probe.onCommand(probe.commandBuffer(), cmd_len, cmd_slot);
+                                 &cmd_len, &cmd_slot, &cmd_relay)) {
+      probe.onCommand(probe.commandBuffer(), cmd_len, cmd_slot, cmd_relay);
     }
   }
 #endif

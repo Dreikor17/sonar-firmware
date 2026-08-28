@@ -170,7 +170,10 @@ public:
   // A signed tasking command from Echo, already copied out of the MQTT mailbox
   // by MyMesh on Core 1. `len` must be strlen(token): the MQTT message callback
   // has no length parameter (see DIRECTIONS-firmware.md section B.5).
-  bool onCommand(const char* token, size_t len, uint8_t reply_slot);
+  // `via_relay` is which CHANNEL this arrived on, not what it asks for. The relay op is
+  // accepted only from the relay channel and every other op only from a tasking channel,
+  // so the broker's separate relay gate reaches the wire instead of being decorative.
+  bool onCommand(const char* token, size_t len, uint8_t reply_slot, bool via_relay = false);
 
   // Local serial-CLI path (milestone M1). No signature, no MQTT.
   bool startLocal(const mesh::Identity& target, uint8_t ops_mask, char* err, size_t err_size);
