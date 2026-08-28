@@ -27,6 +27,10 @@ static const char* const WC_ALLOWED_SET_KEYS[] = {
   "mqtt.tx", "mqtt.rx", "mqtt.interval", "mqtt.neighbors", "mqtt.neighbors.interval",
   "mqtt.ntp", "mqtt.owner", "mqtt.email",
   "timezone", "timezone.offset", "snmp", "snmp.community",
+  // Echo Observer-Probe (NodePrefs). The controller key is public data, so it is
+  // deliberately NOT in wcIsSecretKey -- an operator must be able to read it back
+  // to confirm which controller this Observer trusts.
+  "probe", "probe.controller", "probe.max", "probe.flood", "probe.gap", "probe.slot",
 };
 static const char* const WC_ALLOWED_SLOT_KEYS[] = {
   "preset", "server", "port", "username", "password", "token", "topic", "audience",

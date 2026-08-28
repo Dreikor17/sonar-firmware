@@ -12,6 +12,7 @@
 
 #include <helpers/CommonCLI.h>
 #include <helpers/MQTTPacketFilter.h>
+#include <helpers/ProbePolicy.h>
 #include <helpers/MQTTPresets.h>
 #include <helpers/WebConfigKeys.h>
 #include <helpers/bridges/MQTTBridge.h>
@@ -744,6 +745,22 @@ void WebConfigServer::handleConfigGet(AsyncWebServerRequest* req) {
     mqtt["email"] = (const char*)_obs->mqtt_email;
     mqtt["snmp"] = (bool)_obs->snmp_enabled;
     mqtt["snmp_community"] = (const char*)_obs->snmp_community;
+
+    // Echo Observer-Probe. These come off _prefs (NodePrefs), not _obs.
+    JsonObject probe = doc.createNestedObject("probe");
+    probe["enable"] = (bool)_prefs->probe_enable;
+    char probe_ctrl[PUB_KEY_SIZE * 2 + 1];
+    if (probeControllerKeySet(_prefs->probe_controller_pubkey,
+                              sizeof(_prefs->probe_controller_pubkey))) {
+      mesh::Utils::toHex(probe_ctrl, _prefs->probe_controller_pubkey, PUB_KEY_SIZE);
+    } else {
+      probe_ctrl[0] = 0;
+    }
+    probe["controller"] = (const char*)probe_ctrl;
+    probe["max_per_hour"] = _prefs->probe_max_per_hour;
+    probe["allow_flood"] = (bool)_prefs->probe_allow_flood;
+    probe["gap_secs"] = _prefs->probe_gap_secs;
+  probe["control_slot"] = _prefs->probe_control_slot;
 
     JsonArray slots = mqtt.createNestedArray("slots");
     for (int i = 0; i < MAX_MQTT_SLOTS; i++) {

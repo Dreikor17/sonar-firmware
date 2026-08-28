@@ -72,6 +72,16 @@ public:
   uint8_t cad_enabled = 0;      // hardware Channel Activity Detection before TX (boolean)
   uint8_t extra_sf[4];
 
+  // Echo Observer-Probe. Off by default: with probe_enable = 0 this node behaves
+  // exactly like a stock repeater-observer and transmits nothing extra.
+  uint8_t  probe_enable = 0;
+  uint8_t  probe_controller_pubkey[PUB_KEY_SIZE];  // Ed25519; all-zero = unset = refuse all
+  uint16_t probe_max_per_hour = 0;                 // probe SESSIONS per hour; 0 = built-in default
+  uint8_t  probe_allow_flood = 0;                  // HARD DEFAULT OFF - see flood safety
+  uint8_t  probe_gap_secs = 5;                     // min seconds between SESSIONS; self-pacing
+  uint8_t  probe_control_slot = 0xFF;              // the ONE MQTT slot allowed to task us;
+                                                   // 0xFF = unset = no inbound tasking channel
+
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) are not in NodePrefs.
   // They live in MQTTPrefs, persisted separately to /mqtt_prefs, so this struct
   // stays aligned with upstream. See struct MQTTPrefs below.
@@ -171,6 +181,22 @@ private:
   };
   RoomPrefs room;
 
+  class ProbePrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("en",     _parent->probe_enable);
+      def("ctrl",   _parent->probe_controller_pubkey, sizeof(_parent->probe_controller_pubkey));
+      def("max_hr", _parent->probe_max_per_hour);
+      def("flood",  _parent->probe_allow_flood);
+      def("gap",    _parent->probe_gap_secs);
+      def("slot",   _parent->probe_control_slot);
+    }
+  public:
+    ProbePrefs(NodePrefs* parent) : _parent(parent) { }
+  };
+  ProbePrefs probe;
+
 protected:
   void structure() override {
     def("name", node_name, sizeof(node_name));
@@ -188,10 +214,12 @@ protected:
     def("repeat", repeat);
     def("room", room);
     def("power", power);
+    def("probe", probe);
   }
 
 public:
-  NodePrefs() : ConfigSerializer(), bridge(this), gps(this), radio(this), power(this), repeat(this), room(this) {
+  NodePrefs() : ConfigSerializer(), bridge(this), gps(this), radio(this), power(this), repeat(this), room(this), probe(this) {
+    memset(probe_controller_pubkey, 0, sizeof(probe_controller_pubkey));
     node_name[0] = 0;
     password[0] = 0;
     guest_password[0] = 0;

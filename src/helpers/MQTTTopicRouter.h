@@ -52,6 +52,28 @@ static inline bool mqttWriteTopic(char* buf, size_t buf_size, const char* format
 // IATA. MeshCore routes require a configured IATA and device id. Custom
 // templates may omit either placeholder, so their individual values are allowed
 // to be empty.
+// Private admin channel for the Echo Observer-Probe:
+//   meshcore/{IATA}/{PUBKEY}/serial/commands   (Echo -> Observer)
+//   meshcore/{IATA}/{PUBKEY}/serial/responses  (Observer -> Echo)
+// Four segments, so it deliberately does not go through mqttWriteTopic's
+// three-placeholder format. MeshCore-route only: a custom template or a MeshRank
+// slot has no serial/* channel.
+static inline bool mqttBuildSerialTopic(const char* iata, const char* device,
+                                        bool commands, char* buf, size_t buf_size) {
+  if (!buf || buf_size == 0) return false;
+  buf[0] = '\0';
+  if (!mqttIataValid(iata) || strcmp(iata, "XXX") == 0 || !device || device[0] == '\0') {
+    return false;
+  }
+  int w = snprintf(buf, buf_size, "meshcore/%s/%s/serial/%s",
+                   iata, device, commands ? "commands" : "responses");
+  if (w <= 0 || (size_t)w >= buf_size) {
+    buf[0] = '\0';
+    return false;
+  }
+  return true;
+}
+
 static inline bool mqttBuildPublicationTopic(MQTTTopicRouteStyle style, int type,
                                              const char* custom_template,
                                              const char* iata, const char* device,

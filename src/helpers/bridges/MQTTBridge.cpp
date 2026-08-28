@@ -660,7 +660,11 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
 #endif
       _last_wifi_check(0), _last_wifi_status(WL_DISCONNECTED), _wifi_status_initialized(false),
       _wifi_disconnected_time(0), _last_wifi_reconnect_attempt(0), _wifi_reconnect_backoff_attempt(0),
-      _last_slot_reconnect_ms(0)
+      _last_slot_reconnect_ms(0),
+      _probe_cmd_buffer(nullptr), _probe_cmd_len(0), _probe_cmd_slot(0xFF),
+      _probe_cmd_pending(false),
+      _probe_result_buffer(nullptr), _probe_result_len(0), _probe_result_slot(0xFF),
+      _probe_result_pending(false), _probe_results_dropped(0), _probe_cmds_dropped(0)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _packet_queue_storage(nullptr)
@@ -768,6 +772,20 @@ void MQTTBridge::allocateRuntimeBuffers() {
       _json_scratch_buffer ? "PSRAM" : "stack fallback");
   #endif
 
+  // Echo Observer-Probe mailbox + result buffers. Only allocated when the feature
+  // is actually enabled: this is ~2.3 KB of internal DRAM on a non-PSRAM board and
+  // the feature is off by default. Every consumer already no-ops on nullptr, and
+  // `set probe on` tells the operator to restart, which is when this runs.
+  if (_prefs && _prefs->probe_enable) {
+    _probe_cmd_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+        _probe_cmd_buffer, PROBE_CMD_BUFFER_SIZE, psram_malloc));
+    _probe_result_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+        _probe_result_buffer, PROBE_RESULT_BUFFER_SIZE, psram_malloc));
+    MQTT_DEBUG_PRINTLN("Probe buffers: cmd=%s result=%s",
+        _probe_cmd_buffer ? "ready" : "unavailable",
+        _probe_result_buffer ? "ready" : "unavailable");
+  }
+
 #if defined(WITH_MQTT_NEIGHBORS)
   // Persistent neighbors JSON buffer, heap-allocated on every board: too large to
   // keep inline in the bridge object the way the non-PSRAM status/packet buffers
@@ -793,6 +811,15 @@ void MQTTBridge::releaseRuntimeBuffers() {
   // and resets the list to its inline array; the next publish reallocates. Holding
   // 4 KB of pool across a stopped bridge is pure overhead.
   _json_scratch_doc.clear();
+
+  _probe_cmd_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
+      _probe_cmd_buffer, psram_free));
+  _probe_result_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
+      _probe_result_buffer, psram_free));
+  _probe_cmd_len = 0;
+  _probe_result_len = 0;
+  _probe_cmd_pending.store(false, std::memory_order_release);
+  _probe_result_pending.store(false, std::memory_order_release);
 
 #if defined(WITH_MQTT_NEIGHBORS)
   // Paired with the unconditional allocation in allocateRuntimeBuffers().
@@ -1452,6 +1479,18 @@ void MQTTBridge::mqttTaskLoop() {
     // Process packet queue
     processPacketQueue();
 
+    // Consume a pending probe result handed over by the mesh (Core 1). Outside
+    // the WITH_MQTT_NEIGHBORS guard on purpose (see the members in MQTTBridge.h).
+    if (_probe_result_pending.load(std::memory_order_acquire)) {
+      bool ok = publishProbeResult();
+      if (ok) {
+        MQTT_DEBUG_PRINTLN("Probe result published");
+      } else {
+        MQTT_DEBUG_PRINTLN("Probe result publish failed");
+      }
+      _probe_result_pending.store(false, std::memory_order_release);
+    }
+
 #if defined(WITH_MQTT_NEIGHBORS)
     // Consume a pending neighbors snapshot handed over by the mesh (Core 1).
     // The pending flag stays raised across the whole publish so a second
@@ -1668,6 +1707,36 @@ bool MQTTBridge::ensureSlotClient(int index) {
       MQTT_DEBUG_PRINTLN("MQTT%d error: type=%d", index + 1, error.error_type);
     }
   });
+
+  // --- Echo Observer-Probe inbound tasking channel --------------------------
+  // Registered on EXACTLY ONE owner-designated control slot, never on every
+  // enabled slot. serial/* is private only on the owner's own broker; the other
+  // slots a live Observer connects to are public presets. Subscribing there would
+  // (a) expose the single-slot mailbox to anyone who can publish on that broker,
+  // making occupancy a denial of service, (b) force a full ~3 KB-stack Ed25519
+  // verify on the 8 KB mesh loop task for every junk message, and (c) emit a
+  // signed rejection back onto that broker for each one.
+  //
+  // onTopic() rather than subscribe(): the client re-subscribes every stored
+  // onTopic entry on each CONNACK, and this bridge drives its own reconnect
+  // ladder with setAutoReconnect(false), so a bare subscribe would be lost.
+  if (_prefs && _prefs->probe_enable && _prefs->probe_control_slot == index) {
+    char cmd_topic[128];
+    if (mqttBuildSerialTopic(_iata, _device_id, true, cmd_topic, sizeof(cmd_topic))) {
+      slot.client->onTopic(cmd_topic, 1,
+        [this, index](char* topic, char* payload, int retained, int qos, bool dup) {
+          // esp-mqtt event task. Copy and flag ONLY -- see offerProbeCommand.
+          (void)topic; (void)qos; (void)dup;
+          // A retained tasking command has no legitimate use: it would be
+          // redelivered on every reconnect. Drop it before it reaches the mailbox.
+          if (retained) return;
+          if (payload) offerProbeCommand(index, payload, strlen(payload));
+        });
+      MQTT_DEBUG_PRINTLN("MQTT%d probe tasking channel: %s", index + 1, cmd_topic);
+    } else {
+      MQTT_DEBUG_PRINTLN("MQTT%d probe tasking channel unavailable (IATA/device unset)", index + 1);
+    }
+  }
   return true;
 }
 
@@ -3662,6 +3731,76 @@ bool MQTTBridge::publishNeighbors() {
   return published;
 }
 #endif  // WITH_MQTT_NEIGHBORS
+
+// ---------------------------------------------------------------------------
+// Echo Observer-Probe: inbound mailbox and result publishing
+// ---------------------------------------------------------------------------
+
+// esp-mqtt event task. Mirrors requestPublishNeighbors, but DROPS an oversized
+// payload instead of clamping it: a truncated signed token must never be handed
+// to the verifier.
+void MQTTBridge::offerProbeCommand(int slot, const char* payload, size_t len) {
+  if (!_probe_cmd_buffer || !payload || len == 0) return;
+  if (len >= PROBE_CMD_BUFFER_SIZE) { _probe_cmds_dropped++; return; }
+  // Backpressure. Counted, not silent: a command discarded here produces no
+  // reject token either (the controller cannot be answered from this task), so
+  // without the counter the loss is completely invisible from both ends.
+  if (_probe_cmd_pending.load(std::memory_order_acquire)) {
+    _probe_cmds_dropped++;
+    return;
+  }
+  memcpy(_probe_cmd_buffer, payload, len);
+  _probe_cmd_buffer[len] = '\0';
+  _probe_cmd_len = len;
+  _probe_cmd_slot = (uint8_t)slot;
+  _probe_cmd_pending.store(true, std::memory_order_release);
+}
+
+// Mesh loop (Core 1).
+bool MQTTBridge::takeProbeCommand(char* dest, size_t dest_size, size_t* out_len,
+                                  uint8_t* out_slot) {
+  if (!dest || dest_size == 0) return false;
+  if (!_probe_cmd_pending.load(std::memory_order_acquire)) return false;
+
+  size_t len = _probe_cmd_len;
+  bool ok = false;
+  if (_probe_cmd_buffer && len > 0 && len < dest_size) {
+    memcpy(dest, _probe_cmd_buffer, len);
+    dest[len] = '\0';
+    if (out_len) *out_len = len;
+    if (out_slot) *out_slot = _probe_cmd_slot;
+    ok = true;
+  }
+  _probe_cmd_pending.store(false, std::memory_order_release);
+  return ok;
+}
+
+// Mesh loop (Core 1).
+void MQTTBridge::requestPublishProbeResult(uint8_t slot, const char* token, size_t len) {
+  if (!_probe_result_buffer || !token || len == 0) { _probe_results_dropped++; return; }
+  if (len >= PROBE_RESULT_BUFFER_SIZE) { _probe_results_dropped++; return; }  // DROP, never truncate
+  if (_probe_result_pending.load(std::memory_order_acquire)) { _probe_results_dropped++; return; }
+  memcpy(_probe_result_buffer, token, len);
+  _probe_result_buffer[len] = '\0';
+  _probe_result_len = len;
+  _probe_result_slot = slot;
+  _probe_result_pending.store(true, std::memory_order_release);
+}
+
+// MQTT task (Core 0) only.
+bool MQTTBridge::publishProbeResult() {
+  if (!_probe_result_buffer || _probe_result_len == 0) return false;
+  int i = (int)_probe_result_slot;
+  if (i < 0 || i >= RUNTIME_MQTT_SLOTS) return false;
+  if (!_slots[i].enabled || !_slots[i].client || !_slots[i].connected) return false;
+
+  char topic[128];
+  if (!mqttBuildSerialTopic(_iata, _device_id, false, topic, sizeof(topic))) return false;
+
+  // QoS 1 and NEVER retained: a probe result must not be silently dropped, and a
+  // retained result would be replayed to the next subscriber as if it were fresh.
+  return publishToSlot(i, topic, _probe_result_buffer, _probe_result_len, false, 1);
+}
 
 // ---------------------------------------------------------------------------
 // Queue management

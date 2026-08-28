@@ -15,6 +15,8 @@
 #include "TxtDataHelpers.h"
 #include "AlertReporter.h"  // for alertReporterBannedChannelMatch[Hex]()
 #include "MQTTObserverValidation.h"  // pure input validators (host-testable)
+#include "ProbePolicy.h"  // Echo Observer-Probe policy predicates (host-testable)
+#include "ProbeCodec.h"   // probeHexToBytes (validates before writing)
 #include <Utils.h>
 #ifdef ESP_PLATFORM
 #include <WiFi.h>
@@ -291,6 +293,71 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
              memcmp(config, "mqtt.neighbors ", 15) == 0) {
     strcpy(reply, "Err - neighbors not enabled in this build");
 #endif
+  } else if (memcmp(config, "probe.controller ", 17) == 0) {
+    const char* hex = &config[17];
+    uint8_t key[PUB_KEY_SIZE];
+    if (strcmp(hex, "none") == 0) {
+      memset(_prefs->probe_controller_pubkey, 0, sizeof(_prefs->probe_controller_pubkey));
+      savePrefs();
+      strcpy(reply, "OK - controller cleared (probe now refuses every command)");
+    } else if (strlen(hex) != PUB_KEY_SIZE * 2
+               || !probeHexToBytes(hex, PUB_KEY_SIZE * 2, key, sizeof(key))) {
+      // Decoded into a local first: a rejected value must never reach the live
+      // key. mesh::Utils::fromHex writes as it parses and reports no failure.
+      strcpy(reply, "Err - need 64 hex chars (or 'none')");
+    } else {
+      memcpy(_prefs->probe_controller_pubkey, key, sizeof(key));
+      savePrefs();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "probe.max ", 10) == 0) {
+    // SESSIONS per hour, charged once at admission -- not per packet.
+    int v = atoi(&config[10]);
+    if (v < 0 || v > 1000) {
+      strcpy(reply, "Err - probe.max must be 0-1000 (0 = default)");
+    } else {
+      _prefs->probe_max_per_hour = (uint16_t)v;
+      savePrefs();
+      sprintf(reply, "OK - %d probe sessions/hour", v ? v : PROBE_DEFAULT_MAX_PER_HOUR);
+    }
+  } else if (memcmp(config, "probe.flood ", 12) == 0) {
+    _prefs->probe_allow_flood = memcmp(&config[12], "on", 2) == 0;
+    savePrefs();
+    if (_prefs->probe_allow_flood) {
+      strcpy(reply, "OK - flood ENABLED (probes to no-route targets will flood a request)");
+    } else {
+      strcpy(reply, "OK - flood off (no-route targets are probed zero-hop only)");
+    }
+  } else if (memcmp(config, "probe.gap ", 10) == 0) {
+    int v = atoi(&config[10]);
+    if (v < 0 || v > 255) {
+      strcpy(reply, "Err - gap must be 0-255 seconds");
+    } else {
+      _prefs->probe_gap_secs = (uint8_t)v;
+      savePrefs();
+      if (v == 0) strcpy(reply, "OK - no gap between probe sessions");
+      else sprintf(reply, "OK - %d s between probe sessions", v);
+    }
+  } else if (memcmp(config, "probe.slot ", 11) == 0) {
+    const char* v = &config[11];
+    if (memcmp(v, "off", 3) == 0) {
+      _prefs->probe_control_slot = 0xFF;
+      savePrefs();
+      strcpy(reply, "OK - no inbound tasking channel");
+    } else {
+      int slot = atoi(v);
+      if (slot < 1 || slot > MAX_MQTT_SLOTS) {
+        sprintf(reply, "Err - slot must be 1-%d, or 'off'", (int)MAX_MQTT_SLOTS);
+      } else {
+        _prefs->probe_control_slot = (uint8_t)(slot - 1);
+        savePrefs();
+        sprintf(reply, "OK - tasking channel on slot %d (restart to apply)", slot);
+      }
+    }
+  } else if (memcmp(config, "probe ", 6) == 0) {
+    _prefs->probe_enable = memcmp(&config[6], "on", 2) == 0;
+    savePrefs();
+    strcpy(reply, "OK - restart to apply");
   } else if (memcmp(config, "mqtt.ntp ", 9) == 0) {
     const char* host = &config[9];
     while (*host == ' ') host++;
@@ -839,6 +906,28 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
              memcmp(config, "mqtt.neighbors", 14) == 0) {
     strcpy(reply, "Err - neighbors not enabled in this build");
 #endif
+  } else if (memcmp(config, "probe.controller", 16) == 0) {
+    if (probeControllerKeySet(_prefs->probe_controller_pubkey,
+                              sizeof(_prefs->probe_controller_pubkey))) {
+      char hex[PUB_KEY_SIZE * 2 + 1];
+      mesh::Utils::toHex(hex, _prefs->probe_controller_pubkey, PUB_KEY_SIZE);
+      sprintf(reply, "> %s", hex);
+    } else {
+      strcpy(reply, "> (unset - every command is refused)");
+    }
+  } else if (memcmp(config, "probe.max", 9) == 0) {
+    sprintf(reply, "> %u sessions/hour%s", (unsigned)probeEffectiveMaxPerHour(_prefs->probe_max_per_hour),
+            _prefs->probe_max_per_hour ? "" : " (default)");
+  } else if (memcmp(config, "probe.flood", 11) == 0) {
+    sprintf(reply, "> %s", _prefs->probe_allow_flood ? "on" : "off");
+  } else if (memcmp(config, "probe.gap", 9) == 0) {
+    if (_prefs->probe_gap_secs == 0) strcpy(reply, "> 0 (no gap)");
+    else sprintf(reply, "> %u s between sessions", (unsigned)_prefs->probe_gap_secs);
+  } else if (memcmp(config, "probe.slot", 10) == 0) {
+    if (_prefs->probe_control_slot == 0xFF) strcpy(reply, "> off");
+    else sprintf(reply, "> %u", (unsigned)(_prefs->probe_control_slot + 1));
+  } else if (memcmp(config, "probe", 5) == 0 && (config[5] == '\0' || config[5] == ' ')) {
+    sprintf(reply, "> %s", _prefs->probe_enable ? "on" : "off");
   } else if (memcmp(config, "mqtt.ntp.diag", 13) == 0 && (config[13] == '\0' || config[13] == ' ')) {
 #ifdef ESP_PLATFORM
     // Connectivity probe across all configured NTP servers; never updates the clock.

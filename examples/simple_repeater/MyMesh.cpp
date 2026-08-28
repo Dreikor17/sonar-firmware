@@ -71,6 +71,13 @@
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
+// How often a dirty probe route cache may be rewritten to flash. Routes change
+// slowly; the whole file is rewritten each time, so this is deliberately long.
+// Overridable so a bench run can force a save without waiting a quarter hour.
+#ifndef PROBE_ROUTES_SAVE_INTERVAL
+  #define PROBE_ROUTES_SAVE_INTERVAL (15UL * 60UL * 1000UL)   // 15 minutes
+#endif
+
 void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
 #if MAX_NEIGHBOURS // check if neighbours enabled
   // find existing neighbour, else use least recently updated
@@ -565,6 +572,7 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
 }
 
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
+  probe.onPacketSent(pkt);           // probe packet confirmed on air
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
       && neighbor_discover_next < neighbor_discover_count) {
@@ -607,6 +615,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 }
 
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
+  probe.onPacketSendFailed(pkt);
 #if defined(WITH_MQTT_NEIGHBORS)
   if (neighbor_discover_active && pkt == neighbor_discover_request
       && neighbor_discover_next < neighbor_discover_count) {
@@ -713,6 +722,22 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
 
 int MyMesh::searchPeersByHash(const uint8_t *hash) {
   int n = 0;
+  // Echo Observer-Probe: overlay the active probe target so its RESPONSE can be
+  // decrypted even though it is not an ACL client. Offered first so a target that
+  // is ALSO an ACL client still resolves through the probe path while a session
+  // is awaiting a reply. NOT inside the WITH_MQTT_NEIGHBORS guard.
+  // Skipped when the target is already an ACL client, mirroring the
+  // neighbor-discover overlay: otherwise the overlay would be tried first for
+  // EVERY packet from that node and swallow its non-RESPONSE traffic. The
+  // isActiveTarget() fallbacks below handle the ACL-client case.
+  {
+    mesh::Identity probe_target;
+    if (probe.overlayMatchesHash(hash) && n < MAX_CLIENTS
+        && probe.overlayId(0, probe_target)
+        && acl.getClient(probe_target.pub_key, PUB_KEY_SIZE) == nullptr) {
+      matching_peer_indexes[n++] = PROBE_PEER_BASE;
+    }
+  }
 #if defined(WITH_MQTT_NEIGHBORS)
   // While a neighbor-scope discovery is active, overlay the heard neighbours
   // that are NOT already ACL clients so their RESPONSE packets can be decoded.
@@ -738,6 +763,16 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
 
 void MyMesh::getPeerSharedSecret(uint8_t *dest_secret, int peer_idx) {
   int i = matching_peer_indexes[peer_idx];
+  // Probe overlay entries have no precomputed secret; derive it on the fly.
+  // Checked before the neighbors overlay because PROBE_PEER_BASE (2000) is above
+  // NEIGHBOR_DISCOVER_PEER_BASE (1000) and would otherwise match that branch.
+  if (i >= PROBE_PEER_BASE) {
+    mesh::Identity target;
+    if (probe.overlayId(i - PROBE_PEER_BASE, target)) {
+      self_id.calcSharedSecret(dest_secret, target);
+      return;
+    }
+  }
 #if defined(WITH_MQTT_NEIGHBORS)
   // Overlay entries have no precomputed shared secret; derive it on the fly.
   if (neighbor_discover_active && i >= NEIGHBOR_DISCOVER_PEER_BASE) {
@@ -779,6 +814,17 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
 void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, const uint8_t *secret,
                             uint8_t *data, size_t len) {
   int i = matching_peer_indexes[sender_idx];
+  // Probe reply: consume and stop. Checked before the neighbors overlay for the
+  // same PROBE_PEER_BASE > NEIGHBOR_DISCOVER_PEER_BASE reason as above.
+  if (i >= PROBE_PEER_BASE) {
+    // A remote CLI reply comes back as PAYLOAD_TYPE_TXT_MSG, not RESPONSE
+    // (MyMesh.cpp:936-938 builds it), so dispatching only RESPONSE here dropped
+    // every command reply on the floor.
+    if (type == PAYLOAD_TYPE_RESPONSE || type == PAYLOAD_TYPE_TXT_MSG) {
+      probe.handleResponse(i - PROBE_PEER_BASE, data, len, type);
+    }
+    return;
+  }
 #if defined(WITH_MQTT_NEIGHBORS)
   // Overlay response: a heard neighbour (not an ACL client) answering our
   // anon-regions scope query. Consume it and stop — it is not a client packet.
@@ -795,6 +841,12 @@ void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, 
     return;
   }
   ClientInfo* client = acl.getClientByIdx(i);
+  // A probe target that is ALSO an ACL client resolves to a normal index when no
+  // overlay was offered (the session had not armed yet). Match it here too.
+  if (type == PAYLOAD_TYPE_RESPONSE && probe.isActiveTarget(client->id)
+      && probe.handleResponse(0, data, len)) {
+    return;
+  }
 #if defined(WITH_MQTT_NEIGHBORS)
   // A neighbour that IS an ACL client resolves to a normal index above, so a
   // scope-query response from it lands here — match it against the overlay.
@@ -907,6 +959,37 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
   // TODO: prevent replay attacks
   int i = matching_peer_indexes[sender_idx];
 
+  // Echo Observer-Probe: a request that went out FLOOD is answered with a PATH
+  // return that CARRIES the response as `extra`. Before this, extra_type/extra/
+  // extra_len were ignored entirely here, so every flooded probe had its answer
+  // silently thrown away (BaseChatMesh handles this at BaseChatMesh.cpp:341-343).
+  if (i >= PROBE_PEER_BASE) {
+    probe.handlePathReturn(i - PROBE_PEER_BASE, path, path_len, extra_type, extra, extra_len);
+    // RETURN TRUE so Mesh sends the reciprocal path return (src/Mesh.cpp:174-178).
+    //
+    // This is the half of route persistence that actually removes the flood.
+    // The target picks its reply route from ClientInfo::out_path and nothing
+    // else -- a login never supplies a reply path (:674, never overwritten by
+    // handleLoginReq) -- so until it holds a path for us it FLOODS every reply,
+    // even to a request that arrived direct. Caching our own route without this
+    // would merely move the flood from our radio to theirs, where neither
+    // _n_flood nor the flood veto can see it.
+    //
+    // Upstream's construction is used deliberately rather than hand-rolled: it
+    // teaches `pkt->path` (the inbound flood's accumulated hops = their route to
+    // us) and sends it via `path` (ours to them), so the direction is right by
+    // construction. It fires only when the inbound PATH was itself flooded, and
+    // it always sendDirect()s -- so it can never flood, and the veto is intact.
+    // It does bypass ProbeExecutor::transmit(), so it is not charged to the
+    // packet guard; that is acceptable precisely because it cannot flood.
+    //
+    // Ordering is load-bearing and satisfied here for free: this PATH return IS
+    // the login response, so the target already holds us as an ACL client and
+    // can decode the teach. Sent any earlier, searchPeersByHash would not
+    // resolve us and the packet would be dropped.
+    return true;
+  }
+
   if (i >= 0 && i < acl.getNumClients()) { // get from our known_clients table (sender SHOULD already be known in this context)
     MESH_DEBUG_PRINTLN("PATH to client, path_len=%d", (uint32_t)path_len);
     auto client = acl.getClientByIdx(i);
@@ -914,6 +997,11 @@ bool MyMesh::onPeerPathRecv(mesh::Packet *packet, int sender_idx, const uint8_t 
     // store a copy of path, for sendDirect()
     client->out_path_len = mesh::Packet::copyPath(client->out_path, path, path_len);
     client->last_activity = getRTCClock()->getCurrentTime();
+
+    // ...and the same extra-payload rescue when the target is an ACL client.
+    if (probe.isActiveTarget(client->id)) {
+      probe.handlePathReturn(0, path, path_len, extra_type, extra, extra_len);
+    }
   } else {
     MESH_DEBUG_PRINTLN("onPeerPathRecv: invalid peer idx: %d", i);
   }
@@ -1015,6 +1103,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   uptime_millis = 0;
   next_local_advert = next_flood_advert = 0;
   dirty_contacts_expiry = 0;
+  next_probe_routes_save = futureMillis(PROBE_ROUTES_SAVE_INTERVAL);
   set_radio_at = revert_radio_at = 0;
   _logging = false;
   region_load_active = false;
@@ -1111,6 +1200,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
 
+  // Echo Observer-Probe: bind after loadPrefs so both rate limiters are armed
+  // from the stored probe.max value rather than the constructor default.
+  probe.begin(this, &_prefs);
+
 #ifdef SIM_WIFI_SSID
   // Emulator builds (Wokwi) boot with fresh NVS every run. Seed WiFi so the
   // observer auto-joins the simulator's network and brings the MQTT bridge up
@@ -1131,6 +1224,9 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #endif
 
   acl.load(_fs, self_id);
+  // Restore learned probe routes, so a reboot does not cost a full sweep of
+  // floods relearning what this node already knew.
+  probe.routeCacheLoad(_fs);
   // TODO: key_store.begin();
   region_map.load(_fs);
 
@@ -1648,6 +1744,8 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+  } else if (memcmp(command, "probe", 5) == 0) {
+    handleProbeCommand(command + 5, reply);
 #if defined(WITH_MQTT_NEIGHBORS)
   } else if (memcmp(command, "discover.scopes", 15) == 0) {
     const char* sub = command + 15;
@@ -1769,6 +1867,15 @@ void MyMesh::loop() {
     dirty_contacts_expiry = 0;
   }
 
+  // Flush learned probe routes on the same lazy pattern. Deliberately a long
+  // interval and never on the learn itself: routes change slowly and this file
+  // is rewritten whole, so a short interval would burn flash for nothing. Losing
+  // the last interval's learning costs one flood per affected node, once.
+  if (probe.routesDirty() && millisHasNowPassed(next_probe_routes_save)) {
+    probe.routeCacheSave(_fs);
+    next_probe_routes_save = futureMillis(PROBE_ROUTES_SAVE_INTERVAL);
+  }
+
   // update uptime
   uint32_t now = millis();
   uptime_millis += now - last_millis;
@@ -1777,6 +1884,26 @@ void MyMesh::loop() {
 #ifdef WITH_MQTT_BRIDGE
   _alerter.onLoop(now);
 #endif
+
+  // Echo Observer-Probe: drain the inbound tasking mailbox and advance the probe
+  // session state machine. Deliberately OUTSIDE the WITH_MQTT_NEIGHBORS guard --
+  // that macro is only auto-defined when MAX_NEIGHBOURS > 0 and the board has (or
+  // is allowed to fake) PSRAM, and nesting this inside it would silently compile
+  // the whole probe feature away on other observer variants.
+#ifdef WITH_MQTT_BRIDGE
+  // Drained unconditionally: gating on probe_enable would latch a command in the
+  // mailbox while disabled and then run it on re-enable. ProbeExecutor::onCommand
+  // already rejects with PRJ_DISABLED.
+  if (bridge) {
+    size_t cmd_len = 0;
+    uint8_t cmd_slot = 0xFF;
+    if (bridge->takeProbeCommand(probe.commandBuffer(), probe.commandBufferSize(),
+                                 &cmd_len, &cmd_slot)) {
+      probe.onCommand(probe.commandBuffer(), cmd_len, cmd_slot);
+    }
+  }
+#endif
+  probe.loop();
 
 #if defined(WITH_MQTT_NEIGHBORS)
   // Two-stage periodic neighbors publication:
@@ -2323,3 +2450,192 @@ bool MyMesh::hasPendingWork() const {
 #endif
   return _mgr->getOutboundCount(0xFFFFFFFF) > 0;
 }
+
+// ===========================================================================
+// Echo Observer-Probe
+// ===========================================================================
+
+// Same shape as the neighbour scope-query timeout: server delay, the responder's
+// full CAD deferral window plus one maximum retry overshoot, and airtime for one
+// priority-0 packet ahead of the response plus the response itself. Duplicated
+// rather than reused because neighborDiscoverQueryTimeoutMs() lives inside the
+// WITH_MQTT_NEIGHBORS guard.
+uint32_t MyMesh::getProbeQueryTimeoutMs() const {
+  uint32_t response_airtime = _radio->getEstAirtimeFor(MAX_PACKET_PAYLOAD + 2);
+  return SERVER_RESPONSE_DELAY + getCADFailMaxDuration() + 360UL + response_airtime * 2UL;
+}
+
+bool MyMesh::getProbeStatusLine(char* buf, size_t buf_size) const {
+  return probe.getStatusLine(buf, buf_size);
+}
+
+// Resolve a target from a hex pubkey prefix: a full 64-char key is taken as-is,
+// a shorter prefix is matched against the ACL and the heard-neighbour table.
+bool MyMesh::resolveProbeTarget(const char* hex, size_t hex_len, mesh::Identity& out) {
+  if (hex_len == PUB_KEY_SIZE * 2) {
+    uint8_t key[PUB_KEY_SIZE];
+    if (!probeHexToBytes(hex, hex_len, key, sizeof(key))) return false;
+    out = mesh::Identity(key);
+    return true;
+  }
+  if (hex_len < 2 || (hex_len % 2) != 0) return false;
+
+  uint8_t prefix[PUB_KEY_SIZE];
+  size_t plen = hex_len / 2;
+  if (plen > PUB_KEY_SIZE) return false;
+  if (!probeHexToBytes(hex, hex_len, prefix, plen)) return false;
+
+  for (int i = 0; i < acl.getNumClients(); i++) {
+    ClientInfo* c = acl.getClientByIdx(i);
+    if (memcmp(c->id.pub_key, prefix, plen) == 0) { out = c->id; return true; }
+  }
+#if MAX_NEIGHBOURS
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (neighbours[i].heard_timestamp == 0) continue;
+    if (memcmp(neighbours[i].id.pub_key, prefix, plen) == 0) { out = neighbours[i].id; return true; }
+  }
+#endif
+  return false;
+}
+
+// CLI:  probe <pubkey-hex> [owner|ver|status|telemetry|all]
+//       probe.status
+void MyMesh::handleProbeCommand(const char* args, char* reply) {
+  while (*args == ' ') args++;
+
+  if (memcmp(args, ".status", 7) == 0) {
+    // Sized to the CLI reply buffer it is copied into (char reply[160],
+    // main.cpp:153). snprintf below cannot exceed it, so the copy is safe.
+    char stats[160];
+    probe.appendStatsJson(stats, sizeof(stats));
+    // The bridge owns the mailbox counters, so splice them in here rather than
+    // reaching across from the executor. A non-zero cmd_dropped means tasking
+    // commands arrived faster than the node drained them and were lost with no
+    // reject token -- otherwise completely invisible from either end.
+    size_t n = strlen(stats);
+#if defined(WITH_MQTT_BRIDGE)
+    // n < sizeof(stats) always (snprintf terminated it), so the remaining space
+    // below cannot underflow.
+    if (bridge && n > 1 && n < sizeof(stats) && stats[n - 1] == '}') {
+      snprintf(&stats[n - 1], sizeof(stats) - (n - 1),
+               ",\"cdrop\":%lu,\"rdrop\":%lu}",
+               (unsigned long)bridge->getProbeCommandsDropped(),
+               (unsigned long)bridge->getProbeResultsDropped());
+    }
+#endif
+    sprintf(reply, "%s", stats);
+    return;
+  }
+  if (*args == 0) {
+    strcpy(reply, "Err - usage: probe <pubkey-hex> [owner|ver|status|telemetry|all]");
+    return;
+  }
+  if (!_prefs.probe_enable) {
+    strcpy(reply, "Err - probe disabled (set probe on)");
+    return;
+  }
+
+  const char* hex = args;
+  size_t hex_len = 0;
+  while (hex[hex_len] && hex[hex_len] != ' ') hex_len++;
+
+  const char* op = hex + hex_len;
+  while (*op == ' ') op++;
+
+  uint8_t ops = 0;
+  if (*op == 0 || memcmp(op, "owner", 5) == 0)          ops = PROBE_OP_OWNER;
+  else if (memcmp(op, "ver", 3) == 0)                   ops = PROBE_OP_VER_IDENT;
+  else if (memcmp(op, "status", 6) == 0)                ops = PROBE_OP_STATUS;
+  else if (memcmp(op, "telemetry", 9) == 0)             ops = PROBE_OP_TELEMETRY;
+  else if (memcmp(op, "all", 3) == 0)
+    ops = PROBE_OP_VER_IDENT | PROBE_OP_STATUS | PROBE_OP_TELEMETRY;
+  else { strcpy(reply, "Err - unknown op"); return; }
+
+  mesh::Identity target;
+  if (!resolveProbeTarget(hex, hex_len, target)) {
+    strcpy(reply, "Err - target not found (give a full 64-char key, or a known prefix)");
+    return;
+  }
+
+  char err[64]; err[0] = 0;
+  if (!probe.startLocal(target, ops, err, sizeof(err))) {
+    sprintf(reply, "Err - %s", err);
+    return;
+  }
+  sprintf(reply, "OK - probe queued (%02X%02X, ops=0x%02X)",
+          target.pub_key[0], target.pub_key[1], ops);
+}
+
+#ifdef WITH_MQTT_BRIDGE
+// Result and rejection tokens are built here, on Core 1, because self_id lives
+// on this task. Buffers are file-static rather than stack locals: the mesh loop
+// task has an 8 KB stack that the Ed25519 path already eats ~3 KB of.
+static char s_probe_claims[1024];
+static char s_probe_token[1600];
+
+// Standards-correct EdDSA compact token (base64url signature, alg "EdDSA"), NOT
+// the JWTHelper format -- that one hex-encodes the signature and uses
+// alg "Ed25519", which no stock JWT library will verify. JWTHelper is left alone
+// so broker authentication is unaffected. See DIRECTIONS-firmware.md D.3.
+static bool probeSignToken(const mesh::LocalIdentity& id, const char* claims_json,
+                           char* out, size_t out_size) {
+  static const char* HDR = "{\"alg\":\"EdDSA\",\"typ\":\"JWT\"}";
+  size_t o = probeB64UrlEncode((const uint8_t*)HDR, strlen(HDR), out, out_size);
+  if (o == 0) return false;
+  if (o + 1 >= out_size) return false;
+  out[o++] = '.';
+  size_t p = probeB64UrlEncode((const uint8_t*)claims_json, strlen(claims_json),
+                               out + o, out_size - o);
+  if (p == 0) return false;
+  size_t signing_len = o + p;
+
+  uint8_t sig[SIGNATURE_SIZE];
+  id.sign(sig, (const uint8_t*)out, (int)signing_len);
+
+  if (signing_len + 1 >= out_size) return false;
+  out[signing_len] = '.';
+  size_t s = probeB64UrlEncode(sig, sizeof(sig), out + signing_len + 1,
+                               out_size - signing_len - 1);
+  if (s == 0) return false;
+  return true;
+}
+
+void MyMesh::publishProbeResult(const ProbeSession& s, uint8_t state, uint8_t route,
+                                const char* extra_json, size_t extra_len) {
+  if (!bridge) return;
+  char tgt_hex[PUB_KEY_SIZE * 2 + 1];
+  probeBytesToHex(s.target.pub_key, PUB_KEY_SIZE, tgt_hex, sizeof(tgt_hex));
+
+  int w = snprintf(s_probe_claims, sizeof(s_probe_claims),
+           "{\"jid\":\"%s\",\"tgt\":\"%s\",\"st\":\"%s\",\"route\":\"%s\",\"iat\":%lu%.*s}",
+           s.job_id, tgt_hex, probeExecStateName(state), probeExecRouteName(route),
+           (unsigned long)getRTCClock()->getCurrentTime(),
+           (int)extra_len, extra_json ? extra_json : "");
+
+  // A truncated claims string is INVALID JSON, and signing it would hand Echo a
+  // correctly-signed token it cannot parse. Emit a short, well-formed
+  // "truncated" result instead so Echo can re-probe with a narrower ops mask.
+  if (w < 0 || (size_t)w >= sizeof(s_probe_claims)) {
+    snprintf(s_probe_claims, sizeof(s_probe_claims),
+             "{\"jid\":\"%s\",\"tgt\":\"%s\",\"st\":\"%s\",\"route\":\"%s\",\"iat\":%lu,\"truncated\":true}",
+             s.job_id, tgt_hex, probeExecStateName(state), probeExecRouteName(route),
+             (unsigned long)getRTCClock()->getCurrentTime());
+  }
+
+  if (!probeSignToken(self_id, s_probe_claims, s_probe_token, sizeof(s_probe_token))) return;
+  bridge->requestPublishProbeResult(s.reply_slot, s_probe_token, strlen(s_probe_token));
+}
+
+void MyMesh::publishProbeReject(uint8_t reply_slot, const char* job_id, const char* reason) {
+  if (!bridge) return;
+  snprintf(s_probe_claims, sizeof(s_probe_claims),
+           "{\"jid\":\"%s\",\"st\":\"denied\",\"reason\":\"%s\",\"iat\":%lu}",
+           job_id ? job_id : "", reason ? reason : "unknown",
+           (unsigned long)getRTCClock()->getCurrentTime());
+  if (!probeSignToken(self_id, s_probe_claims, s_probe_token, sizeof(s_probe_token))) return;
+  bridge->requestPublishProbeResult(reply_slot, s_probe_token, strlen(s_probe_token));
+}
+#else
+void MyMesh::publishProbeResult(const ProbeSession&, uint8_t, uint8_t, const char*, size_t) { }
+void MyMesh::publishProbeReject(uint8_t, const char*, const char*) { }
+#endif

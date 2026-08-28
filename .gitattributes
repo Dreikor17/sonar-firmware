@@ -1,0 +1,4 @@
+
+# Shell scripts must keep LF: tools/run_probe_tests.sh executes inside a Linux
+# container, where CRLF line endings break the shebang and every line.
+*.sh text eol=lf

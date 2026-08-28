@@ -307,6 +307,28 @@ private:
   char _json_scratch_buffer[PUBLISH_JSON_BUFFER_SIZE];
   #endif
 
+  // --- Echo Observer-Probe -------------------------------------------------
+  // Single-slot inbound tasking mailbox and outbound result buffer. Deliberately
+  // OUTSIDE the WITH_MQTT_NEIGHBORS guard: that macro is only auto-defined when
+  // MAX_NEIGHBOURS > 0 and the board has (or fakes) PSRAM, and nesting the probe
+  // feature inside it would silently compile it away on other observer variants.
+  static const size_t PROBE_CMD_BUFFER_SIZE = 1024;
+  // Sized against the whole chain: claims 1024 -> base64 1368 -> token
+  // 37 + 1 + 1368 + 1 + 86 = 1493. 1600 leaves headroom.
+  static const size_t PROBE_RESULT_BUFFER_SIZE = 1600;
+  char*   _probe_cmd_buffer;
+  size_t  _probe_cmd_len;
+  uint8_t _probe_cmd_slot;
+  // The esp-mqtt event task release-stores; the mesh loop (Core 1) acquire-loads.
+  std::atomic<bool> _probe_cmd_pending;
+
+  char*   _probe_result_buffer;
+  size_t  _probe_result_len;
+  uint8_t _probe_result_slot;
+  std::atomic<bool> _probe_result_pending;
+  uint32_t _probe_results_dropped;
+  uint32_t _probe_cmds_dropped;
+
 #if defined(WITH_MQTT_NEIGHBORS)
   // Persistent PSRAM copy of the neighbors-table JSON. The mesh (Core 1) builds
   // the payload into its own transient buffer, hands it here via
@@ -465,6 +487,9 @@ private:
   // neighbors topic. Runs on the MQTT task (Core 0) only.
   bool publishNeighbors();
 #endif
+  // Publishes the pending probe-result token to the slot the command arrived on.
+  // Runs on the MQTT task (Core 0) only.
+  bool publishProbeResult();
   void queuePacket(mesh::Packet* packet, bool is_tx);
   void dequeuePacket();
   bool isAnySlotConnected();
@@ -597,6 +622,7 @@ public:
   // already in flight or the buffer is unavailable.
   void requestPublishNeighbors(const char* json, size_t len);
 
+
   // Periodic-neighbors schedule, reported by the mesh loop for `get mqtt.status`.
   // The mesh owns the timer; the bridge only caches the summary so the wrap-safe
   // millis math stays on the side that already has those helpers.
@@ -607,6 +633,41 @@ public:
   };
   void setNeighborsSchedule(NeighborsPhase phase, uint32_t secs_until_next);
 #endif
+
+  // --- Echo Observer-Probe --------------------------------------------------
+  // Deliberately OUTSIDE the WITH_MQTT_NEIGHBORS block above: that macro is only
+  // auto-defined when MAX_NEIGHBOURS > 0 and the board has (or fakes) PSRAM, so
+  // declaring the probe API inside it breaks the build on every observer variant
+  // without it -- while the two obvious test targets both define it and hide the
+  // problem.
+  //
+  // Called from the esp-mqtt event task by the onTopic lambda. Copy-and-flag
+  // only: no radio, no crypto, no allocation. `len` MUST be strlen(payload) --
+  // the MQTT message callback has no length parameter and hands over a
+  // NUL-terminated buffer.
+  void offerProbeCommand(int slot, const char* payload, size_t len);
+
+  // Called from the mesh loop (Core 1). Copies the command out and clears the
+  // mailbox. Returns false when nothing is pending.
+  bool takeProbeCommand(char* dest, size_t dest_size, size_t* out_len, uint8_t* out_slot);
+
+  // Called from the mesh loop (Core 1) with a finished, signed result token.
+  // Dropped if one is still publishing, or if it exceeds the buffer: a truncated
+  // signed token is worse than no token at all.
+  void requestPublishProbeResult(uint8_t slot, const char* token, size_t len);
+
+  // How many finished results were dropped because the single-slot mailbox was
+  // still busy. Surfaced through probe.status so a lost outcome is visible.
+  uint32_t getProbeResultsDropped() const { return _probe_results_dropped; }
+
+  // Inbound tasking commands discarded because the single-slot mailbox was still
+  // full. Counted rather than left silent: an invisible drop here is the kind of
+  // thing that gets diagnosed as "the mesh is flaky" for a month. The mailbox is
+  // deliberately 1-deep -- it is drained every mesh-loop pass, and throughput is
+  // not the constraint (one Observer sustains far more sessions per hour than a
+  // mesh-wide sweep needs) -- so a non-zero count means the controller is
+  // batching faster than the node drains, not that the node is short of capacity.
+  uint32_t getProbeCommandsDropped() const { return _probe_cmds_dropped; }
 
   int getConnectedBrokers() const;
   int getQueueSize() const;

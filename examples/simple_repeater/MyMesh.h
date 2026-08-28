@@ -48,6 +48,7 @@
 #include <helpers/RegionMap.h>
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
+#include "ProbeExecutor.h"
 
 
 struct RepeaterStats {
@@ -113,10 +114,12 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   RegionEntry* recv_pkt_region;
   TransportKey default_scope;
   RateLimiter discover_limiter, anon_limiter;
+  ProbeExecutor probe;
   uint32_t pending_discover_tag;
   unsigned long pending_discover_until;
   bool region_load_active;
   unsigned long dirty_contacts_expiry;
+  unsigned long next_probe_routes_save;   // lazy flush of the probe route cache
 #if MAX_NEIGHBOURS
   NeighbourInfo neighbours[MAX_NEIGHBOURS];
 #endif
@@ -287,6 +290,39 @@ public:
   }
 
   void sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size);
+
+  // --- Echo Observer-Probe -------------------------------------------------
+  // Accessors ProbeExecutor needs: it is a plain class holding a MyMesh*, not a
+  // mesh::Mesh subclass, so default_scope (private) and _mgr (protected in
+  // Dispatcher) are otherwise unreachable. Deliberately OUTSIDE any
+  // WITH_MQTT_NEIGHBORS guard.
+  const TransportKey& getDefaultScope() const { return default_scope; }
+  int getFreePacketCount() const { return _mgr->getFreeCount(); }
+
+  // Withdraw a still-queued outbound packet and release it. Without this a probe
+  // whose queue deadline expires is reported send_failed while the packet is
+  // STILL queued, and it later transmits with nobody listening -- airtime spent
+  // on a session that has already been torn down and answered.
+  bool withdrawOutboundPacket(mesh::Packet* pkt) {
+    if (!pkt) return false;
+    int total = _mgr->getOutboundTotal();
+    for (int i = 0; i < total; i++) {
+      if (_mgr->getOutboundByIdx(i) == pkt) {
+        mesh::Packet* removed = _mgr->removeOutboundByIdx(i);
+        if (removed) releasePacket(removed);
+        return true;
+      }
+    }
+    return false;   // already on air; nothing to withdraw
+  }
+  uint32_t getProbeQueryTimeoutMs() const;
+  void handleProbeCommand(const char* args, char* reply);
+  bool resolveProbeTarget(const char* hex, size_t hex_len, mesh::Identity& out);
+  ProbeExecutor& getProbe() { return probe; }
+  void publishProbeResult(const ProbeSession& s, uint8_t state, uint8_t route,
+                          const char* extra_json, size_t extra_len);
+  void publishProbeReject(uint8_t reply_slot, const char* job_id, const char* reason);
+  bool getProbeStatusLine(char* buf, size_t buf_size) const;
 
   // CommonCLICallbacks
   void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) override;

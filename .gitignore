@@ -32,3 +32,6 @@ platformio.local.ini
 .build-wt-*/
 .wt-*/
 scripts/__pycache__/*
+
+# Echo Observer-Probe bench controller key (never commit)
+tools/probe_controller.key
