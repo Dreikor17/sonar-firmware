@@ -66,6 +66,28 @@ static inline bool probeRouteIsDirect(uint8_t out_path_len) {
   return out_path_len != PROBE_OUT_PATH_UNKNOWN;
 }
 
+// Intermediate-hop count encoded in a path length. The low 6 bits are the hash
+// count == the number of hops in the path (src/Packet.cpp:14). An unknown/empty
+// path (zero-hop or an about-to-flood step) has no learned hops, so 0.
+static inline uint8_t probeRoutePathCount(uint8_t out_path_len) {
+  if (out_path_len == PROBE_OUT_PATH_UNKNOWN) return 0;
+  return out_path_len & 63;
+}
+
+// Hops to ASSUME for a flooded step, whose real reach is unknown until a PATH
+// return teaches it. The probe's listen window is sized from this, so it is a
+// deliberate over-estimate: waiting too long on a dead node only slows the
+// failure report, but waiting too SHORT drops a real far reply before it decrypts
+// -- and because the route is only ever learned from an in-window reply, a window
+// too short to hear the first answer makes the target permanently unreachable.
+//
+// Coupled to Echo's probe_timeout_seconds (default 30, backend/app/config.py:103):
+// the on-node window must fit inside it. At 4 hops and typical airtime the window
+// is ~15-20s; raise probe_timeout_seconds before raising this on a high-SF mesh.
+#ifndef PROBE_FLOOD_ASSUMED_HOPS
+  #define PROBE_FLOOD_ASSUMED_HOPS 4
+#endif
+
 // Effective session budget: 0 in prefs means "use the built-in default".
 static inline uint16_t probeEffectiveMaxPerHour(uint16_t configured) {
   return configured ? configured : (uint16_t)PROBE_DEFAULT_MAX_PER_HOUR;

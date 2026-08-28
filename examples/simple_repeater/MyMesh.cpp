@@ -2511,14 +2511,30 @@ bool MyMesh::hasPendingWork() const {
 // Echo Observer-Probe
 // ===========================================================================
 
-// Same shape as the neighbour scope-query timeout: server delay, the responder's
-// full CAD deferral window plus one maximum retry overshoot, and airtime for one
-// priority-0 packet ahead of the response plus the response itself. Duplicated
-// rather than reused because neighborDiscoverQueryTimeoutMs() lives inside the
-// WITH_MQTT_NEIGHBORS guard.
-uint32_t MyMesh::getProbeQueryTimeoutMs() const {
+// How long to wait for a probe reply, given the number of intermediate HOPS the
+// request had to cross.
+//
+// The base is the neighbour scope-query timeout: server delay, the responder's full
+// CAD deferral window plus one maximum retry overshoot, and airtime for one priority-0
+// packet ahead of the response plus the response itself. That is a ZERO-HOP round trip
+// -- a target on the bench. It was previously used unchanged for every probe, including
+// flooded ones reaching multiple hops away, so a far node's reply was routinely dropped
+// while it was still in flight (the whole session having already timed out). Because the
+// route cache is only written from an IN-WINDOW reply, that node could then never teach
+// the probe a path, and every subsequent poll re-flooded and re-timed-out forever.
+//
+// Each intermediate hop re-forwards the request AND the reply -- two transmissions --
+// and each forward costs its own airtime plus up to 5*tx_delay_factor (=2.5) airtimes of
+// retransmit jitter (getRetransmitDelay, MyMesh.cpp:647-649). ~3.5 airtimes per forward,
+// ~7 per hop for the round trip. Sized at the jitter MAXIMUM on purpose: over-waiting on
+// a dead node only slows the failure report; under-waiting drops a live reply.
+//
+// Duplicated from neighborDiscoverQueryTimeoutMs() rather than reused because that lives
+// inside the WITH_MQTT_NEIGHBORS guard.
+uint32_t MyMesh::getProbeQueryTimeoutMs(uint8_t hops) const {
   uint32_t response_airtime = _radio->getEstAirtimeFor(MAX_PACKET_PAYLOAD + 2);
-  return SERVER_RESPONSE_DELAY + getCADFailMaxDuration() + 360UL + response_airtime * 2UL;
+  uint32_t base = SERVER_RESPONSE_DELAY + getCADFailMaxDuration() + 360UL + response_airtime * 2UL;
+  return base + (uint32_t)hops * response_airtime * 7UL;
 }
 
 bool MyMesh::getProbeStatusLine(char* buf, size_t buf_size) const {

@@ -750,7 +750,17 @@ void ProbeExecutor::onPacketSent(mesh::Packet* pkt) {
   if (_active < 0 || pkt == NULL || pkt != _inflight) return;
   _inflight = NULL;
   _awaiting = true;
-  _deadline = millis() + _mesh->getProbeQueryTimeoutMs();
+  // Size the listen window to how far the reply must travel. _route was set for this
+  // step in sendStep(): a DIRECT send has a known hop count in _out_path_len; a FLOOD
+  // reaches an unknown distance, so assume a conservative multi-hop reach; a ZEROHOP
+  // send is a direct neighbour, so the zero-hop base is correct.
+  uint8_t hops = 0;
+  if (_route == PR_DIRECT) {
+    hops = probeRoutePathCount(_out_path_len);
+  } else if (_route == PR_FLOOD) {
+    hops = PROBE_FLOOD_ASSUMED_HOPS;
+  }
+  _deadline = millis() + _mesh->getProbeQueryTimeoutMs(hops);
 }
 
 void ProbeExecutor::onPacketSendFailed(mesh::Packet* pkt) {

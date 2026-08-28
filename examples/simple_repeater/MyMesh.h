@@ -315,7 +315,7 @@ public:
     }
     return false;   // already on air; nothing to withdraw
   }
-  uint32_t getProbeQueryTimeoutMs() const;
+  uint32_t getProbeQueryTimeoutMs(uint8_t hops = 0) const;
   void handleProbeCommand(const char* args, char* reply);
   bool resolveProbeTarget(const char* hex, size_t hex_len, mesh::Identity& out);
   ProbeExecutor& getProbe() { return probe; }
