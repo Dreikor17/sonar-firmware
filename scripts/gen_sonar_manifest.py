@@ -39,7 +39,10 @@ import sys
 # Must match build.sh and release-sonar.sh:
 #   v<VERSION>.<BUILD>-observer-<CHANNEL>-<HASH>
 # No dot in the tag -- see the note in release-sonar.sh.
-CHANNEL_TAG = "sonar"
+# Default only. The real value comes from OTA_CHANNEL_TAG, which is what build.sh compiles
+# INTO the firmware -- hardcoding it here meant the manifest could name a different channel
+# than the image it describes, and the two only have to agree for anyone to notice.
+CHANNEL_TAG = os.environ.get("OTA_CHANNEL_TAG") or "sonar"
 
 
 SIG_PREFIX = b"sonar-manifest-v1\n"
