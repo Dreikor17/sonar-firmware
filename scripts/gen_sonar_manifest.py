@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import pathlib
 import json
 import os
 import subprocess
@@ -39,6 +40,27 @@ import sys
 #   v<VERSION>.<BUILD>-observer-<CHANNEL>-<HASH>
 # No dot in the tag -- see the note in release-sonar.sh.
 CHANNEL_TAG = "sonar"
+
+
+SIG_PREFIX = b"sonar-manifest-v1\n"
+
+
+def manifest_signing_input(m: dict) -> bytes:
+    """The exact bytes both sides sign and verify.
+
+    Fixed order, newline-separated, with a version prefix so the scheme can change without
+    a signature made for one meaning being accepted as another. Every field the firmware
+    ACTS on is in here: the URL it fetches, the version it compares, the partition
+    signature it refuses on, and the digest it will check once it can.
+    """
+    return SIG_PREFIX + "\n".join([
+        str(m["version"]),
+        str(m["file"]),
+        str(m["baseVersion"]),
+        str(m["build"]),
+        str(m["partSig"]),
+        str(m["sha256"]),
+    ]).encode()
 
 
 def git_hash() -> str:
@@ -60,6 +82,12 @@ def main() -> int:
     ap.add_argument("--hash", default="", help="commit hash; defaults to git HEAD")
     ap.add_argument("--out", default="out/manifests")
     ap.add_argument("--bin-dir", default="out")
+    ap.add_argument("--signing-key", default="",
+                    help="path to a file holding the controller Ed25519 private key as hex; "
+                         "the manifest is signed with it and the node verifies against the "
+                         "controller key it already holds")
+    ap.add_argument("--allow-unsigned", action="store_true",
+                    help="emit a manifest with no signature (throwaway builds only)")
     ap.add_argument("--filename-tag", default="-sonar",
                     help="channel tag build.sh put in the ARTIFACT NAME "
                          "(FILENAME_CHANNEL_TAG); must match or the file is not found")
@@ -121,9 +149,34 @@ def main() -> int:
         "build": args.build,
         "partitionChange": False,
         "partSig": partsig,
-        # Not read by the firmware; here so a human (or a mirror) can verify the artifact.
+        # Not verified by the firmware today -- it cannot, because httpUpdate only accepts a
+        # digest from the server's own x-MD5 header and GitHub does not send one. It IS
+        # covered by the signature below, so when a streaming check is added later the value
+        # it compares against is already authenticated.
         "sha256": sha,
     }
+
+    # --- signature ----------------------------------------------------------------
+    # Signed with the controller key the node already holds and already knows how to
+    # verify. Without this the manifest is the whole trust root: it names the URL the
+    # firmware is fetched from, so write access to the host serving /v/*.json IS the
+    # authority to run code on every node in the field. A digest in the manifest does not
+    # help -- whoever forges the manifest picks the digest too.
+    #
+    # A deterministic field list rather than canonical JSON. The device parses with
+    # ArduinoJson and re-serialising it byte-identically to Python's json.dump is a
+    # promise neither side can keep; signing named fields in a fixed order is something
+    # both can reproduce exactly.
+    if args.signing_key:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        raw = bytes.fromhex(pathlib.Path(args.signing_key).read_text(encoding="utf-8").strip())
+        priv = Ed25519PrivateKey.from_private_bytes(raw)
+        manifest["sig"] = priv.sign(manifest_signing_input(manifest)).hex().upper()
+    elif not args.allow_unsigned:
+        print("ERROR: no --signing-key. An unsigned manifest lets anyone who can write the"
+              " manifest host choose what firmware every node runs. Pass --allow-unsigned"
+              " only for a throwaway build that will never be published.", file=sys.stderr)
+        return 2
 
     os.makedirs(args.out, exist_ok=True)
     dest = os.path.join(args.out, f"{args.env}.json")

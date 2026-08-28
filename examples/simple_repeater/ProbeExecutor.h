@@ -55,6 +55,19 @@ class MyMesh;
 // the shared deployment key onto one issued just for it, so day-to-day tasking no longer
 // depends on a key every node in the field shares.
 #define PROBE_OP_SET_CONTROLLER 0x20
+// Node management: a fixed set of things the controller may ask this node to do to ITSELF.
+// Self-directed like SET_CONTROLLER -- no session, no target, no radio, no airtime.
+//
+// Deliberately not a shell. PROBE_OP_COMMAND is arbitrary text run on a DIFFERENT node
+// behind a sealed admin password; this is a named action from a list both ends carry, so
+// widening what a controller can do to this node takes a firmware change, not a payload.
+#define PROBE_OP_MANAGE     0x40
+// Every op this firmware understands. Anything outside it is REFUSED rather than ignored:
+// an unknown bit used to run an empty session and answer "ok", so a newer controller was
+// told its request succeeded by a node that had done nothing at all. Observed exactly that
+// while building the management op -- st=ok, route=none, no action. A controller cannot
+// distinguish that from real success, and for a firmware push it is the worst possible lie.
+#define PROBE_OPS_ALL (PROBE_OP_OWNER | PROBE_OP_VER_IDENT | PROBE_OP_STATUS                        | PROBE_OP_TELEMETRY | PROBE_OP_COMMAND                        | PROBE_OP_SET_CONTROLLER | PROBE_OP_MANAGE)
 #define PROBE_OPS_NEED_LOGIN (PROBE_OP_VER_IDENT | PROBE_OP_STATUS | PROBE_OP_TELEMETRY                               | PROBE_OP_COMMAND)
 
 #define PROBE_JOB_ID_LEN 16

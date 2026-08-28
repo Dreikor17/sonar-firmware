@@ -165,24 +165,26 @@ struct OtaTaskArgs {
   const char* current_ver;
   bool dry_run;
   char* reply;
+  const uint8_t* controller_pubkey;
   volatile bool result;
   volatile bool done;
 };
 
 static void ota_task_entry(void* param) {
   OtaTaskArgs* a = static_cast<OtaTaskArgs*>(param);
-  a->result = a->self->otaFromManifestImpl(a->current_ver, a->dry_run, a->reply);
+  a->result = a->self->otaFromManifestImpl(a->current_ver, a->dry_run, a->reply,
+                                          a->controller_pubkey);
   a->done = true;        // on a successful `ota update` we reboot before reaching here
   vTaskDelete(nullptr);
 }
 
-bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char reply[]) {
+bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char reply[], const uint8_t* controller_pubkey) {
   // The TLS handshake (cert-bundle verify) + JSON parse / HTTPUpdate use far more
   // stack than the ~8 KB loop task offers — especially when reached via the deep
   // mesh-receive call chain (it overflows the loopTask canary). Run the work in a
   // dedicated 24 KB-stack task and block here until it finishes. The big stack is
   // freed when the task exits; on a successful update the chip reboots inside it.
-  OtaTaskArgs args = { this, current_ver, dry_run, reply, false, false };
+  OtaTaskArgs args = { this, current_ver, dry_run, reply, controller_pubkey, false, false };
   TaskHandle_t handle = nullptr;
   BaseType_t ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", 24576, &args, 5, &handle, 1);
   if (ok != pdPASS) {
@@ -195,7 +197,7 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
   return args.result;
 }
 
-bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char reply[]) {
+bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char reply[], const uint8_t* controller_pubkey) {
 #if !defined(OTA_MANIFEST_BASE) || !defined(OTA_VARIANT)
   strcpy(reply, "ERR: OTA not configured (build via build.sh)");
   return false;
@@ -308,11 +310,65 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   bool legacy_partition_change = doc["partitionChange"] | false;
   char manifest_partsig[256] = {0};
   strncpy(manifest_partsig, doc["partSig"] | "", sizeof(manifest_partsig) - 1);
+  char manifest_sha[80] = {0}, manifest_sig[160] = {0};
+  strncpy(manifest_sha, doc["sha256"] | "", sizeof(manifest_sha) - 1);
+  strncpy(manifest_sig, doc["sig"] | "", sizeof(manifest_sig) - 1);
   doc.clear();
 
   if (!file_url[0]) {
     strcpy(reply, "ERR: manifest missing file");
     return false;
+  }
+
+  // --- Is this manifest ours? -------------------------------------------------
+  // The manifest names the URL this node will fetch its own firmware from, so before
+  // signing it, write access to the host serving it WAS the authority to run code on
+  // every node in the field -- no key, no compromise of anything we hold. A digest in
+  // the manifest never helped: whoever forges the manifest picks the digest too.
+  //
+  // Verified against the controller key this node already holds and already trusts for
+  // tasking. Checked BEFORE the version comparison, so an unsigned or forged manifest
+  // cannot even influence the "up to date" answer -- which `ota update` gates on.
+  {
+    bool have_key = controller_pubkey != nullptr;
+    if (have_key) {
+      // All-zero is the codebase's 'unset' marker for this key (see NodePrefs).
+      bool any = false;
+      for (size_t i = 0; i < PUB_KEY_SIZE; i++) { if (controller_pubkey[i]) { any = true; break; } }
+      have_key = any;
+    }
+    if (!have_key) {
+      // No controller key means nothing here can be trusted to say what to install.
+      strcpy(reply, "ERR: no controller key on this node; refusing an unverifiable update");
+      return false;
+    }
+    if (!manifest_sig[0]) {
+      strcpy(reply, "ERR: manifest is not signed");
+      return false;
+    }
+    uint8_t sig[SIGNATURE_SIZE];
+    if (strlen(manifest_sig) != SIGNATURE_SIZE * 2
+        || !mesh::Utils::fromHex(sig, SIGNATURE_SIZE, manifest_sig)) {
+      strcpy(reply, "ERR: manifest signature malformed");
+      return false;
+    }
+    // Rebuilt in the same fixed order the signer uses. Deliberately NOT a re-serialisation
+    // of the parsed JSON: reproducing another implementation's byte-for-byte output is a
+    // promise neither side can keep, and a signature that only sometimes verifies is worse
+    // than none. Every field below is one this function goes on to ACT on.
+    char signing_input[560];
+    int n = snprintf(signing_input, sizeof(signing_input),
+                     "sonar-manifest-v1\n%s\n%s\n%s\n%d\n%s\n%s",
+                     avail_version, file_url, avail_base, avail_build,
+                     manifest_partsig, manifest_sha);
+    if (n <= 0 || n >= (int)sizeof(signing_input)) {
+      strcpy(reply, "ERR: manifest too large to verify");
+      return false;
+    }
+    if (!mesh::Identity(controller_pubkey).verify(sig, (const uint8_t*)signing_input, n)) {
+      strcpy(reply, "ERR: manifest signature does not match this node's controller");
+      return false;
+    }
   }
 
   // Partition compatibility: prefer the precise per-build signature — compare the
@@ -442,7 +498,7 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
 #endif  // OTA_MANIFEST_BASE && OTA_VARIANT
 }
 #else
-bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char reply[]) {
+bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char reply[], const uint8_t* controller_pubkey) {
   strcpy(reply, "ERR: not supported");
   return false;
 }

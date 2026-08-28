@@ -471,6 +471,41 @@ public:
   }
 #endif
 
+  // One controller-issued management action, for PROBE_OP_MANAGE. Kept here rather than in
+  // ProbeExecutor because everything an OTA touches -- the deferred timer, the bridge
+  // teardown, the outbound drain -- already lives on this class, and a second copy of that
+  // ordering is a second chance to get it wrong.
+  //
+  // ALWAYS dry-runs first, exactly as the CLI path does. The check is cheap and leaves the
+  // bridge up, so a node that is already current answers over its live connection instead
+  // of tearing everything down to discover it had nothing to do.
+  //
+  // Returns true when the action succeeded (or, for an update, was scheduled). `reply`
+  // always carries the explanation either way.
+  bool otaManage(bool do_update, char* reply, size_t reply_len) {
+#if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
+    char buf[192] = {0};
+    const bool applies = _cli.getBoard()->otaFromManifest(
+        getFirmwareVer(), true, buf, _prefs.probe_controller_pubkey);
+    if (!do_update || !applies) {
+      // Nothing to install, or a check was all that was asked. buf holds the reason --
+      // up to date, needs a cable, or why the manifest was refused.
+      strncpy(reply, buf, reply_len - 1);
+      reply[reply_len - 1] = 0;
+      return applies;
+    }
+    beginDeferredOtaUpdate();
+    strncpy(reply, buf, reply_len - 1);
+    reply[reply_len - 1] = 0;
+    return true;
+#else
+    (void)do_update;
+    strncpy(reply, "OTA not built into this firmware", reply_len - 1);
+    reply[reply_len - 1] = 0;
+    return false;
+#endif
+  }
+
   // Schedule the pull-OTA flash to run from loop() in ~2.5 s, leaving time for the
   // "Beginning update..." CLI reply (CLI_REPLY_DELAY_MILLIS = 600 ms) to transmit
   // before the flash blocks the loop and reboots.

@@ -1616,7 +1616,7 @@ void MyMesh::loop() {
     }
 
     char ota_reply[160];
-    if (may_flash && !_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply)) {
+    if (may_flash && !_cli.getBoard()->otaFromManifest(getFirmwareVer(), false, ota_reply, nullptr)) {
       Serial.print("OTA: aborted - "); Serial.println(ota_reply);
       may_flash = false;
     }

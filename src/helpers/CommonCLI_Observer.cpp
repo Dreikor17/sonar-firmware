@@ -1193,7 +1193,8 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // MQTT bridge UP: the slim per-variant manifest is tiny, so the fetch only
       // costs a single TLS handshake (no large JSON doc) — which fits alongside
       // the live MQTT sessions even on no-PSRAM boards. No bridge bounce needed.
-      _board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply);
+      _board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply,
+                                    _prefs->probe_controller_pubkey);
     } else {
       // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
       // schedule the real update — which tears the bridge down, flashes, and
@@ -1201,7 +1202,8 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // returns true iff so; otherwise it leaves the explanation (up to date /
       // cable flash / error) in reply, which we send without disturbing the
       // bridge or misleading the user with a "Beginning update..." that no-ops.
-      if (_board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply)) {
+      if (_board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply,
+                                    _prefs->probe_controller_pubkey)) {
         // reply now holds "update available: <cur> -> <target> (N behind|new base)",
         // where <target> is "vX.Y.Z.B (hash)". Pull <target> out for a friendlier
         // start message. The "-> " ... trailing " (" framing is produced by

@@ -58,6 +58,15 @@ export FILENAME_CHANNEL_TAG="-sonar"
 # A node that has already been given a key keeps it; this only seeds an unset one. After
 # approval Echo moves each node onto a key issued just for it, and from then on this key
 # is accepted by that node for one thing only: issuing it another.
+#
+# The default below is not a constant -- it is one specific Echo installation's key, and
+# its private half exists in exactly one file on one machine (that install's
+# instance/secrets.json). Every published Sonar image already carries it, so:
+#   * lose that file and every node in the field is unmanageable except over a cable;
+#   * stand up a second Echo without it and that Echo mints a DIFFERENT key, after which
+#     those nodes ignore it completely -- silently, because a node that distrusts a key
+#     does not answer at all.
+# SONAR_CHECK_ECHO_INSTANCE below turns the second case into a build error instead.
 : "${SONAR_CONTROLLER_PUBKEY:=092167A1C4089D4B5D43E4C9B9EEDCB536649E46B32DFCF644AAB51CC5679CC5}"
 case "$SONAR_CONTROLLER_PUBKEY" in
   # Refuse a malformed or all-zero key here rather than shipping images that silently
@@ -84,6 +93,79 @@ fi
 : "${SONAR_LORA_CR:=5}"
 
 export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS:-} -DPROBE_CONTROLLER_PUBKEY='\"${SONAR_CONTROLLER_PUBKEY}\"' -DSONAR_PROBE_DEFAULTS=1 -DLORA_FREQ=${SONAR_LORA_FREQ} -DLORA_BW=${SONAR_LORA_BW} -DLORA_SF=${SONAR_LORA_SF} -DLORA_CR=${SONAR_LORA_CR}"
+
+# Verify the baked key against the Echo that will actually task these nodes. Building an
+# image against the wrong controller is not recoverable over the air: the node accepts
+# nothing the new Echo signs, and answers nothing, so it reads as a dead radio. Catch it
+# here, where the fix is one env var, rather than in a field enclosure.
+#
+# Skipped silently when the instance cannot be found (a CI box has no Echo). Point
+# SONAR_CHECK_ECHO_INSTANCE at an instance dir to force it, or set it to "off" to skip.
+: "${SONAR_CHECK_ECHO_INSTANCE:=../echo/backend/instance}"
+if [ "$SONAR_CHECK_ECHO_INSTANCE" != "off" ] && [ -f "$SONAR_CHECK_ECHO_INSTANCE/secrets.json" ]; then
+  echo_pub="$(
+    SECRETS="$SONAR_CHECK_ECHO_INSTANCE/secrets.json" "$(command -v python3 || command -v python)" - <<'PY' 2>/dev/null || true
+import json, os
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+d = json.load(open(os.environ["SECRETS"], encoding="utf-8"))
+tok, fk = d.get("probe_controller_prv_enc"), d.get("fernet_key")
+if tok and fk:
+    raw = bytes.fromhex(Fernet(fk.encode()).decrypt(tok.encode()).decode())
+    pub = Ed25519PrivateKey.from_private_bytes(raw).public_key().public_bytes(
+        encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+    print(pub.hex().upper())
+PY
+  )"
+  if [ -n "$echo_pub" ] && [ "$echo_pub" != "$SONAR_CONTROLLER_PUBKEY" ]; then
+    echo "ERROR: this build would trust a controller that Echo does not hold." >&2
+    echo "       baking : $SONAR_CONTROLLER_PUBKEY" >&2
+    echo "       Echo at $SONAR_CHECK_ECHO_INSTANCE holds: $echo_pub" >&2
+    echo "       Nodes flashed with this image would ignore that Echo entirely, and would" >&2
+    echo "       not report an error -- they simply never answer. Set" >&2
+    echo "       SONAR_CONTROLLER_PUBKEY to the key above, or SONAR_CHECK_ECHO_INSTANCE=off" >&2
+    echo "       if you are deliberately building for a different install." >&2
+    exit 1
+  fi
+  [ -n "$echo_pub" ] && echo "ctrl key: verified against $SONAR_CHECK_ECHO_INSTANCE"
+fi
+
+# --- manifest signing key -----------------------------------------------------
+# The manifest names the URL every node fetches its firmware from, so an unsigned one makes
+# write access to the manifest host equivalent to running code on every node in the field.
+# Signed with the SAME controller key the nodes already hold and already verify for tasking,
+# so OTA authority becomes "holds the controller private key" rather than "can write /v".
+#
+# Written to a temp file rather than passed as an argument: a command line is visible to
+# every process on the machine.
+SIGN_KEY_FILE=""
+if [ "$SONAR_CHECK_ECHO_INSTANCE" != "off" ] && [ -f "$SONAR_CHECK_ECHO_INSTANCE/secrets.json" ]; then
+  SIGN_KEY_FILE="$(mktemp)"
+  chmod 600 "$SIGN_KEY_FILE" 2>/dev/null || true
+  trap 'rm -f "$SIGN_KEY_FILE"' EXIT INT TERM
+  SECRETS="$SONAR_CHECK_ECHO_INSTANCE/secrets.json"     "$(command -v python3 || command -v python)" - > "$SIGN_KEY_FILE" <<'PYKEY'
+import json, os
+from cryptography.fernet import Fernet
+d = json.load(open(os.environ["SECRETS"], encoding="utf-8"))
+tok, fk = d.get("probe_controller_prv_enc"), d.get("fernet_key")
+if tok and fk:
+    print(Fernet(fk.encode()).decrypt(tok.encode()).decode().strip())
+PYKEY
+  if [ ! -s "$SIGN_KEY_FILE" ]; then
+    echo "ERROR: could not read the controller private key from $SONAR_CHECK_ECHO_INSTANCE/secrets.json." >&2
+    echo "       Manifests must be signed -- an unsigned one lets whoever can write the" >&2
+    echo "       manifest host choose the firmware every node runs. Point" >&2
+    echo "       SONAR_CHECK_ECHO_INSTANCE at the right instance dir." >&2
+    exit 1
+  fi
+  echo "signing : manifests signed with the controller key from $SONAR_CHECK_ECHO_INSTANCE"
+else
+  echo "ERROR: no Echo instance to sign manifests with (SONAR_CHECK_ECHO_INSTANCE is off or missing)." >&2
+  echo "       A published manifest MUST be signed. Set SONAR_CHECK_ECHO_INSTANCE to the" >&2
+  echo "       instance dir holding the controller key." >&2
+  exit 1
+fi
 
 # --- build number ------------------------------------------------------------
 # REQUIRED, and must increase with every published build. The firmware compares build
@@ -179,7 +261,7 @@ for env in "${ENVS[@]}"; do
     --env "$env" \
     --version "$FIRMWARE_VERSION" \
     --build "$FIRMWARE_BUILD_NUMBER" \
-    --file-base "$SONAR_RELEASE_BASE"
+    --file-base "$SONAR_RELEASE_BASE"     --signing-key "$SIGN_KEY_FILE"
 
   # Move this board's results out of build.sh's reach before the next env wipes out/.
   cp "out/${STEM}.bin" "out/${STEM}-merged.bin" "$DIST/"

@@ -361,6 +361,76 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot)
               return true;
             }
           }
+        } else if (ops == PROBE_OP_MANAGE) {
+          // Self-directed: do one named thing to ourselves. Like SET_CONTROLLER this never
+          // goes on air, so it takes no session and no target. Authorisation was settled
+          // above -- signature, freshness, replay ring, and the mandatory `obs` claim
+          // binding this token to THIS node.
+          //
+          // THE SHARED KEY MUST NOT AUTHORISE THIS. Every published image ships trusting
+          // the same deployment key, and applyPrefs() seeds an unset controller pref WITH
+          // that key -- so on a node nobody has adopted, a deployment-key signature
+          // satisfies the primary branch and via_deploy is never set. The restriction
+          // higher up is therefore dead code exactly where it matters most. Refusing when
+          // the key we trust IS the deployment key is what stops anyone holding it -- every
+          // operator running the published controller -- from replacing our firmware.
+          if (via_deploy
+              || (_deploy_key_set
+                  && memcmp(_prefs->probe_controller_pubkey, _deploy_key, PUB_KEY_SIZE) == 0)) {
+            reject = PRJ_NEED_ADMIN;
+          } else {
+            const char* act = NULL; size_t act_len = 0;
+            if (!probeJsonGetString(js, jl, "act", &act, &act_len)
+                || act_len == 0 || act_len > 24) {
+              reject = PRJ_BAD_CMD;
+            } else {
+              char act_s[25];
+              memcpy(act_s, act, act_len);
+              act_s[act_len] = 0;
+
+              char detail[160] = {0};
+              bool handled = false, ok = false;
+              if (strcmp(act_s, "ota.check") == 0) {
+                ok = _mesh->otaManage(false, detail, sizeof(detail));
+                handled = true;
+              } else if (strcmp(act_s, "ota.update") == 0) {
+                // Schedules; it does NOT flash here. otaManage dry-runs first (bridge stays
+                // up) and only arms the deferred update when a build actually applies, so
+                // the acknowledgement below goes out over a live bridge BEFORE the teardown
+                // that a flash requires. Answering afterwards would mean never answering.
+                ok = _mesh->otaManage(true, detail, sizeof(detail));
+                handled = true;
+              }
+
+              if (!handled) {
+                // An action this firmware does not know. Refused rather than ignored: a
+                // silent success is how a controller comes to believe an update landed on
+                // a node that did nothing at all.
+                reject = PRJ_BAD_CMD;
+              } else {
+                _n_accepted++;
+                ProbeSession ack;
+                memset(&ack, 0, sizeof(ack));
+                memcpy(ack.job_id, job, sizeof(job));
+                ack.reply_slot = reply_slot;
+                ack.from_mqtt  = true;
+                ack.target     = _mesh->self_id;
+                resultBegin();
+                // `mgmt` is the proof the controller looks for. Its ABSENCE is what tells a
+                // newer controller that this firmware did not understand the request, so it
+                // must never be omitted on a handled action.
+                resultAppend(",\"mgmt\":\"%s\",\"ok\":%s", act_s, ok ? "true" : "false");
+                resultAppendEscaped("detail", detail, strlen(detail));
+                _mesh->publishProbeResult(ack, ok ? PST_OK : PST_DENIED, PR_NONE,
+                                          _result, _result_len);
+                return true;
+              }
+            }
+          }
+        } else if (ops & ~PROBE_OPS_ALL) {
+          // An op this firmware does not implement. Refused, not ignored -- see
+          // PROBE_OPS_ALL. Silence here reads as success to the controller.
+          reject = PRJ_BAD_CMD;
         } else if (!have_target || ops == 0 || ops > 0xFF) {
           reject = PRJ_BAD_TARGET;
         } else if (probeNonceSeen(&_nonces, nonce)) {
