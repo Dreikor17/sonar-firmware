@@ -190,12 +190,20 @@ def mint_token(priv: Ed25519PrivateKey, target_hex: str, ops: int,
     # the tokens are easy to eyeball.
     claims = {
         "jid": jid,
+        # Which observer this command is FOR. Mandatory: the node refuses anything
+        # whose obs is absent or not its own key. The signature proves what was
+        # asked and by whom, not TO WHOM -- without this binding a compromised
+        # broker could lift a still-fresh command for node A and replay it at node
+        # B, which would verify the controller signature happily and execute it.
+        "obs": (observer_hex or "").upper(),
         "tgt": target_hex.upper(),
         "ops": ops,
         "n": nonce,
         "iat": iat,
         "exp": iat + exp_in if exp_in else 0,
     }
+    if not claims["obs"]:
+        sys.exit("--observer is required: it binds the command to one node")
     # A remote CLI command. The firmware refuses anything that would have needed
     # JSON escaping, so reject it here too rather than sending a doomed token.
     if cli_cmd:
@@ -288,16 +296,31 @@ def make_client(mqtt, client_id, username=None, password=None):
     return cli
 
 
-def topic_for(iata: str, observer: str, leaf: str) -> str:
-    # Uppercase pubkey: the broker's authorization is case-insensitive but MQTT
-    # ROUTING is not, and an admin-subscriber publish is never normalized.
+# Leaf names differ per tree, so callers pass a DIRECTION and this maps it.
+# Keeping both runnable matters: the legacy tree is the rollback path, and the
+# node stays subscribed to it through the transition.
+_LEAVES = {
+    "serial": {"cmd": "commands", "rsp": "responses"},
+    "probe":  {"cmd": "cmd",      "rsp": "rsp"},
+}
+
+
+def topic_for(tree: str, iata: str, observer: str, direction: str) -> str:
+    # Uppercase pubkey: broker authorization is case-insensitive but MQTT ROUTING
+    # is not, and the probe tree's parser accepts ONLY uppercase hex.
+    leaf = _LEAVES[tree][direction]
+    if tree == "probe":
+        # No IATA segment by design -- it is node-mutable, so keying a mailbox on
+        # it would let a node silently relocate its own command topic. --iata is
+        # accepted and ignored on this tree.
+        return "probe/v1/%s/%s" % (observer.upper(), leaf)
     return "meshcore/%s/%s/serial/%s" % (iata.upper(), observer.upper(), leaf)
 
 
 def cmd_task(args):
     mqtt = need_paho()
     token = build_token(args)
-    topic = topic_for(args.iata, args.observer, "commands")
+    topic = topic_for(args.tree, args.iata, args.observer, "cmd")
 
     cli = make_client(mqtt, args.client_id, args.username, args.password)
     cli.connect(args.host, args.port, keepalive=30)
@@ -330,8 +353,11 @@ def verify_result(token: str, observer_hex: str):
 
 def cmd_listen(args):
     mqtt = need_paho()
-    topic = topic_for(args.iata, args.observer, "responses") if args.observer \
-        else "meshcore/+/+/serial/responses"
+    if args.observer:
+        topic = topic_for(args.tree, args.iata, args.observer, "rsp")
+    else:
+        # ONE wildcard level on the probe tree, TWO on the legacy one.
+        topic = "probe/v1/+/rsp" if args.tree == "probe" else "meshcore/+/+/serial/responses"
 
     def on_connect(client, userdata, flags, rc):
         print("connected rc=%s, subscribing to %s" % (rc, topic))
@@ -394,8 +420,13 @@ def main():
         p.add_argument("--username")
         p.add_argument("--password")
         p.add_argument("--client-id", default="echo-probe-sim")
-        p.add_argument("--iata", default="TST")
+        p.add_argument("--iata", default="TST",
+                       help="legacy tree only; accepted and ignored with --tree probe")
         p.add_argument("--observer", help="observer device pubkey, 64 hex (get public.key)")
+        # Default legacy so an existing invocation keeps working, and so the
+        # rollback path stays runnable for as long as nodes are subscribed to it.
+        p.add_argument("--tree", choices=("serial", "probe"), default="serial",
+                       help="which tasking topic tree to use (default: serial/legacy)")
 
     def add_token(p):
         p.add_argument("--target", required=True, help="target node pubkey, 64 hex")

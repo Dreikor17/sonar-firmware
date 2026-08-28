@@ -222,3 +222,54 @@ static inline bool probeControllerKeySet(const uint8_t* pubkey, size_t len) {
   }
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// Per-target flood backoff
+// ---------------------------------------------------------------------------
+//
+// A flood is re-broadcast by every node in the mesh, so it is the single most
+// expensive thing a probe can do. One flood to learn a path is a fair price; the
+// problem is a target that never answers -- a node that is switched off, moved
+// out of range, or gone for good. Without a brake, every scheduled poll of that
+// target floods again, forever, on somebody else's mesh.
+//
+// So each CONSECUTIVE failed flood pushes the next permitted flood for that
+// target further out. A healthy node never enters the ladder at all (its floods
+// succeed and the counter resets); a dead one costs a handful of floods over the
+// first hour and then roughly one per hour, instead of one per poll.
+//
+// This is deliberately per TARGET, not global: one unreachable node must not
+// block probing of the other forty-nine.
+
+#ifndef PROBE_FLOOD_BACKOFF_SLOTS
+  #define PROBE_FLOOD_BACKOFF_SLOTS 32
+#endif
+
+// Consecutive-failure ladder, in seconds. Index is capped at the last entry, so a
+// permanently dead target settles at one flood per hour rather than growing without
+// bound -- a node that comes back should be found again within the hour.
+//
+// THE FIRST FAILURE IS FREE (0s), and that is load-bearing rather than lenient. One
+// unanswered flood is usually transient: a node mid-reboot, a collision, a moment of
+// interference. Holding off after a single miss broke Echo's own clock-sync recovery --
+// it reboots a node deliberately, then retries for 60s while the node comes back, and a
+// 5-minute hold meant every one of those retries was refused. Charging from the SECOND
+// consecutive failure keeps that working while still bounding a target that is really
+// gone: it reaches the 30-minute rung after four misses.
+static inline uint32_t probeFloodBackoffSecs(uint8_t consecutive_fails) {
+  static const uint32_t kLadder[] = { 0u, 30u, 120u, 600u, 1800u, 3600u };
+  const size_t n = sizeof(kLadder) / sizeof(kLadder[0]);
+  if (consecutive_fails == 0) return 0;
+  size_t i = (size_t)(consecutive_fails - 1);
+  if (i >= n) i = n - 1;
+  return kLadder[i];
+}
+
+// True when a flood to this target is still held off. Fails OPEN on an untrusted
+// clock: before NTP we cannot compare timestamps, and refusing every flood then
+// would leave a freshly booted node unable to learn any route at all.
+static inline bool probeFloodHeldOff(uint32_t now, uint32_t next_ok_at) {
+  if (next_ok_at == 0) return false;
+  if (now < PROBE_MIN_VALID_EPOCH) return false;
+  return now < next_ok_at;
+}

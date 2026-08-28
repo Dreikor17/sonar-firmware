@@ -167,4 +167,53 @@ TEST(ProbePolicy, UnsetControllerKeyFailsClosed) {
   EXPECT_FALSE(probeControllerKeySet(set, 0));
 }
 
+
+// --- per-target flood backoff ---------------------------------------------
+// A flood is rebroadcast by every node in the mesh, so an unanswered target must
+// not be re-flooded on every poll. These pin the ladder's shape.
+
+TEST(ProbePolicy, FloodBackoffLadderGrowsThenCaps) {
+  EXPECT_EQ(0u,    probeFloodBackoffSecs(0));      // no failures at all
+  // The FIRST miss is free. One unanswered flood is usually transient, and holding off
+  // after it broke clock-sync recovery: that flow reboots a node on purpose and then
+  // retries for ~60s while it comes back.
+  EXPECT_EQ(0u,    probeFloodBackoffSecs(1));
+  EXPECT_EQ(30u,   probeFloodBackoffSecs(2));
+  EXPECT_EQ(120u,  probeFloodBackoffSecs(3));      // 2m
+  EXPECT_EQ(600u,  probeFloodBackoffSecs(4));      // 10m
+  EXPECT_EQ(1800u, probeFloodBackoffSecs(5));      // 30m
+  EXPECT_EQ(3600u, probeFloodBackoffSecs(6));      // 1h
+  // Caps rather than growing without bound: a node that comes back should be
+  // found again within the hour, not after a day.
+  EXPECT_EQ(3600u, probeFloodBackoffSecs(7));
+  EXPECT_EQ(3600u, probeFloodBackoffSecs(200));
+  EXPECT_EQ(3600u, probeFloodBackoffSecs(255));
+}
+
+TEST(ProbePolicy, FloodBackoffStillBoundsATrulyDeadTarget) {
+  // The free first miss must not defeat the point of the brake. Four consecutive
+  // misses still reach half an hour, so a node that is really gone stops costing
+  // one flood per poll.
+  EXPECT_GE(probeFloodBackoffSecs(5), 1800u);
+  uint32_t total = 0;
+  for (uint8_t i = 1; i <= 6; i++) total += probeFloodBackoffSecs(i);
+  EXPECT_GE(total, 3600u);   // ~6 misses buys well over an hour of quiet
+}
+
+TEST(ProbePolicy, FloodHeldOffOnlyInsideTheWindow) {
+  const uint32_t now = PROBE_MIN_VALID_EPOCH + 10000;
+  EXPECT_TRUE(probeFloodHeldOff(now, now + 1));         // window still open
+  EXPECT_FALSE(probeFloodHeldOff(now, now));            // expires exactly on time
+  EXPECT_FALSE(probeFloodHeldOff(now, now - 1));        // long past
+  EXPECT_FALSE(probeFloodHeldOff(now, 0));              // 0 = no entry
+}
+
+TEST(ProbePolicy, FloodBackoffFailsOpenBeforeNtp) {
+  // Deliberately the OPPOSITE of the clock window's fail-closed stance. Refusing
+  // every flood on an untrusted clock would leave a freshly booted node unable to
+  // learn ANY route; the cost of being wrong here is one flood, not a bad login.
+  const uint32_t pre_ntp = PROBE_MIN_VALID_EPOCH - 1;
+  EXPECT_FALSE(probeFloodHeldOff(pre_ntp, pre_ntp + 100000));
+}
+
 }  // namespace

@@ -105,10 +105,23 @@ static inline void applyMQTTDefaults(MQTTPrefs* prefs) {
   prefs->alert_mqtt_minutes = 240;
   prefs->alert_min_interval_min = 60;
 
-  // Neighbors publishing defaults off; a defaulted tail is a valid 24h interval
-  // (not 0) so an in-lineage upgrade from a pre-neighbors payload is sane.
-  prefs->mqtt_neighbors_enabled = 0;
-  prefs->mqtt_neighbors_interval = MQTT_NEIGHBORS_DEFAULT_INTERVAL_MS;
+  // Neighbors publishing defaults ON in the Echo build. Echo picks which probe polls a
+  // node from the SNR each probe reports for it, so without this the selector has only
+  // great-circle distance to go on -- and a probe 5 miles away behind a ridge loses to
+  // terrain that distance cannot see. The cost is bounded: one ZERO-HOP discover plus a
+  // direct query per neighbour, at most once every 12 hours (the floor the interval
+  // setting enforces), which is far less airtime than one avoidable flood.
+  //
+  // NOTE: a default only applies to a node with no saved prefs. An already-deployed
+  // node keeps whatever it has, so it still needs `set mqtt.neighbors on` once.
+  //
+  // A defaulted tail is a valid 24h interval (not 0), so an in-lineage upgrade from a
+  // pre-neighbors payload is sane.
+  prefs->mqtt_neighbors_enabled = 1;
+  // 12h, the floor the setter enforces -- the freshest the firmware allows. Topology
+  // moves slowly, but a node added to the mesh should not wait a full day to become
+  // selectable, and the extra cost over 24h is one zero-hop discover per day.
+  prefs->mqtt_neighbors_interval = MQTT_NEIGHBORS_MIN_INTERVAL_MS;
 }
 
 #endif // WITH_MQTT_BRIDGE

@@ -354,6 +354,20 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
         sprintf(reply, "OK - tasking channel on slot %d (restart to apply)", slot);
       }
     }
+  } else if (memcmp(config, "probe.v1 ", 9) == 0) {
+    const char* v = &config[9];
+    while (*v == ' ') v++;
+    const bool on = (memcmp(v, "on", 2) == 0) || (atoi(v) == 1);
+    _prefs->probe_topic_v1 = on ? 1 : 0;
+    savePrefs();
+    if (on) {
+      // Worth spelling out at the moment of the change: against a broker that does
+      // not know probe/v1 yet, the denied SUBSCRIBE is a force-close, and that drops
+      // this node's packets/status uplink along with the tasking channel.
+      strcpy(reply, "OK - probe/v1 (enrol this node on the broker FIRST; restart to apply)");
+    } else {
+      strcpy(reply, "OK - legacy meshcore/../serial/ (restart to apply)");
+    }
   } else if (memcmp(config, "probe ", 6) == 0) {
     _prefs->probe_enable = memcmp(&config[6], "on", 2) == 0;
     savePrefs();
@@ -926,6 +940,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
   } else if (memcmp(config, "probe.slot", 10) == 0) {
     if (_prefs->probe_control_slot == 0xFF) strcpy(reply, "> off");
     else sprintf(reply, "> %u", (unsigned)(_prefs->probe_control_slot + 1));
+  } else if (memcmp(config, "probe.v1", 8) == 0) {
+    sprintf(reply, "> %s", _prefs->probe_topic_v1 ? "on (probe/v1)" : "off (legacy serial/)");
   } else if (memcmp(config, "probe", 5) == 0 && (config[5] == '\0' || config[5] == ' ')) {
     sprintf(reply, "> %s", _prefs->probe_enable ? "on" : "off");
   } else if (memcmp(config, "mqtt.ntp.diag", 13) == 0 && (config[13] == '\0' || config[13] == ' ')) {

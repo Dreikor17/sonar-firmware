@@ -322,10 +322,31 @@ private:
   // The esp-mqtt event task release-stores; the mesh loop (Core 1) acquire-loads.
   std::atomic<bool> _probe_cmd_pending;
 
-  char*   _probe_result_buffer;
-  size_t  _probe_result_len;
-  uint8_t _probe_result_slot;
-  std::atomic<bool> _probe_result_pending;
+  // A result is produced on Core 1 the moment a session ends, but it can only go out
+  // on Core 0 while the MQTT slot is CONNECTED -- and the most common reason it is not
+  // is a reconnect, which is exactly when the answer matters most. A single mailbox
+  // meant the second of two back-to-back results was refused outright, and a publish
+  // that failed was thrown away without even counting as a drop, so the node looked
+  // healthy while Echo waited out a timeout. Hence a small ring plus a bounded retry:
+  // they only fix anything together, since a ring with no retry still discards on the
+  // first disconnected poll and a retry with no ring blocks the next session's result.
+  static const uint8_t  PROBE_RESULT_SLOTS    = 3;
+  static const uint32_t PROBE_RESULT_RETRY_MS = 2000;
+  // Past this there is no point: Echo has long since timed out the job and any answer
+  // would arrive as an unmatched jid.
+  static const uint32_t PROBE_RESULT_TTL_MS   = 60000;
+
+  struct ProbeResultEntry {
+    char*    buf;
+    size_t   len;
+    uint8_t  slot;
+    uint32_t seq;           // producer order, so the ring drains FIFO
+    uint32_t enqueued_ms;   // consumer-only once filled is observed true
+    uint32_t next_try_ms;   // consumer-only
+    std::atomic<bool> filled;
+  };
+  ProbeResultEntry _probe_results[PROBE_RESULT_SLOTS];
+  uint32_t _probe_result_seq;
   uint32_t _probe_results_dropped;
   uint32_t _probe_cmds_dropped;
 
@@ -489,7 +510,8 @@ private:
 #endif
   // Publishes the pending probe-result token to the slot the command arrived on.
   // Runs on the MQTT task (Core 0) only.
-  bool publishProbeResult();
+  bool publishProbeResult(const ProbeResultEntry& entry);
+  void drainProbeResults();
   void queuePacket(mesh::Packet* packet, bool is_tx);
   void dequeuePacket();
   bool isAnySlotConnected();

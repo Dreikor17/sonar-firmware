@@ -31,6 +31,7 @@ static const char* const WC_ALLOWED_SET_KEYS[] = {
   // deliberately NOT in wcIsSecretKey -- an operator must be able to read it back
   // to confirm which controller this Observer trusts.
   "probe", "probe.controller", "probe.max", "probe.flood", "probe.gap", "probe.slot",
+  "probe.v1",
 };
 static const char* const WC_ALLOWED_SLOT_KEYS[] = {
   "preset", "server", "port", "username", "password", "token", "topic", "audience",

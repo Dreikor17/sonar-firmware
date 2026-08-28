@@ -34,6 +34,9 @@ ProbeExecutor::ProbeExecutor()
   memset(_sessions, 0, sizeof(_sessions));
   memset(_routes, 0, sizeof(_routes));      // learned_at == 0 marks a slot free
   _route_from_cache = false;
+  _flood_repaired = false;
+  _session_flooded = false;
+  memset(_flood_backoff, 0, sizeof(_flood_backoff));
   _routes_dirty = false;
   _next_session_at = 0;
   memset(_out_path, 0, sizeof(_out_path));
@@ -46,6 +49,9 @@ ProbeExecutor::ProbeExecutor()
   _result[0] = 0;
   _status[0] = 0;
   probeNonceRingInit(&_nonces);
+  _boot_epoch = 0;
+  _seq_next = 0;
+  _n_expired = 0;
 }
 
 void ProbeExecutor::begin(MyMesh* mesh, NodePrefs* prefs) {
@@ -122,6 +128,8 @@ bool ProbeExecutor::startLocal(const mesh::Identity& target, uint8_t ops_mask,
   s.state      = PST_QUEUED;
   s.reply_slot = 0xFF;               // local CLI, no MQTT reply
   s.from_mqtt  = false;
+  s.exp        = 0;                  // operator at a console; no deadline to enforce
+  s.seq        = _seq_next++;
   snprintf(s.job_id, sizeof(s.job_id), "cli-%d", idx);
   _n_accepted++;
   return true;
@@ -146,7 +154,9 @@ bool ProbeExecutor::verifyCommand(const char* token, size_t len, const char** pa
 
   // Cheap structural pre-filters, so junk never reaches the ~3 KB-stack software
   // Ed25519 path. A raw 64-byte signature is exactly 86 unpadded base64url chars.
-  if (sl != 86 || pl == 0 || pl > PROBE_CLAIMS_MAX_LEN) {
+  // pl is the ENCODED payload length, so it is bounded by the base64 ceiling, not the
+  // decoded one. The decode below is separately bounded by sizeof(_claims).
+  if (sl != 86 || pl == 0 || pl > PROBE_CLAIMS_MAX_B64) {
     *reject = PRJ_BAD_TOKEN; return false;
   }
 
@@ -229,6 +239,19 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot)
         bool have_target = probeJsonGetString(js, jl, "tgt", &tgt, &tgt_len)
                         && probeHexToBytes(tgt, tgt_len, target_key, sizeof(target_key));
 
+        // "obs" binds this command to the observer it was addressed to, and is
+        // MANDATORY. The signature proves WHAT was asked and by WHOM, but says
+        // nothing about TO WHOM: without this, anyone who can place bytes on our
+        // command topic -- a compromised or malicious broker, most obviously --
+        // could lift a still-fresh command addressed to node A and replay it at
+        // node B, which would verify the controller signature happily and execute
+        // it. Absent or mismatched fails CLOSED, alongside iat/nonce below.
+        const char* obs = NULL; size_t obs_len = 0;
+        uint8_t obs_key[PUB_KEY_SIZE];
+        bool obs_ok = probeJsonGetString(js, jl, "obs", &obs, &obs_len)
+                   && probeHexToBytes(obs, obs_len, obs_key, sizeof(obs_key))
+                   && memcmp(obs_key, _mesh->self_id.pub_key, PUB_KEY_SIZE) == 0;
+
         // ORDER MATTERS, and both naive orders are wrong.
         //
         // The nonce ring and the rate limiter each consume state, so whichever
@@ -241,10 +264,25 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot)
         // Split the nonce check instead: PEEK (no state change), then charge the
         // rate, then COMMIT the nonce only once the command is actually going to
         // be accepted. Stateless checks come first so neither is spent on junk.
-        if (!have_iat || !have_nonce) {
+        if (!obs_ok) {
+          // Stateless and first: a command not addressed to us must not spend a
+          // nonce ring slot or rate budget.
+          reject = PRJ_BAD_OBS;
+        } else if (!have_iat || !have_nonce) {
           reject = PRJ_CLOCK;
         } else if (!probeTimestampOk(nowSecs(), iat, exp, PROBE_DEFAULT_CLOCK_SKEW_SECS)) {
           reject = PRJ_CLOCK;
+        } else if (_boot_epoch >= PROBE_SANE_EPOCH &&
+                   iat + PROBE_DEFAULT_CLOCK_SKEW_SECS < _boot_epoch) {
+          // The nonce ring lives in RAM, so a reboot empties it and a token captured
+          // before that reboot could be replayed once, any time inside its exp window.
+          // Refusing anything ISSUED before we booted closes that window: after a
+          // reboot the ring is gone but the clock is not, so iat is the one piece of
+          // state that survives. Deliberately NOT persisted -- writing a counter to
+          // flash on every command would wear the partition to close a hole that exp
+          // already bounds. Skipped entirely while the clock is unknown (fail-open,
+          // exactly as before), since a bogus floor would refuse every valid command.
+          reject = PRJ_PREBOOT;
         } else if (!have_target || ops == 0 || ops > 0xFF) {
           reject = PRJ_BAD_TARGET;
         } else if (probeNonceSeen(&_nonces, nonce)) {
@@ -301,6 +339,8 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot)
             sess.state      = PST_QUEUED;
             sess.reply_slot = reply_slot;
             sess.from_mqtt  = true;
+            sess.exp        = exp;   // re-checked at dispatch, not just at admission
+            sess.seq        = _seq_next++;
             memcpy(sess.job_id, job, sizeof(job));
             if (have_pw) {
               memcpy(sess.password, pw.password, sizeof(sess.password));
@@ -343,12 +383,38 @@ void ProbeExecutor::resetActive() {
   _pending_ops = 0;
   _result_len = 0;
   _result[0] = 0;
+  _result_truncated = false;
 }
 
 void ProbeExecutor::startNext() {
+  // Drop anything whose deadline passed while it waited. Admission checked exp against
+  // the clock at ARRIVAL; a queued session can wait behind three others that each flood
+  // and retry, so re-check here or we spend airtime transmitting a command Echo gave up
+  // on long ago. Reported, not silently discarded.
+  uint32_t now = nowSecs();
+  if (now >= PROBE_SANE_EPOCH) {
+    for (int i = 0; i < MAX_PROBE_SESSIONS; i++) {
+      ProbeSession& q = _sessions[i];
+      if (q.state != PST_QUEUED || q.exp == 0) continue;
+      if (now > (uint32_t)(q.exp + PROBE_DEFAULT_CLOCK_SKEW_SECS)) {
+        _n_expired++;
+        if (q.from_mqtt) _mesh->publishProbeReject(q.reply_slot, q.job_id, "expired");
+        // memset frees the slot (PST_FREE == 0) AND wipes the recovered admin
+        // password, which finishSession would otherwise have been responsible for.
+        memset(&q, 0, sizeof(q));
+      }
+    }
+  }
+
+  // FIFO. Scanning for the lowest free slot index meant a session could be starved
+  // indefinitely by later arrivals landing in lower slots.
+  int pick = -1;
   for (int i = 0; i < MAX_PROBE_SESSIONS; i++) {
     if (_sessions[i].state != PST_QUEUED) continue;
-
+    if (pick < 0 || _sessions[i].seq < _sessions[pick].seq) pick = i;
+  }
+  if (pick >= 0) {
+    int i = pick;
     _active = i;
     ProbeSession& s = _sessions[i];
     s.state = PST_ACTIVE;
@@ -359,6 +425,8 @@ void ProbeExecutor::startNext() {
     // step even when this target was probed moments ago.
     _out_path_len = PROBE_OUT_PATH_UNKNOWN;
     _route_from_cache = routeCacheLookup(s.target.pub_key);
+    _flood_repaired = false;
+    _session_flooded = false;
     _route = PR_NONE;
     _awaiting = false;
     _inflight = NULL;
@@ -381,8 +449,18 @@ void ProbeExecutor::advance() {
   if (_pending_ops & PROBE_OP_OWNER) {
     next = PS_ANON;
   } else if ((_pending_ops & PROBE_OPS_NEED_LOGIN)
-             && !_prefs->probe_allow_flood
-             && !probeRouteIsDirect(_out_path_len)) {
+             && !probeRouteIsDirect(_out_path_len)
+             && (!_prefs->probe_allow_flood
+                 || (_active >= 0 && floodHeldOff(_sessions[_active].target.pub_key)))) {
+    // Either flooding is switched off entirely, or this specific target is inside
+    // its backoff window after consecutive floods that went unanswered. The two
+    // are reported separately: "no_route" is a policy setting the operator chose,
+    // "flood_backoff" is us protecting the mesh from a target that is not there.
+    if (_prefs->probe_allow_flood) {
+      resultAppend(",\"reason\":\"flood_backoff\"");
+      finishSession(PST_DENIED);
+      return;
+    }
     // THE FLOOD VETO COVERS THE REPLY DIRECTION TOO.
     //
     // Our zero-hop login/REQ cannot propagate, but the target has no return path
@@ -508,6 +586,7 @@ bool ProbeExecutor::transmit(mesh::Packet* pkt) {
     _mesh->sendFloodScoped(_mesh->getDefaultScope(), pkt, 0, _prefs->path_hash_mode + 1);
     _route = PR_FLOOD;
     _n_flood++;
+    _session_flooded = true;
   } else {
     _mesh->sendDirect(pkt, _out_path, _out_path_len, 0);
     _route = PR_DIRECT;
@@ -535,6 +614,16 @@ void ProbeExecutor::onPacketSendFailed(mesh::Packet* pkt) {
 
 void ProbeExecutor::loop() {
   if (!_mesh || !_prefs) return;
+
+  // Latch the boot epoch the FIRST time the clock reads sane. An observer boots before
+  // it associates and runs NTP, so nowSecs() during begin() is pre-epoch garbage; by
+  // latching here instead we capture the clock within a tick of it becoming valid,
+  // which is close enough to boot to be usable as a replay floor. See the PRJ_PREBOOT
+  // check for what it is for.
+  if (_boot_epoch == 0) {
+    uint32_t t = nowSecs();
+    if (t >= PROBE_SANE_EPOCH) _boot_epoch = t;
+  }
 
   // `set probe.max` writes the pref directly, so re-arm both limiters when it
   // changes rather than plumbing a dedicated callback through CommonCLI.
@@ -569,6 +658,29 @@ void ProbeExecutor::loop() {
     if (_route_from_cache && _active >= 0) {
       routeCacheDrop(_sessions[_active].target.pub_key);
       resultAppend(",\"stale_route\":true");
+
+      // REPAIR IN THIS SESSION rather than making the caller poll again.
+      //
+      // A cached path that stops answering is the normal way a mesh says it moved.
+      // Ending here means every repair costs a wasted poll: the scheduler gets a
+      // useless "timeout", the node looks down when it is not, and the NEXT poll is
+      // the one that floods and succeeds. Retrying once here costs no more airtime
+      // than that -- the second poll would have flooded anyway -- and turns a
+      // two-poll repair into one.
+      //
+      // Bounded to one repair per session by _flood_repaired, so a target that is
+      // genuinely gone cannot loop. The login is deliberately NOT reset: the target
+      // keys its session on our pubkey, not on the path.
+      if (_prefs && _prefs->probe_allow_flood && !_flood_repaired) {
+        _flood_repaired = true;
+        _route_from_cache = false;
+        _out_path_len = PROBE_OUT_PATH_UNKNOWN;   // forces the flood path
+        _awaiting = false;
+        _inflight = NULL;
+        resultAppend(",\"route_repaired\":true");
+        advance();                                 // re-issue the failed step
+        return;
+      }
     }
     finishSession(PST_TIMEOUT);
   }
@@ -577,6 +689,19 @@ void ProbeExecutor::loop() {
 void ProbeExecutor::finishSession(uint8_t state) {
   if (_active < 0) return;
   ProbeSession& s = _sessions[_active];
+
+  // A path that just carried a whole session is demonstrably alive, so restart its
+  // TTL. Without this the cache expires purely on age, and a batch-provisioned mesh
+  // re-floods every node together on the same schedule, forever.
+  if (state == PST_OK && _route_from_cache) routeCacheTouch(s.target.pub_key);
+
+  // Flood brake bookkeeping. Only sessions that actually put a flood on air move
+  // the ladder: a timeout on a direct route says nothing about whether flooding
+  // this target is worthwhile.
+  if (_session_flooded) {
+    if (state == PST_OK) floodSucceeded(s.target.pub_key);
+    else if (state == PST_TIMEOUT) floodFailed(s.target.pub_key);
+  }
 
   if (state == PST_OK) _n_ok++;
   if (state == PST_DENIED) _n_denied++;
@@ -843,6 +968,66 @@ bool ProbeExecutor::routeCacheLookup(const uint8_t* pub_key) {
   return false;
 }
 
+bool ProbeExecutor::floodHeldOff(const uint8_t* pub_key) {
+  if (!pub_key) return false;
+  uint32_t now = nowSecs();
+  for (int i = 0; i < PROBE_FLOOD_BACKOFF_SLOTS; i++) {
+    FloodBackoff& b = _flood_backoff[i];
+    if (b.next_ok_at != 0 && memcmp(b.pub_key, pub_key, PUB_KEY_SIZE) == 0) {
+      return probeFloodHeldOff(now, b.next_ok_at);
+    }
+  }
+  return false;
+}
+
+void ProbeExecutor::floodFailed(const uint8_t* pub_key) {
+  if (!pub_key) return;
+  uint32_t now = nowSecs();
+  if (now < PROBE_MIN_VALID_EPOCH) return;   // cannot schedule against an untrusted clock
+  int free_slot = -1, oldest = 0;
+  for (int i = 0; i < PROBE_FLOOD_BACKOFF_SLOTS; i++) {
+    FloodBackoff& b = _flood_backoff[i];
+    if (b.next_ok_at != 0 && memcmp(b.pub_key, pub_key, PUB_KEY_SIZE) == 0) {
+      if (b.fails < 0xFF) b.fails++;
+      b.next_ok_at = now + probeFloodBackoffSecs(b.fails);
+      return;
+    }
+    if (b.next_ok_at == 0 && free_slot < 0) free_slot = i;
+    if (_flood_backoff[i].next_ok_at < _flood_backoff[oldest].next_ok_at) oldest = i;
+  }
+  // Full: evict whichever entry frees up soonest, so the longest holds survive.
+  FloodBackoff& b = _flood_backoff[free_slot >= 0 ? free_slot : oldest];
+  memcpy(b.pub_key, pub_key, PUB_KEY_SIZE);
+  b.fails = 1;
+  b.next_ok_at = now + probeFloodBackoffSecs(1);
+}
+
+void ProbeExecutor::floodSucceeded(const uint8_t* pub_key) {
+  if (!pub_key) return;
+  for (int i = 0; i < PROBE_FLOOD_BACKOFF_SLOTS; i++) {
+    FloodBackoff& b = _flood_backoff[i];
+    if (b.next_ok_at != 0 && memcmp(b.pub_key, pub_key, PUB_KEY_SIZE) == 0) {
+      b.next_ok_at = 0;   // answered: forget the grudge entirely
+      b.fails = 0;
+      return;
+    }
+  }
+}
+
+void ProbeExecutor::routeCacheTouch(const uint8_t* pub_key) {
+  if (!pub_key) return;
+  uint32_t now = nowSecs();
+  if (now < PROBE_MIN_VALID_EPOCH) return;   // pre-NTP: a bogus stamp is worse than none
+  for (int i = 0; i < PROBE_ROUTE_CACHE; i++) {
+    RouteEntry& e = _routes[i];
+    if (e.learned_at != 0 && memcmp(e.pub_key, pub_key, PUB_KEY_SIZE) == 0) {
+      e.learned_at = now;      // still good -- restart its TTL
+      _routes_dirty = true;
+      return;
+    }
+  }
+}
+
 void ProbeExecutor::routeCacheDrop(const uint8_t* pub_key) {
   if (!pub_key) return;
   for (int i = 0; i < PROBE_ROUTE_CACHE; i++) {
@@ -961,18 +1146,42 @@ bool ProbeExecutor::handlePathReturn(int overlay_idx, const uint8_t* path, uint8
 void ProbeExecutor::resultBegin() {
   _result_len = 0;
   _result[0] = 0;
+  _result_truncated = false;
 }
 
+// ALL-OR-NOTHING. vsnprintf truncates at the buffer edge, and a clipped append lands
+// mid-JSON -- often mid-STRING -- so the node would sign and publish a perfectly valid
+// token carrying malformed JSON. Echo verifies that signature happily and then fails to
+// parse the claims, which reads as a corrupt node rather than as "the result did not fit".
+// Dropping the whole fragment instead keeps the JSON parseable and loses only detail.
 void ProbeExecutor::resultAppend(const char* fmt, ...) {
-  if (_result_len + 1 >= sizeof(_result)) return;
+  // Reserve room for the truncation marker and the closing brace, so a session that runs
+  // out of space still emits parseable JSON that SAYS it is short.
+  const size_t lim = sizeof(_result) - 18;
+  if (_result_len >= lim) return;
+
+  char tmp[256];
   va_list args;
   va_start(args, fmt);
-  int n = vsnprintf(_result + _result_len, sizeof(_result) - _result_len, fmt, args);
+  int n = vsnprintf(tmp, sizeof(tmp), fmt, args);
   va_end(args);
-  if (n > 0) {
-    _result_len += (size_t)n;
-    if (_result_len >= sizeof(_result)) _result_len = sizeof(_result) - 1;
+  if (n <= 0) return;
+
+  bool fits = (size_t)n < sizeof(tmp) && _result_len + (size_t)n < lim;
+  if (!fits) {
+    if (!_result_truncated) {
+      _result_truncated = true;
+      if (_result_len + 13 < sizeof(_result)) {
+        memcpy(_result + _result_len, ",\"trunc\":true", 13);
+        _result_len += 13;
+        _result[_result_len] = 0;
+      }
+    }
+    return;
   }
+  memcpy(_result + _result_len, tmp, (size_t)n);
+  _result_len += (size_t)n;
+  _result[_result_len] = 0;
 }
 
 // Minimal JSON string escaping: quote, backslash and control characters. Node
@@ -980,21 +1189,27 @@ void ProbeExecutor::resultAppend(const char* fmt, ...) {
 // JSON-safe.
 void ProbeExecutor::resultAppendEscaped(const char* key, const char* val, size_t val_len) {
   if (!key) return;
-  resultAppend(",\"%s\":\"", key);
-  for (size_t i = 0; i < val_len && _result_len + 8 < sizeof(_result); i++) {
+  // Escape into scratch FIRST, then emit the key and value as ONE atomic append. Writing
+  // into _result directly meant that once resultAppend started dropping fragments, the
+  // opening key could be dropped while raw value bytes were still written after it --
+  // precisely the malformed JSON the all-or-nothing rule exists to prevent. Truncating
+  // the VALUE here is safe: it stops on a whole-character boundary and the string still
+  // gets closed.
+  char esc[128];
+  size_t e = 0;
+  for (size_t i = 0; i < val_len && e + 8 < sizeof(esc); i++) {
     unsigned char c = (unsigned char)val[i];
     if (c == '"' || c == '\\') {
-      _result[_result_len++] = '\\';
-      _result[_result_len++] = (char)c;
+      esc[e++] = '\\';
+      esc[e++] = (char)c;
     } else if (c < 0x20) {
-      _result_len += (size_t)snprintf(_result + _result_len, sizeof(_result) - _result_len,
-                                      "\\u%04x", c);
+      e += (size_t)snprintf(esc + e, sizeof(esc) - e, "\\u%04x", c);
     } else {
-      _result[_result_len++] = (char)c;
+      esc[e++] = (char)c;
     }
-    _result[_result_len] = 0;
   }
-  resultAppend("\"");
+  esc[e] = 0;
+  resultAppend(",\"%s\":\"%s\"", key, esc);
 }
 
 static const char* probeStateName(uint8_t st) {
@@ -1031,7 +1246,7 @@ void ProbeExecutor::reportReject(uint8_t reason, uint8_t reply_slot, const char*
   static const char* names[] = {
     "none", "disabled", "no_controller", "bad_token", "bad_sig",
     "replay", "clock", "rate", "queue_full", "bad_target", "bad_pw",
-    "bad_cmd", "need_admin"
+    "bad_cmd", "need_admin", "bad_obs", "preboot"
   };
   const char* rn = (reason < (sizeof(names) / sizeof(names[0]))) ? names[reason] : "unknown";
   _mesh->publishProbeReject(reply_slot, job_id, rn);

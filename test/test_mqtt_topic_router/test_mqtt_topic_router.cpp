@@ -3,6 +3,7 @@
 #define PROGMEM
 
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -190,6 +191,156 @@ TEST(MQTTTopicRouter, PublicationTypeEnumValuesAreFrozen) {
   EXPECT_STREQ("packets", mqttPublicationTypeName(MQTT_PUBLICATION_PACKETS));
   EXPECT_STREQ("raw", mqttPublicationTypeName(MQTT_PUBLICATION_RAW));
   EXPECT_STREQ("neighbors", mqttPublicationTypeName(MQTT_PUBLICATION_NEIGHBORS));
+}
+
+// --- mqttBuildSerialTopic -------------------------------------------------
+// The Observer-Probe tasking channel. This builder had no host coverage at all,
+// so a regression in it could only ever surface on hardware. These tests pin the
+// contract that the probe/v1 port must preserve: fail closed, and never leave a
+// half-built topic in the caller's buffer.
+
+// A real 64-hex device id: the probe channel is keyed on the node's own pubkey,
+// and that length is what makes the buffer-boundary cases below meaningful.
+constexpr const char* PUBKEY =
+    "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
+
+TEST(MQTTSerialTopic, BuildsBothLeaves) {
+  char topic[128];
+  ASSERT_TRUE(mqttBuildSerialTopic(IATA, PUBKEY, true, topic, sizeof(topic)));
+  EXPECT_EQ(std::string("meshcore/DEN/") + PUBKEY + "/serial/commands", topic);
+
+  ASSERT_TRUE(mqttBuildSerialTopic(IATA, PUBKEY, false, topic, sizeof(topic)));
+  EXPECT_EQ(std::string("meshcore/DEN/") + PUBKEY + "/serial/responses", topic);
+}
+
+TEST(MQTTSerialTopic, RejectsUnusableIata) {
+  char topic[128];
+  // Wrong length, topic separators and spaces would all corrupt the path.
+  for (const char* bad : {"", "DE", "DENV", "D/N", "D N", "D-N"}) {
+    EXPECT_FALSE(mqttBuildSerialTopic(bad, PUBKEY, true, topic, sizeof(topic)))
+        << "iata=" << bad;
+    EXPECT_STREQ("", topic) << "buffer not cleared for iata=" << bad;
+  }
+  EXPECT_FALSE(mqttBuildSerialTopic(nullptr, PUBKEY, true, topic, sizeof(topic)));
+}
+
+TEST(MQTTSerialTopic, RejectsTheXxxSentinel) {
+  // "XXX" is a valid IATA by shape but is the unset sentinel, and it is what an
+  // operator sets to take a node off the tasking channel. Keeping this behaviour
+  // distinct from the shape check matters: the probe/v1 tree drops the IATA
+  // segment, so this kill-switch does NOT carry over on its own.
+  char topic[128];
+  EXPECT_FALSE(mqttBuildSerialTopic("XXX", PUBKEY, true, topic, sizeof(topic)));
+  EXPECT_STREQ("", topic);
+}
+
+TEST(MQTTSerialTopic, RejectsMissingDeviceId) {
+  // Without this an unnamed device yields "meshcore/DEN//serial/commands" — an
+  // empty path segment that is a legal MQTT topic and would silently subscribe
+  // the node to a channel nobody publishes to.
+  char topic[128];
+  EXPECT_FALSE(mqttBuildSerialTopic(IATA, "", true, topic, sizeof(topic)));
+  EXPECT_STREQ("", topic);
+  EXPECT_FALSE(mqttBuildSerialTopic(IATA, nullptr, true, topic, sizeof(topic)));
+  EXPECT_STREQ("", topic);
+}
+
+TEST(MQTTSerialTopic, RejectsUnusableBuffer) {
+  char topic[128];
+  EXPECT_FALSE(mqttBuildSerialTopic(IATA, PUBKEY, true, nullptr, sizeof(topic)));
+  EXPECT_FALSE(mqttBuildSerialTopic(IATA, PUBKEY, true, topic, 0));
+}
+
+TEST(MQTTSerialTopic, OverflowFailsClosedAndClearsTheBuffer) {
+  // "meshcore/" + "DEN" + "/" + 64 + "/serial/" + "commands" == 93 chars, so 94
+  // bytes is the exact minimum. One short must fail rather than truncate: a
+  // truncated topic is still a legal subscription that would never receive.
+  const std::string full = std::string("meshcore/DEN/") + PUBKEY + "/serial/commands";
+  ASSERT_EQ(93u, full.size());
+
+  char exact[94];
+  ASSERT_TRUE(mqttBuildSerialTopic(IATA, PUBKEY, true, exact, sizeof(exact)));
+  EXPECT_EQ(full, exact);
+
+  char one_short[93];
+  EXPECT_FALSE(mqttBuildSerialTopic(IATA, PUBKEY, true, one_short, sizeof(one_short)));
+  EXPECT_STREQ("", one_short);
+}
+
+// --- mqttBuildProbeTopic --------------------------------------------------
+// The current control plane: probe/v1/{PUBKEY}/{cmd|rsp}, outside meshcore/.
+
+TEST(MQTTProbeTopic, BuildsBothLeaves) {
+  char topic[128];
+  ASSERT_TRUE(mqttBuildProbeTopic(PUBKEY, true, topic, sizeof(topic)));
+  EXPECT_EQ(std::string("probe/v1/") + PUBKEY + "/cmd", topic);
+
+  ASSERT_TRUE(mqttBuildProbeTopic(PUBKEY, false, topic, sizeof(topic)));
+  EXPECT_EQ(std::string("probe/v1/") + PUBKEY + "/rsp", topic);
+}
+
+TEST(MQTTProbeTopic, HasNoIataSegmentAndNoIataGate) {
+  // Pins a deliberate behaviour CHANGE, not an oversight. The legacy builder
+  // refuses when IATA is unset or "XXX", so `set mqtt.iata XXX` used to take a
+  // node off the tasking channel. The probe tree has no IATA segment at all, so
+  // that side effect is gone and `probe off` is the explicit control instead.
+  char probe[128], serial[128];
+  EXPECT_FALSE(mqttBuildSerialTopic("XXX", PUBKEY, true, serial, sizeof(serial)));
+  EXPECT_TRUE(mqttBuildProbeTopic(PUBKEY, true, probe, sizeof(probe)));
+  EXPECT_EQ(std::string("probe/v1/") + PUBKEY + "/cmd", probe);
+  // Four levels exactly — the broker's parser rejects anything else. Bind the
+  // string first: iterators taken from two separate temporaries are a dangling
+  // pair, not a range.
+  const std::string built(probe);
+  EXPECT_EQ(3, std::count(built.begin(), built.end(), '/'));
+}
+
+TEST(MQTTProbeTopic, PreservesKeyCase) {
+  // MQTT topic matching is case-sensitive and the broker's parser accepts ONLY
+  // uppercase hex, so this builder must never fold the case it is handed.
+  char topic[128];
+  ASSERT_TRUE(mqttBuildProbeTopic(PUBKEY, true, topic, sizeof(topic)));
+  EXPECT_NE(nullptr, strstr(topic, PUBKEY));
+}
+
+TEST(MQTTProbeTopic, RejectsMissingDeviceId) {
+  char topic[128];
+  EXPECT_FALSE(mqttBuildProbeTopic("", true, topic, sizeof(topic)));
+  EXPECT_STREQ("", topic);
+  EXPECT_FALSE(mqttBuildProbeTopic(nullptr, true, topic, sizeof(topic)));
+  EXPECT_STREQ("", topic);
+}
+
+TEST(MQTTProbeTopic, RejectsUnusableBuffer) {
+  char topic[128];
+  EXPECT_FALSE(mqttBuildProbeTopic(PUBKEY, true, nullptr, sizeof(topic)));
+  EXPECT_FALSE(mqttBuildProbeTopic(PUBKEY, true, topic, 0));
+}
+
+TEST(MQTTProbeTopic, OverflowFailsClosedAndClearsTheBuffer) {
+  // "probe/v1/" + 64 + "/cmd" == 77 chars, so 78 bytes is the exact minimum.
+  // Truncating instead would yield a legal topic that never receives anything —
+  // and the firmware cannot see a denied SUBACK, so it would fail silently.
+  const std::string full = std::string("probe/v1/") + PUBKEY + "/cmd";
+  ASSERT_EQ(77u, full.size());
+
+  char exact[78];
+  ASSERT_TRUE(mqttBuildProbeTopic(PUBKEY, true, exact, sizeof(exact)));
+  EXPECT_EQ(full, exact);
+
+  char one_short[77];
+  EXPECT_FALSE(mqttBuildProbeTopic(PUBKEY, true, one_short, sizeof(one_short)));
+  EXPECT_STREQ("", one_short);
+}
+
+TEST(MQTTProbeTopic, IsShorterThanTheLegacyTopicItReplaces) {
+  // Both callers pass a 128-byte buffer and the MQTT library truncates silently
+  // at 127, so keep the margin visible in a test rather than in a comment.
+  char probe[128], serial[128];
+  ASSERT_TRUE(mqttBuildProbeTopic(PUBKEY, true, probe, sizeof(probe)));
+  ASSERT_TRUE(mqttBuildSerialTopic(IATA, PUBKEY, true, serial, sizeof(serial)));
+  EXPECT_LT(strlen(probe), strlen(serial));
+  EXPECT_LT(strlen(probe), size_t(127));
 }
 
 }  // namespace

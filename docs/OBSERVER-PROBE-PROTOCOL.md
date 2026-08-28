@@ -25,8 +25,15 @@ exactly like a stock repeater-observer and transmits nothing extra.
 
 | Direction | Topic | QoS | Retain |
 |---|---|---|---|
-| Echo → Observer | `meshcore/{IATA}/{PUBKEY}/serial/commands` | 1 | false |
-| Observer → Echo | `meshcore/{IATA}/{PUBKEY}/serial/responses` | 1 | **false** |
+| Echo → Observer | `probe/v1/{PUBKEY}/cmd` | 1 | false |
+| Observer → Echo | `probe/v1/{PUBKEY}/rsp` | 1 | **false** |
+
+**Legacy tree, still supported through the transition:**
+
+| Direction | Topic |
+|---|---|
+| Echo → Observer | `meshcore/{IATA}/{PUBKEY}/serial/commands` |
+| Observer → Echo | `meshcore/{IATA}/{PUBKEY}/serial/responses` |
 
 **Publish commands with `retain: false`.** The Observer drops any command
 delivered with the MQTT retain flag set, which stops a retained command being
@@ -49,11 +56,40 @@ published while the Observer is offline is simply **dropped, not queued**: Echo
 owns retry, and a retry must carry a fresh `n` and `iat` or it will be refused as
 a replay or as stale.
 
-`{PUBKEY}` is the Observer's own 64-hex device public key, uppercase, exactly as
-it already appears in its `status` / `packets` topics. `{IATA}` is the Observer's
-configured IATA.
+`{PUBKEY}` is the Observer's own 64-hex device public key, **uppercase**, exactly
+as it already appears in its `status` / `packets` topics. Case is load-bearing:
+MQTT topic matching is case-sensitive and the broker's parser accepts only
+uppercase hex, so a lowercase key is refused rather than silently delivered
+nowhere.
 
-Built by `mqttBuildSerialTopic()` in `src/helpers/MQTTTopicRouter.h`.
+**The probe tree has no IATA segment, deliberately.** IATA is node-mutable — the
+broker counts changes as abuse — so keying a command mailbox on it would let a
+node relocate its own mailbox and make Echo's commands vanish with no error at
+either end. The pubkey is the only segment carrying authorization weight.
+
+One consequence for operators: `mqttBuildSerialTopic()` refuses to build when
+IATA is unset or `XXX`, so `set mqtt.iata XXX` used to take a node off the
+tasking channel. **That no longer works.** Use `probe off`, or leave `probe.v1`
+at 0.
+
+Built by `mqttBuildProbeTopic()` (and `mqttBuildSerialTopic()` for the legacy
+tree) in `src/helpers/MQTTTopicRouter.h`.
+
+### Choosing a tree
+
+The node subscribes to the legacy command topic **always** (when probing is on)
+and additionally to `probe/v1/…` when `probe.v1` is 1. It publishes results to
+**one** tree, chosen by that same flag.
+
+`probe.v1` defaults to 0 so flashing can never change wire behaviour on its own:
+against a broker that does not yet know the probe tree, a denied subscribe is a
+force-close, which takes the node's normal packets/status uplink down with it
+(~24 min to trip the backoff breaker, then ~35 min cycles). Flip it only once the
+broker is updated **and** this node's pubkey is enrolled in its roster.
+
+The asymmetry is intentional — the node keeps *listening* on the legacy tree so a
+broker rollback still has a working path, but only *publishes* to one, because a
+denied publish also closes the connection.
 
 **A result is never retained.** A retained result would be replayed to the next
 subscriber as though it were fresh.
@@ -61,8 +97,17 @@ subscriber as though it were fresh.
 ### Subscription scope
 
 The Observer subscribes to its command topic on **exactly one operator-designated
-control slot** (`probe.slot`), never on every connected broker. `serial/*` is
-private only on the operator's own broker; other slots are public presets.
+control slot** (`probe.slot`), never on every connected broker.
+
+On the `probe/v1` tree the broker enforces the rest: a node may subscribe only to
+`probe/v1/{ITS OWN PUBKEY}/cmd` and publish only to its own `/rsp`, and both are
+additionally gated on an operator-managed **roster** of enrolled pubkeys. The
+tree sits outside `meshcore/`, which public subscribers read.
+
+**A denied subscribe is invisible to the node.** Nothing in the firmware inspects
+the SUBACK return code, so an un-enrolled node looks healthy from its own side and
+looks like a lost command from Echo's. Enrol the pubkey in the broker roster
+*before* flashing, and verify from the broker, never from the node.
 
 ---
 
@@ -113,6 +158,7 @@ claims = json.loads(b64u(p))
 ```jsonc
 {
   "jid": "job-1234",     // opaque job id, <= 16 chars, echoed back
+  "obs": "<64 hex>",     // MANDATORY: the observer this command is FOR
   "tgt": "<64 hex>",     // target node public key
   "ops": 6,              // bitmask, see below
   "n":   918273,         // nonce, must be unique
@@ -120,6 +166,20 @@ claims = json.loads(b64u(p))
   "exp": 1735000300      // expiry, epoch seconds (0 = no expiry)
 }
 ```
+
+### `obs` — the observer binding
+
+**Mandatory.** The Observer refuses any command whose `obs` is absent, malformed,
+or not its own device public key, with `reason: "bad_obs"`.
+
+The signature proves *what* was asked and *by whom*. It says nothing about *to
+whom*. Without this claim, anyone able to place bytes on a node's command topic —
+a compromised or malicious broker being the obvious case — could lift a
+still-fresh command addressed to node A, replay it at node B, and B would verify
+the controller signature happily and execute it.
+
+Checked **before** the nonce ring and the rate limiter, so a command that is not
+addressed to us cannot spend either.
 
 ### `ops` bitmask
 

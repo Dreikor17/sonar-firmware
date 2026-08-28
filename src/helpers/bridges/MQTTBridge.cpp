@@ -663,8 +663,7 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       _last_slot_reconnect_ms(0),
       _probe_cmd_buffer(nullptr), _probe_cmd_len(0), _probe_cmd_slot(0xFF),
       _probe_cmd_pending(false),
-      _probe_result_buffer(nullptr), _probe_result_len(0), _probe_result_slot(0xFF),
-      _probe_result_pending(false), _probe_results_dropped(0), _probe_cmds_dropped(0)
+      _probe_result_seq(0), _probe_results_dropped(0), _probe_cmds_dropped(0)
 #ifdef ESP_PLATFORM
       , _packet_queue_handle(nullptr), _mqtt_task_handle(nullptr),
         _packet_queue_storage(nullptr)
@@ -677,6 +676,20 @@ MQTTBridge::MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mg
       // slot-scaled timeout before each stop via setStopTimeoutMs().
       , _lifecycle_ops(this), _lifecycle(_lifecycle_ops, mqttStopTimeoutForSlots(RUNTIME_MQTT_SLOTS))
 {
+  // The probe result ring is an ARRAY member, so it gets no mem-initialiser above and
+  // its buf/filled fields would otherwise be indeterminate. requestPublishProbeResult
+  // runs on the mesh core before the buffers are allocated, so an uninitialised buf
+  // is a memcpy to a wild pointer -- which is exactly how this crashed the first time.
+  for (uint8_t r = 0; r < PROBE_RESULT_SLOTS; r++) {
+    _probe_results[r].buf         = nullptr;
+    _probe_results[r].len         = 0;
+    _probe_results[r].slot        = 0xFF;
+    _probe_results[r].seq         = 0;
+    _probe_results[r].enqueued_ms = 0;
+    _probe_results[r].next_try_ms = 0;
+    _probe_results[r].filled.store(false, std::memory_order_relaxed);
+  }
+
   // Initialize default values
   strncpy(_origin, "MeshCore-Repeater", sizeof(_origin) - 1);
   strncpy(_iata, "XXX", sizeof(_iata) - 1);
@@ -779,11 +792,15 @@ void MQTTBridge::allocateRuntimeBuffers() {
   if (_prefs && _prefs->probe_enable) {
     _probe_cmd_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
         _probe_cmd_buffer, PROBE_CMD_BUFFER_SIZE, psram_malloc));
-    _probe_result_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
-        _probe_result_buffer, PROBE_RESULT_BUFFER_SIZE, psram_malloc));
-    MQTT_DEBUG_PRINTLN("Probe buffers: cmd=%s result=%s",
+    uint8_t res_ready = 0;
+    for (uint8_t r = 0; r < PROBE_RESULT_SLOTS; r++) {
+      _probe_results[r].buf = static_cast<char*>(MQTTRuntimeBufferLifecycle::allocateIfMissing(
+          _probe_results[r].buf, PROBE_RESULT_BUFFER_SIZE, psram_malloc));
+      if (_probe_results[r].buf) res_ready++;
+    }
+    MQTT_DEBUG_PRINTLN("Probe buffers: cmd=%s result=%u/%u",
         _probe_cmd_buffer ? "ready" : "unavailable",
-        _probe_result_buffer ? "ready" : "unavailable");
+        (unsigned)res_ready, (unsigned)PROBE_RESULT_SLOTS);
   }
 
 #if defined(WITH_MQTT_NEIGHBORS)
@@ -814,12 +831,14 @@ void MQTTBridge::releaseRuntimeBuffers() {
 
   _probe_cmd_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
       _probe_cmd_buffer, psram_free));
-  _probe_result_buffer = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
-      _probe_result_buffer, psram_free));
+  for (uint8_t r = 0; r < PROBE_RESULT_SLOTS; r++) {
+    _probe_results[r].buf = static_cast<char*>(MQTTRuntimeBufferLifecycle::release(
+        _probe_results[r].buf, psram_free));
+    _probe_results[r].len = 0;
+    _probe_results[r].filled.store(false, std::memory_order_release);
+  }
   _probe_cmd_len = 0;
-  _probe_result_len = 0;
   _probe_cmd_pending.store(false, std::memory_order_release);
-  _probe_result_pending.store(false, std::memory_order_release);
 
 #if defined(WITH_MQTT_NEIGHBORS)
   // Paired with the unconditional allocation in allocateRuntimeBuffers().
@@ -1481,15 +1500,7 @@ void MQTTBridge::mqttTaskLoop() {
 
     // Consume a pending probe result handed over by the mesh (Core 1). Outside
     // the WITH_MQTT_NEIGHBORS guard on purpose (see the members in MQTTBridge.h).
-    if (_probe_result_pending.load(std::memory_order_acquire)) {
-      bool ok = publishProbeResult();
-      if (ok) {
-        MQTT_DEBUG_PRINTLN("Probe result published");
-      } else {
-        MQTT_DEBUG_PRINTLN("Probe result publish failed");
-      }
-      _probe_result_pending.store(false, std::memory_order_release);
-    }
+    drainProbeResults();
 
 #if defined(WITH_MQTT_NEIGHBORS)
     // Consume a pending neighbors snapshot handed over by the mesh (Core 1).
@@ -1721,8 +1732,10 @@ bool MQTTBridge::ensureSlotClient(int index) {
   // onTopic entry on each CONNACK, and this bridge drives its own reconnect
   // ladder with setAutoReconnect(false), so a bare subscribe would be lost.
   if (_prefs && _prefs->probe_enable && _prefs->probe_control_slot == index) {
-    char cmd_topic[128];
-    if (mqttBuildSerialTopic(_iata, _device_id, true, cmd_topic, sizeof(cmd_topic))) {
+    // Both handlers are identical: ProbeExecutor is entirely topic-agnostic and
+    // the payload is a self-contained signed token, so which tree it arrived on
+    // carries no meaning to us. The broker is what binds a topic to an identity.
+    auto register_channel = [this, index, &slot](const char* cmd_topic, const char* what) {
       slot.client->onTopic(cmd_topic, 1,
         [this, index](char* topic, char* payload, int retained, int qos, bool dup) {
           // esp-mqtt event task. Copy and flag ONLY -- see offerProbeCommand.
@@ -1732,9 +1745,32 @@ bool MQTTBridge::ensureSlotClient(int index) {
           if (retained) return;
           if (payload) offerProbeCommand(index, payload, strlen(payload));
         });
-      MQTT_DEBUG_PRINTLN("MQTT%d probe tasking channel: %s", index + 1, cmd_topic);
+      MQTT_DEBUG_PRINTLN("MQTT%d probe tasking channel (%s): %s", index + 1, what, cmd_topic);
+    };
+
+    char cmd_topic[128];
+
+    // The LEGACY channel stays registered even after the node is switched to
+    // probe/v1. It costs one extra SUBSCRIBE and nothing else, and it is what
+    // keeps "roll the broker back, point Echo at serial" true: if this node
+    // spoke only probe/v1, a broker rollback would deny its subscribe, and a
+    // denied subscribe on an OLD broker force-closes the socket -- taking the
+    // telemetry uplink down on exactly the nodes the rollback meant to protect.
+    if (mqttBuildSerialTopic(_iata, _device_id, true, cmd_topic, sizeof(cmd_topic))) {
+      register_channel(cmd_topic, "legacy");
     } else {
-      MQTT_DEBUG_PRINTLN("MQTT%d probe tasking channel unavailable (IATA/device unset)", index + 1);
+      // Not an error: this is the expected state when IATA is unset or "XXX".
+      MQTT_DEBUG_PRINTLN("MQTT%d legacy probe channel unavailable (IATA/device unset)", index + 1);
+    }
+
+    // The probe/v1 channel is opt-in per node. See probe_topic_v1 in NodePrefs
+    // for why flashing must not enable it on its own.
+    if (_prefs->probe_topic_v1) {
+      if (mqttBuildProbeTopic(_device_id, true, cmd_topic, sizeof(cmd_topic))) {
+        register_channel(cmd_topic, "v1");
+      } else {
+        MQTT_DEBUG_PRINTLN("MQTT%d probe/v1 channel unavailable (device id unset)", index + 1);
+      }
     }
   }
   return true;
@@ -3776,30 +3812,93 @@ bool MQTTBridge::takeProbeCommand(char* dest, size_t dest_size, size_t* out_len,
 }
 
 // Mesh loop (Core 1).
+// Mesh side (Core 1) only. Single producer, so the scan for a free entry cannot race
+// another writer; the consumer only ever moves an entry the other way (filled -> empty).
 void MQTTBridge::requestPublishProbeResult(uint8_t slot, const char* token, size_t len) {
-  if (!_probe_result_buffer || !token || len == 0) { _probe_results_dropped++; return; }
+  if (!token || len == 0) { _probe_results_dropped++; return; }
   if (len >= PROBE_RESULT_BUFFER_SIZE) { _probe_results_dropped++; return; }  // DROP, never truncate
-  if (_probe_result_pending.load(std::memory_order_acquire)) { _probe_results_dropped++; return; }
-  memcpy(_probe_result_buffer, token, len);
-  _probe_result_buffer[len] = '\0';
-  _probe_result_len = len;
-  _probe_result_slot = slot;
-  _probe_result_pending.store(true, std::memory_order_release);
+
+  for (uint8_t r = 0; r < PROBE_RESULT_SLOTS; r++) {
+    ProbeResultEntry& e = _probe_results[r];
+    if (!e.buf) continue;                                      // allocation failed
+    if (e.filled.load(std::memory_order_acquire)) continue;
+    memcpy(e.buf, token, len);
+    e.buf[len]    = '\0';
+    e.len         = len;
+    e.slot        = slot;
+    e.seq         = _probe_result_seq++;
+    e.enqueued_ms = millis();
+    e.next_try_ms = 0;                                         // try immediately
+    e.filled.store(true, std::memory_order_release);           // publishes the writes above
+    return;
+  }
+  _probe_results_dropped++;   // ring genuinely full
+}
+
+// MQTT task (Core 0) only. Drains at most one entry per pass so a stuck slot cannot spin
+// the task, and RETRIES a transient failure instead of discarding the result.
+void MQTTBridge::drainProbeResults() {
+  uint32_t now = millis();
+  int pick = -1;
+  for (uint8_t r = 0; r < PROBE_RESULT_SLOTS; r++) {
+    if (!_probe_results[r].filled.load(std::memory_order_acquire)) continue;
+    if (pick < 0 || _probe_results[r].seq < _probe_results[pick].seq) pick = r;
+  }
+  if (pick < 0) return;
+
+  ProbeResultEntry& e = _probe_results[pick];
+
+  // Expire before trying: a result older than Echo's own timeout is worthless, and
+  // holding it would block the ring behind an answer nobody is waiting for.
+  if ((uint32_t)(now - e.enqueued_ms) > PROBE_RESULT_TTL_MS) {
+    _probe_results_dropped++;
+    MQTT_DEBUG_PRINTLN("Probe result expired undelivered (%lums)",
+                       (unsigned long)(now - e.enqueued_ms));
+    e.len = 0;
+    e.filled.store(false, std::memory_order_release);
+    return;
+  }
+  if (e.next_try_ms != 0 && (int32_t)(now - e.next_try_ms) < 0) return;   // backing off
+
+  if (publishProbeResult(e)) {
+    MQTT_DEBUG_PRINTLN("Probe result published");
+    e.len = 0;
+    e.filled.store(false, std::memory_order_release);
+  } else {
+    // Almost always 'slot not connected yet'. Keep it and come back; the TTL above is
+    // what eventually gives up, so this is not an unbounded retry.
+    e.next_try_ms = now + PROBE_RESULT_RETRY_MS;
+  }
 }
 
 // MQTT task (Core 0) only.
-bool MQTTBridge::publishProbeResult() {
-  if (!_probe_result_buffer || _probe_result_len == 0) return false;
-  int i = (int)_probe_result_slot;
+bool MQTTBridge::publishProbeResult(const ProbeResultEntry& entry) {
+  if (!entry.buf || entry.len == 0) return false;
+  int i = (int)entry.slot;
   if (i < 0 || i >= RUNTIME_MQTT_SLOTS) return false;
   if (!_slots[i].enabled || !_slots[i].client || !_slots[i].connected) return false;
 
   char topic[128];
-  if (!mqttBuildSerialTopic(_iata, _device_id, false, topic, sizeof(topic))) return false;
+  // Answer on the ONE tree this node is configured for -- deliberately not both.
+  //
+  // Dual-publishing looks free (it is WiFi-side only, no LoRa airtime) but is
+  // not: on the updated broker a probe/v1 publish from a node that is not
+  // enrolled is DENIED, and a denied publish closes the connection, which would
+  // take this node's packets/status uplink down with the tasking channel. So the
+  // v1 tree is written only when the operator has flipped the switch, which is
+  // also the point at which they confirmed the roster entry exists.
+  //
+  // The subscribe side is asymmetric on purpose: it keeps BOTH channels
+  // registered, because listening costs nothing and preserves the rollback path.
+  const bool use_v1 = _prefs && _prefs->probe_topic_v1;
+  const bool built = use_v1
+    ? mqttBuildProbeTopic(_device_id, false, topic, sizeof(topic))
+    : mqttBuildSerialTopic(_iata, _device_id, false, topic, sizeof(topic));
+  if (!built) return false;
 
   // QoS 1 and NEVER retained: a probe result must not be silently dropped, and a
   // retained result would be replayed to the next subscriber as if it were fresh.
-  return publishToSlot(i, topic, _probe_result_buffer, _probe_result_len, false, 1);
+  return publishToSlot(i, topic, entry.buf, entry.len, false, 1);
 }
 
 // ---------------------------------------------------------------------------

@@ -52,12 +52,19 @@ static inline bool mqttWriteTopic(char* buf, size_t buf_size, const char* format
 // IATA. MeshCore routes require a configured IATA and device id. Custom
 // templates may omit either placeholder, so their individual values are allowed
 // to be empty.
-// Private admin channel for the Echo Observer-Probe:
+// LEGACY private admin channel for the Echo Observer-Probe:
 //   meshcore/{IATA}/{PUBKEY}/serial/commands   (Echo -> Observer)
 //   meshcore/{IATA}/{PUBKEY}/serial/responses  (Observer -> Echo)
 // Four segments, so it deliberately does not go through mqttWriteTopic's
-// three-placeholder format. MeshCore-route only: a custom template or a MeshRank
-// slot has no serial/* channel.
+// three-placeholder format.
+//
+// Superseded by mqttBuildProbeTopic() below, but kept registered alongside it
+// through the transition so a BROKER rollback still has a working path — see the
+// comment there.
+//
+// NOTE: this builder does not, and never did, check the route style; a custom
+// template or a MeshRank slot reaches it just the same. The only gates are the
+// caller's probe_enable / probe_control_slot checks.
 static inline bool mqttBuildSerialTopic(const char* iata, const char* device,
                                         bool commands, char* buf, size_t buf_size) {
   if (!buf || buf_size == 0) return false;
@@ -67,6 +74,40 @@ static inline bool mqttBuildSerialTopic(const char* iata, const char* device,
   }
   int w = snprintf(buf, buf_size, "meshcore/%s/%s/serial/%s",
                    iata, device, commands ? "commands" : "responses");
+  if (w <= 0 || (size_t)w >= buf_size) {
+    buf[0] = '\0';
+    return false;
+  }
+  return true;
+}
+
+// Current private control plane for the Echo Observer-Probe:
+//   probe/v1/{PUBKEY}/cmd   (Echo -> Observer)
+//   probe/v1/{PUBKEY}/rsp   (Observer -> Echo)
+//
+// Outside the meshcore/ tree, which public subscribers read. 77 chars, well
+// inside the 128-byte caller buffers (the MQTT library truncates SILENTLY at
+// 127, so headroom matters more than it looks).
+//
+// There is deliberately NO IATA segment. IATA is node-mutable — the broker even
+// counts changes as abuse — so keying the mailbox on it would let a node
+// relocate its own command topic and have Echo's commands vanish with no error
+// at either end. The pubkey is the only segment carrying authorization weight,
+// and the broker binds it to the authenticated identity.
+//
+// Consequence worth stating plainly: the legacy builder above refuses to build
+// when IATA is unset or "XXX", so `set mqtt.iata XXX` used to take a node off
+// the tasking channel. That side effect does NOT carry over here. The explicit
+// controls are `probe off` and the probe.topic switch — see MQTTBridge.
+static inline bool mqttBuildProbeTopic(const char* device, bool commands,
+                                       char* buf, size_t buf_size) {
+  if (!buf || buf_size == 0) return false;
+  buf[0] = '\0';
+  // Keep the device half of the legacy guard: without it an unnamed device
+  // yields "probe/v1//cmd", an empty path segment that is a perfectly legal
+  // MQTT topic and would subscribe the node to a channel nobody publishes to.
+  if (!device || device[0] == '\0') return false;
+  int w = snprintf(buf, buf_size, "probe/v1/%s/%s", device, commands ? "cmd" : "rsp");
   if (w <= 0 || (size_t)w >= buf_size) {
     buf[0] = '\0';
     return false;

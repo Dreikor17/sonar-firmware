@@ -81,6 +81,14 @@ public:
   uint8_t  probe_gap_secs = 5;                     // min seconds between SESSIONS; self-pacing
   uint8_t  probe_control_slot = 0xFF;              // the ONE MQTT slot allowed to task us;
                                                    // 0xFF = unset = no inbound tasking channel
+  // Which tasking topic tree to SUBSCRIBE to. 0 = legacy meshcore/.../serial/,
+  // 1 = probe/v1/{PUBKEY}/cmd. Defaults to legacy so flashing this firmware can
+  // never change wire behaviour on its own: a node offering probe/v1 to a broker
+  // that does not know it yet is denied AND force-closed, which takes the node's
+  // normal packets/status uplink down with it (~24 min to trip the backoff
+  // breaker, then ~35 min cycles). Flip this only once the broker is confirmed
+  // updated AND this node's pubkey is enrolled in its roster.
+  uint8_t  probe_topic_v1 = 0;
 
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) are not in NodePrefs.
   // They live in MQTTPrefs, persisted separately to /mqtt_prefs, so this struct
@@ -191,6 +199,14 @@ private:
       def("flood",  _parent->probe_allow_flood);
       def("gap",    _parent->probe_gap_secs);
       def("slot",   _parent->probe_control_slot);
+      // Storage key is "tree", NOT "v1", even though the CLI name is probe.v1.
+      // ConfigSerializer's is_key_char() accepts only letters and '_' — a DIGIT in
+      // a key makes the reader return TOK_ERROR, so "v1" wrote to /prefs.json fine
+      // and then failed to parse back, silently reverting to 0 on every boot (and
+      // erroring mid-file rather than skipping the key). Every other key in this
+      // codebase is letters/underscore, which is why nothing had hit it before.
+      // Do not "tidy" this back to match the CLI name.
+      def("tree",   _parent->probe_topic_v1);
     }
   public:
     ProbePrefs(NodePrefs* parent) : _parent(parent) { }

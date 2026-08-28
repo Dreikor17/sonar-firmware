@@ -58,7 +58,20 @@ class MyMesh;
 // Arduino loop task has an 8 KB stack and the software Ed25519 verify path alone
 // needs roughly 3 KB of it (src/Identity.cpp:25-28).
 #define PROBE_CMD_MAX_LEN 1024
-#define PROBE_CLAIMS_MAX_LEN 512
+// Any clock reading below this (2023-11-14) is a node that has not learned the time
+// yet, not a real timestamp. Used only to decide whether the boot epoch is usable.
+#define PROBE_SANE_EPOCH 1700000000u
+
+// DECODED claims budget -- the size of the _claims buffer below. The worst real case is a
+// 160-char remote CLI command alongside a sealed admin password, measured at 503 decoded
+// bytes; 512 would clear that by nine bytes, which is not headroom, it is a coincidence.
+#define PROBE_CLAIMS_MAX_LEN 640
+// The same budget expressed in BASE64URL characters, for the pre-filter that runs before
+// we decode. These are different units and conflating them silently shrinks the usable
+// claims by a quarter: comparing an ENCODED length against the DECODED cap left ~128 bytes
+// of the buffer unreachable and capped a remote CLI command at about 44 characters, while
+// Echo, this file and the protocol doc all advertised 160.
+#define PROBE_CLAIMS_MAX_B64 (((PROBE_CLAIMS_MAX_LEN + 2) / 3) * 4)
 
 enum ProbeStep : uint8_t {
   PS_IDLE = 0, PS_ANON, PS_LOGIN, PS_VER_IDENT, PS_STATUS, PS_TELEMETRY, PS_CLI, PS_DONE
@@ -74,7 +87,7 @@ enum ProbeRoute : uint8_t { PR_NONE = 0, PR_ZEROHOP, PR_DIRECT, PR_FLOOD };
 enum ProbeReject : uint8_t {
   PRJ_NONE = 0, PRJ_DISABLED, PRJ_NO_CONTROLLER, PRJ_BAD_TOKEN, PRJ_BAD_SIG,
   PRJ_REPLAY, PRJ_CLOCK, PRJ_RATE, PRJ_QUEUE_FULL, PRJ_BAD_TARGET, PRJ_BAD_PW,
-  PRJ_BAD_CMD, PRJ_NEED_ADMIN
+  PRJ_BAD_CMD, PRJ_NEED_ADMIN, PRJ_BAD_OBS, PRJ_PREBOOT
 };
 
 // A queued unit of work. Kept small: the bulky per-attempt state lives in the
@@ -95,6 +108,12 @@ struct ProbeSession {
   // stored length is authoritative.
   char     cli_cmd[PROBE_CLI_MAX_TEXT + 1];
   uint8_t  cli_len;
+  // Admission-time deadline and arrival order. A session can sit QUEUED behind three
+  // others, each of which may flood and retry for a minute or more, so by the time it
+  // reaches the radio the command it carries can be long dead. exp is re-checked at
+  // dispatch; seq makes the queue FIFO rather than "lowest free slot index wins".
+  uint32_t exp;               // 0 = no deadline supplied (local CLI)
+  uint32_t seq;               // monotonic admission counter
 };
 
 // Human-readable names for a finished session, used when MyMesh serialises the
@@ -184,7 +203,19 @@ private:
     uint32_t learned_at;            // epoch secs, 0 = free slot
   };
   RouteEntry _routes[PROBE_ROUTE_CACHE];
+
+  // Per-target flood brake. Deliberately NOT persisted: after a reboot the mesh
+  // may well have changed, and a node that has just come up should be allowed to
+  // find its routes rather than inheriting an old grudge.
+  struct FloodBackoff {
+    uint8_t  pub_key[PUB_KEY_SIZE];
+    uint32_t next_ok_at;          // epoch secs; 0 = free slot
+    uint8_t  fails;               // consecutive failed floods
+  };
+  FloodBackoff _flood_backoff[PROBE_FLOOD_BACKOFF_SLOTS];
+  bool     _session_flooded;      // this session actually put a flood on air
   bool     _route_from_cache;       // this session's path came from the cache
+  bool     _flood_repaired;         // this session already spent its one repair flood
   unsigned long _next_session_at;    // self-pacing gate (probe.gap)
   bool     _routes_dirty;           // needs flushing to flash
 
@@ -195,6 +226,14 @@ private:
   uint8_t openSealedPassword(const char* hex, size_t hex_len,
                              uint32_t nonce, uint32_t iat, ProbePasswordClaim* out);
   void  routeCacheDrop(const uint8_t* pub_key);
+  // Mark a cached route as still good. A path in successful use must not expire on
+  // a timer: without this, a mesh provisioned in one batch expires every route
+  // together and re-floods all of them as a herd, every TTL, forever.
+  void  routeCacheTouch(const uint8_t* pub_key);
+
+  bool  floodHeldOff(const uint8_t* pub_key);    // still inside the backoff window
+  void  floodFailed(const uint8_t* pub_key);     // advance the ladder
+  void  floodSucceeded(const uint8_t* pub_key);  // clear it: the target answered
 
 public:
   // Persistence. Without it every reboot costs a full sweep of floods to relearn
@@ -227,6 +266,10 @@ private:
 
   // Result accumulation for the active session (JSON claim fragment).
   char   _result[640];
+  bool   _result_truncated;   // a fragment was dropped; the JSON stays valid
+  uint32_t _boot_epoch;       // clock at first sane reading; 0 = not yet known
+  uint32_t _seq_next;         // admission counter feeding ProbeSession::seq
+  uint32_t _n_expired;        // sessions dropped at dispatch, deadline already passed
   size_t _result_len;
 
   // Policy
