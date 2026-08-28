@@ -897,29 +897,51 @@ void ProbeExecutor::loop() {
     if (_route_from_cache && _active >= 0) {
       routeCacheDrop(_sessions[_active].target.pub_key);
       resultAppend(",\"stale_route\":true");
+    }
 
-      // REPAIR IN THIS SESSION rather than making the caller poll again.
-      //
-      // A cached path that stops answering is the normal way a mesh says it moved.
-      // Ending here means every repair costs a wasted poll: the scheduler gets a
-      // useless "timeout", the node looks down when it is not, and the NEXT poll is
-      // the one that floods and succeeds. Retrying once here costs no more airtime
-      // than that -- the second poll would have flooded anyway -- and turns a
-      // two-poll repair into one.
-      //
-      // Bounded to one repair per session by _flood_repaired, so a target that is
-      // genuinely gone cannot loop. The login is deliberately NOT reset: the target
-      // keys its session on our pubkey, not on the path.
-      if (_prefs && _prefs->probe_allow_flood && !_flood_repaired) {
-        _flood_repaired = true;
-        _route_from_cache = false;
-        _out_path_len = PROBE_OUT_PATH_UNKNOWN;   // forces the flood path
-        _awaiting = false;
-        _inflight = NULL;
-        resultAppend(",\"route_repaired\":true");
-        advance();                                 // re-issue the failed step
-        return;
-      }
+    // REPAIR IN THIS SESSION rather than making the caller poll again.
+    //
+    // A direct path that stops answering is the normal way a mesh says it moved.
+    // Ending here means every repair costs a wasted poll: the scheduler gets a
+    // useless "timeout", the node looks down when it is not, and the NEXT poll is
+    // the one that floods and succeeds. Retrying once here costs no more airtime
+    // than that -- the second poll would have flooded anyway -- and turns a
+    // two-poll repair into one.
+    //
+    // THE PATH'S PROVENANCE MUST NOT DECIDE THIS. The repair used to sit inside the
+    // cache branch above, so it ran only for a path read from the cache and never for
+    // one learned from a PATH return earlier in this same session. That split the
+    // behaviour of two identical failures and made a marginal target alternate,
+    // measured against w9jz.org Pine Bluff (RSSI -99, SNR 5, ~16s round trip):
+    //
+    //   session A  no cache -> flood login -> learn path P -> status over P times out
+    //              -> _route_from_cache is false -> NO repair -> reported timeout,
+    //                 while P is left in the cache by handlePathReturn
+    //   session B  reads P from cache -> times out -> stale -> repairs -> succeeds
+    //
+    // Every other poll was thrown away to re-discover what the previous one had just
+    // been told. A direct step that went unanswered has earned exactly one re-flood
+    // either way -- what differs is only whether the cache entry was also wrong, which
+    // is what the drop above still handles on its own.
+    //
+    // Deliberately NOT extended to a step that already FLOODED: re-flooding a flood
+    // that nobody answered buys nothing and doubles the airtime on a mesh-wide send.
+    //
+    // Bounded to one repair per session by _flood_repaired, so a target that is
+    // genuinely gone cannot loop. The login is deliberately NOT reset: the target
+    // keys its session on our pubkey, not on the path. The re-flood's PATH return
+    // overwrites the cached entry through handlePathReturn, so a fresh path that was
+    // genuinely bad corrects itself without being dropped on one lost packet.
+    if (_route == PR_DIRECT && _active >= 0
+        && _prefs && _prefs->probe_allow_flood && !_flood_repaired) {
+      _flood_repaired = true;
+      _route_from_cache = false;
+      _out_path_len = PROBE_OUT_PATH_UNKNOWN;   // forces the flood path
+      _awaiting = false;
+      _inflight = NULL;
+      resultAppend(",\"route_repaired\":true");
+      advance();                                 // re-issue the failed step
+      return;
     }
     finishSession(PST_TIMEOUT);
   }
