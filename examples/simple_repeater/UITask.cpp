@@ -134,77 +134,6 @@ void UITask::renderCurrScreen() {
       return;
     }
 #endif
-#ifdef WITH_MQTT_BRIDGE
-    // Observer status banner: who this node is, where it can be reached, and whether
-    // the two links that actually matter are up. Radio config (freq/BW/CR) is not here
-    // on purpose -- it is fixed at deploy time and readable over the CLI, whereas these
-    // three change by themselves and are the things worth walking up to a node to read.
-    const int badge = 24;
-    const int bx = 0, by = 20;
-    const int tx = bx + badge + 4;
-    const int avail = _display->width() - tx;
-
-    // Inverted RF badge: filled block with the mark knocked out. Drawn with primitives
-    // rather than an XBM so it lands correctly on every display this firmware targets
-    // (SSD1306, SH1106, e-paper, TFT) without a per-panel bitmap or a bit-order bug.
-    _display->setColor(UIColor::primary_txt);
-    _display->fillRect(bx, by, badge, badge);
-    _display->setTextSize(1);
-    _display->setColor(UIColor::window_bkg);
-    {
-      const uint16_t mw = _display->getTextWidth("RF");
-      _display->setCursor(bx + (badge - (int)mw) / 2, by + (badge - 8) / 2);
-      _display->print("RF");
-    }
-
-    // Node name, truncated to the space beside the badge rather than overflowing off
-    // the panel -- a name is operator-chosen and routinely longer than the screen.
-    _display->setColor(UIColor::primary_txt);
-    _display->setCursor(tx, 14);
-    {
-      char name[40];
-      snprintf(name, sizeof(name), "%s", _node_prefs->node_name);
-      while (name[0] && _display->getTextWidth(name) > avail) name[strlen(name) - 1] = 0;
-      _display->print(name);
-    }
-
-    // Address. "no wifi" rather than a blank line: an empty row reads as "still
-    // starting up", which is the one thing it never means.
-    _display->setCursor(tx, 28);
-    if (WiFi.status() == WL_CONNECTED) {
-      IPAddress ip = WiFi.localIP();
-      snprintf(tmp, sizeof(tmp), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-      _display->setColor(UIColor::primary_txt);
-    } else {
-      snprintf(tmp, sizeof(tmp), "no wifi");
-      _display->setColor(UIColor::warning_txt);
-    }
-    _display->print(tmp);
-
-    // The two links, side by side, each coloured by its own state so a glance at the
-    // node tells you which half is broken.
-    //
-    // MQTT is whether the uplink is connected RIGHT NOW. Echo is whether a controller
-    // has adopted this node -- a node cannot put itself into the "issued" state, only a
-    // controller holding the shipped key can hand it one of its own, so this is a
-    // truthful answer on the device with nothing to cross-check elsewhere. They are
-    // independent: an adopted node with a dead uplink shows Echo:Y MQTT:N.
-    {
-      const bool mqtt_up = _mqtt_status && _mqtt_status();
-      const uint8_t st = probeControllerKeyState(_node_prefs->probe_controller_pubkey,
-                                                 sizeof(_node_prefs->probe_controller_pubkey));
-      const bool authed = (st == PROBE_CTRL_ISSUED);
-      _display->setCursor(tx, 42);
-      _display->setColor(mqtt_up ? UIColor::corp_blue : UIColor::warning_txt);
-      _display->print(mqtt_up ? "MQTT:Y" : "MQTT:N");
-      _display->setColor(UIColor::primary_txt);
-      _display->print(" ");
-      _display->setColor(authed ? UIColor::corp_blue : UIColor::warning_txt);
-      _display->print(authed ? "Echo:Y" : "Echo:N");
-    }
-#else
-    // Plain repeater (no bridge): unchanged. Radio config is the useful thing here,
-    // and there is no uplink or controller to report on.
     // node name
     _display->setCursor(0, 0);
     _display->setTextSize(1);
@@ -220,6 +149,29 @@ void UITask::renderCurrScreen() {
     _display->setCursor(0, 30);
     sprintf(tmp, "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
     _display->print(tmp);
+
+#ifdef WITH_MQTT_BRIDGE
+    // Display IP address for MQTT bridge devices
+    if (WiFi.status() == WL_CONNECTED) {
+      IPAddress ip = WiFi.localIP();
+      _display->setCursor(0, 40);
+      _display->setColor(UIColor::primary_txt);
+      snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+      _display->print(tmp);
+    }
+
+    // Has the controller adopted this node yet? A node cannot put itself into the "issued"
+    // state -- only a controller holding the shipped key can hand it one of its own -- so
+    // this is a truthful answer on the device itself, with nothing to cross-check on a
+    // screen somewhere else. It says whether the node is CLAIMED, not whether it is up.
+    {
+      const uint8_t st = probeControllerKeyState(_node_prefs->probe_controller_pubkey,
+                                                 sizeof(_node_prefs->probe_controller_pubkey));
+      const bool authed = (st == PROBE_CTRL_ISSUED);
+      _display->setCursor(0, 50);
+      _display->setColor(authed ? UIColor::corp_blue : UIColor::warning_txt);
+      _display->print(authed ? "Echo Auth: Yes" : "Echo Auth: No");
+    }
 #endif
   }
 }

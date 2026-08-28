@@ -323,11 +323,6 @@ public:
                           const char* extra_json, size_t extra_len);
   void publishProbeReject(uint8_t reply_slot, const char* job_id, const char* reason);
   bool getProbeStatusLine(char* buf, size_t buf_size) const;
-#ifdef WITH_MQTT_BRIDGE
-  // Is the MQTT uplink up? For the home-screen indicator only -- see the cross-task
-  // note on MQTTBridge::hasConnectedSlot().
-  bool isMqttUplinkConnected() const { return bridge != NULL && bridge->hasConnectedSlot(); }
-#endif
 
   // CommonCLICallbacks
   void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) override;
