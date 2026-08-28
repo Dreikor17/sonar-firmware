@@ -1,133 +1,161 @@
-## About MeshCore
+# Sonar
 
-MeshCore is a lightweight, portable C++ library that enables multi-hop packet routing for embedded projects using LoRa and other packet radios. It is designed for developers who want to create resilient, decentralized communication networks that work without the internet.
+Source and firmware releases for **Sonar** — the [rflab.io](https://rflab.io) MeshCore
+observer build.
 
-## 🔍 What is MeshCore?
+Sonar is a MeshCore **observer** that also acts as a remote **probe**. It does what an
+observer normally does — sit on the mesh, hear packets, and uplink what it hears to an
+MQTT broker — and adds the ability to be *asked a question*: interrogate a specific node
+over LoRa on command and return a signed answer.
 
-MeshCore now supports a range of LoRa devices, allowing for easy flashing without the need to compile firmware manually. Users can flash a pre-built binary using tools like Adafruit ESPTool and interact with the network through a serial console.
-MeshCore provides the ability to create wireless mesh networks, similar to Meshtastic and Reticulum but with a focus on lightweight multi-hop packet routing for embedded projects. Unlike Meshtastic, which is tailored for casual LoRa communication, or Reticulum, which offers advanced networking, MeshCore balances simplicity with scalability, making it ideal for custom embedded solutions, where devices (nodes) can communicate over long distances by relaying messages through intermediate nodes. This is especially useful in off-grid, emergency, or tactical situations where traditional communication infrastructure is unavailable.
+The name is the behaviour. Sonar works by echo, and it has two modes:
 
-> **MQTT Observer Setup** — Prebuilt observer firmware, docs, and a changelog are at
-> [observer.gessaman.com](https://observer.gessaman.com/). See the
-> [MQTT Implementation Guide](./MQTT_IMPLEMENTATION.md) for configuration, CLI commands, and
-> troubleshooting.
+| Sonar | Node |
+|---|---|
+| **passive** — listen, report what you hear | observer: packet/status uplink, neighbour reports |
+| **active** — transmit, then listen for the return | probe: query a node and return the result |
 
-## ⚡ Key Features
+## Why
 
-* Multi-Hop Packet Routing
-  * Devices can forward messages across multiple nodes, extending range beyond a single radio's reach.
-  * Supports up to a configurable number of hops to balance network efficiency and prevent excessive traffic.
-  * Nodes use fixed roles where "Companion" nodes are not repeating messages at all to prevent adverse routing paths from being used.
-* Supports LoRa Radios – Works with Heltec, RAK Wireless, and other LoRa-based hardware.
-* Decentralized & Resilient – No central server or internet required; the network is self-healing.
-* Low Power Consumption – Ideal for battery-powered or solar-powered devices.
-* Simple to Deploy – Pre-built example applications make it easy to get started.
+A monitoring station can only poll what its own radio can reach. Nodes behind a ridge, or
+in another town, are simply invisible to it — and asking louder doesn't help, it just
+spends airtime transmitting into silence.
 
-## 🎯 What Can You Use MeshCore For?
+Sonar nodes are the ears in those places. A manager picks the Sonar node that can actually
+*hear* the node in question and asks that one, which means the query goes out from
+somewhere it can succeed, rather than being flooded across the whole mesh from somewhere
+it can't.
 
-* Off-Grid Communication: Stay connected even in remote areas.
-* Emergency Response & Disaster Recovery: Set up instant networks where infrastructure is down.
-* Outdoor Activities: Hiking, camping, and adventure racing communication.
-* Tactical & Security Applications: Military, law enforcement, and private security use cases.
-* IoT & Sensor Networks: Collect data from remote sensors and relay it back to a central location.
+## Airtime
 
-## 🚀 How to Get Started
+This is a monitoring tool that transmits, so restraint is built in rather than optional:
 
-- Watch the [MeshCore QuickStart Playlist](https://www.youtube.com/watch?v=iaFltojJrAc&list=PLshzThxhw4O4WU_iZo3NmNZOv6KMrUuF9) by The Comms Channel
-- Watch the [MeshCore Technical Presentation](https://www.youtube.com/watch?v=OwmkVkZQTf4) by Liam Cottle.
-- Read through our [Frequently Asked Questions](./docs/faq.md) and [Documentation](https://docs.meshcore.io).
-- Flash the MeshCore firmware on a supported device.
-- Connect with a supported client.
+- Queries prefer a **direct** path and fall back to a flood only when there is no route.
+- Every node enforces a **per-hour budget** on how often it can be tasked.
+- A node that stops answering earns an increasing **backoff** instead of being retried
+  forever.
+- Neighbour reports are collected with a **zero-hop** discovery (it never propagates), at
+  most once every 12 hours.
+- Sonar never sends repeated adverts.
 
-For developers:
+## Updates
 
-- Install [PlatformIO](https://docs.platformio.org) in [Visual Studio Code](https://code.visualstudio.com).
-- Clone and open the MeshCore repository in Visual Studio Code.
-- See the example applications you can modify and run:
-  - [Companion Radio](./examples/companion_radio) - For use with an external chat app, over BLE, USB or Wi-Fi.
-  - [KISS Modem](./examples/kiss_modem) - Serial KISS protocol bridge for host applications. ([protocol docs](./docs/kiss_modem_protocol.md))
-  - [Simple Repeater](./examples/simple_repeater) - Extends network coverage by relaying messages.
-  - [Simple Room Server](./examples/simple_room_server) - A simple BBS server for shared Posts.
-  - [Simple Secure Chat](./examples/simple_secure_chat) - Secure terminal based text communication between devices.
-  - [Simple Sensor](./examples/simple_sensor) - Remote sensor node with telemetry and alerting.
+Sonar can update itself. On the device:
 
-The Simple Secure Chat example can be interacted with through the Serial Monitor in Visual Studio Code, or with a Serial USB Terminal on Android.
+    ota check     # report the available build, change nothing
+    ota update    # download, flash, reboot
 
-## ⚡️ MeshCore Flasher
+The release channel *is* the manifest URL the firmware was built with, so a Sonar node
+only ever sees Sonar builds — never stock observer builds, and vice versa. Manifests are
+served from `rflab.io`; the firmware images themselves come from the Releases on this
+repository.
 
-We have prebuilt firmware ready to flash on supported devices.
+`ota update` verifies the download against the certificate bundle embedded in the
+firmware, so images are only ever fetched over HTTPS from a publicly trusted host.
 
-- Launch https://meshcore.io/flasher
-- Select a supported device
-- Flash one of the firmware types:
-  - Companion, Repeater or Room Server
-- Once flashing is complete, you can connect with one of the MeshCore clients below.
+## Versions
 
-## 📱 MeshCore Clients
+    v1.17.1.3-observer-sonar-a1b2c3d
+    │        │ │        │     └─ commit
+    │        │ │        └─ this build (Sonar)
+    │        │ └─ upstream variant
+    │        └─ Sonar build number, increases every release
+    └─ upstream MeshCore version
 
-**Companion Firmware**
+The upstream version is kept deliberately, so it is always obvious which MeshCore release
+a Sonar build is based on.
 
-The companion firmware can be connected to via BLE, USB or Wi-Fi depending on the firmware type you flashed.
+## Flashing
 
-- Web: https://app.meshcore.nz
-- Android: https://play.google.com/store/apps/details?id=com.liamcottle.meshcore.android
-- iOS: https://apps.apple.com/us/app/meshcore/id6742354151?platform=iphone
-- NodeJS: https://github.com/liamcottle/meshcore.js
-- Python: https://github.com/fdlamotte/meshcore-cli
+Each release carries two images. Which one you want depends on whether the board has
+ever run Sonar before.
 
-**Repeater and Room Server Firmware**
+**A new or unknown board — `*-merged.bin`, written at offset `0x0`:**
 
-The repeater and room server firmware can be set up via USB in the web config tool.
-
-- https://config.meshcore.io
-
-They can also be managed via LoRa in the mobile app by using the Remote Management feature.
-
-## 🛠 Hardware Compatibility
-
-MeshCore is designed for devices listed in the [MeshCore Flasher](https://meshcore.io/flasher)
-
-## 📜 License
-
-MeshCore is open-source software released under the MIT License. You are free to use, modify, and distribute it for personal and commercial projects.
-
-## Contributing
-
-Please submit PR's using 'dev' as the base branch!
-For minor changes just submit your PR and we'll try to review it, but for anything more 'impactful' please open an Issue first and start a discussion. It is better to sound out what it is you want to achieve first, and try to come to a consensus on what the best approach is, especially when it impacts the structure or architecture of this codebase.
-
-Here are some general principles you should try to adhere to:
-* Keep it simple. Please, don't think like a high-level lang programmer. Think embedded, and keep code concise, without any unnecessary layers.
-* No dynamic memory allocation, except during setup/begin functions.
-* Use the same brace and indenting style that's in the core source modules. (A .clang-format is probably going to be added soon, but please do NOT retroactively re-format existing code. This just creates unnecessary diffs that make finding problems harder)
-
-Help us prioritize! Please react with thumbs-up to issues/PRs you care about most. We look at reaction counts when planning work.
-
-### Running unit tests
-
-To run unit tests, run the following command:
-
-```bash
-pio test --environment native --verbose
+```
+esptool.py --chip esp32s3 write_flash 0x0 <name>-merged.bin
 ```
 
-## Road-Map / To-Do
+This carries the bootloader, partition table, OTA selector and application together. A
+first flash has to be over USB — there is no way onto a blank board over the network.
 
-There are a number of fairly major features in the pipeline, with no particular time-frames attached yet. In very rough chronological order:
-- [X] Companion radio: UI redesign
-- [X] Repeater + Room Server: add ACL's (like Sensor Node has)
-- [X] Standardise Bridge mode for repeaters
-- [ ] Repeater/Bridge: Standardise the Transport Codes for zoning/filtering
-- [X] Core + Repeater: enhanced zero-hop neighbour discovery
-- [ ] Core: round-trip manual path support
-- [ ] Companion + Apps: support for multiple sub-meshes (and 'off-grid' client repeat mode)
-- [ ] Core + Apps: support for LZW message compression
-- [ ] Core: dynamic CR (Coding Rate) for weak vs strong hops
-- [ ] Core: new framework for hosting multiple virtual nodes on one physical device
-- [ ] V2 protocol spec: discussion and consensus around V2 packet protocol, including path hashes, new encryption specs, etc
+**Updating a board already running Sonar — let it update itself:**
 
-## 📞 Get Support
+```
+ota check     # report what is available, change nothing
+ota update    # download, flash, reboot
+```
 
-- Report bugs and request features on the [GitHub Issues](https://github.com/ripplebiz/MeshCore/issues) page.
-- Find additional guides and components on [my site](https://buymeacoffee.com/ripplebiz).
-- Join [MeshCore Discord](https://meshcore.gg) to chat with the developers and get help from the community.
+The plain `.bin` (no `-merged`) is the application image the device fetches for itself.
+You can write it at `0x10000` over a cable if you prefer, but it will not boot a board
+that has never been flashed.
+
+A release whose partition layout changed cannot be applied over the air — OTA cannot
+rewrite a partition table. The firmware checks this itself and refuses rather than
+bricking; those releases say so in the notes and need a cable.
+
+## First-time setup
+
+A freshly flashed board knows nothing: no network, no broker, no controller. Configure it
+over USB serial (or the built-in config portal), at minimum:
+
+```
+set wifi.ssid <ssid>
+set wifi.pwd <password>
+set mqtt.iata <code>            # its slot in the broker topic tree
+set mqtt.origin <name>          # how it identifies itself
+```
+
+To let a manager task it as a probe, it also needs the controller key it will accept
+commands from — anything not signed by that key is refused, so a compromised broker
+still cannot task it:
+
+```
+set probe.controller <64-hex controller public key>
+set probe on
+```
+
+Neighbour reporting (`set mqtt.neighbors on`) is on by default on a fresh install. A board
+carried over from an earlier build keeps whatever it had, so it may need setting once.
+
+Being reachable is not the same as being permitted: the manager and the broker each keep
+their own list of which nodes may be tasked, and both have to allow it.
+
+## The source
+
+This repository holds the full firmware, not just the binaries, so anyone running a Sonar
+node — or hearing one on the mesh — can read exactly what it does. It is a fork of
+MeshCore's observer build; the Sonar work is a handful of commits on top, and the upstream
+history is kept intact rather than squashed away.
+
+| Branch | Points at | Use |
+|---|---|---|
+| `main` | the production manifest | what field nodes run |
+| `dev` | the development manifest | what is being worked on |
+
+The two differ only in which release channel a build is bound to, and `dev` additionally
+carries a broker preset for the development environment. The channel is compiled in, so a
+node only ever sees updates from the branch it was built from — the two populations cannot
+cross-update.
+
+Worth knowing before you flash a release:
+
+- The image carries the controller's **public** key, so a node trusts one specific
+  controller out of the box. Without the private half it cannot be tasked, and it still
+  has to be approved on the controller side before anything reaches it.
+- The admin password is MeshCore's stock default. **Change it during setup** — a
+  repeater accepts an admin login over the radio from anyone in range who knows it.
+- OTA manifests are signed with that same controller key, so a node will not install
+  firmware named by a manifest it cannot verify.
+
+Building needs [PlatformIO](https://platformio.org/). `release-sonar.sh` pins the
+environment variables a releasable build depends on; a plain `pio run` produces a working
+node with over-the-air updates disarmed, which is the safe default for a local build.
+
+## Credit and license
+
+Sonar is built on [MeshCore](https://meshcore.io) by Scott Powell, and on the
+observer/MQTT work in [agessaman/MeshCore](https://github.com/agessaman/MeshCore).
+
+MeshCore is MIT licensed; see [`license.txt`](license.txt), which applies to the firmware
+images published here.
