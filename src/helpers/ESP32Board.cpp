@@ -240,16 +240,34 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
       return false;
     }
   } else {
-    // `ota update`: HTTPS. The bridge is torn down for an update so heap is free,
-    // and integrity matters because we're about to flash.
-#if ESP_ARDUINO_VERSION_MAJOR >= 3
-    mclient.setCACertBundle(rootca_crt_bundle_start, bundle_len);
-#else
-    mclient.setCACertBundle(rootca_crt_bundle_start);
-#endif
-    mclient.setTimeout(15000);
+    // `ota update`: fetch the manifest with a client that MATCHES the base's scheme.
+    // It used to hand the URL to a TLS client unconditionally, which meant an http://
+    // manifest base (a manifest served by the controller on the local network, rather
+    // than from a public host) made `ota check` succeed and `ota update` fail on the
+    // same URL -- confusing, because check does the identical fetch in plaintext.
+    //
+    // The FIRMWARE IMAGE download below is always TLS-verified regardless; only the
+    // manifest follows the base. Note what that means: over a plain-http base, anyone
+    // who can tamper with that fetch chooses which (still cert-verified) host the image
+    // comes from. Acceptable for a base you control on your own network; not for one
+    // reached across the open internet.
     snprintf(murl, sizeof(murl), "%s/%s.json", OTA_MANIFEST_BASE, OTA_VARIANT);
-    if (!http.begin(mclient, murl)) {
+    const bool manifest_tls = (strncmp(murl, "https://", 8) == 0);
+    bool began;
+    if (manifest_tls) {
+      // The bridge is torn down for an update so heap is free, and integrity matters
+      // because we are about to flash.
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+      mclient.setCACertBundle(rootca_crt_bundle_start, bundle_len);
+#else
+      mclient.setCACertBundle(rootca_crt_bundle_start);
+#endif
+      mclient.setTimeout(15000);
+      began = http.begin(mclient, murl);
+    } else {
+      began = http.begin(murl);
+    }
+    if (!began) {
       strcpy(reply, "ERR: manifest connect failed");
       return false;
     }
@@ -405,6 +423,13 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
     if (d != ota_progress_decile) { ota_progress_decile = d; Serial.printf("OTA: %d%%\n", d * 10); }
   });
   httpUpdate.onEnd([]() { Serial.println("OTA: write complete, rebooting..."); });
+  // Follow redirects. A release asset URL is a REDIRECT to the host actually holding
+  // the bytes -- GitHub 302s /releases/download/... to objects.githubusercontent.com --
+  // and without this HTTPUpdate treats the 302 as "Wrong HTTP Code" and aborts. STRICT
+  // is the RFC2616 behaviour and is enough here: this is a GET, and the redirect target
+  // is still fetched through the same TLS client, so it is verified against the embedded
+  // root bundle exactly as the first hop was.
+  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   httpUpdate.rebootOnUpdate(true);  // reboots into the new image on success
   t_httpUpdate_return ret = httpUpdate.update(uclient, file_url);
 
