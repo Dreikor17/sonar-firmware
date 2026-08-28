@@ -27,8 +27,9 @@ ProbeExecutor::ProbeExecutor()
     _session_limiter(PROBE_DEFAULT_MAX_PER_HOUR, 3600),
     _verify_guard(30, 60),
     _packet_guard(PROBE_DEFAULT_MAX_PER_HOUR * PROBE_PACKET_GUARD_MULTIPLIER, 3600),
+    _relay_limiter(PROBE_RELAY_MAX_PER_HOUR, 3600),
     _n_accepted(0), _n_rejected(0), _n_ok(0), _n_timeout(0), _n_flood(0), _n_denied(0),
-    _n_send_failed(0),
+    _n_send_failed(0), _n_relay_tx(0),
     _last_reject(PRJ_NONE)
 {
   memset(_sessions, 0, sizeof(_sessions));
@@ -424,6 +425,74 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot)
                 _mesh->publishProbeResult(ack, ok ? PST_OK : PST_DENIED, PR_NONE,
                                           _result, _result_len);
                 return true;
+              }
+            }
+          }
+        } else if (ops == PROBE_OP_RELAY_TX) {
+          // Transmit a frame the CONTROLLER built, verbatim. No session, no target, and
+          // nothing here reads the payload: this node is a transport. Authorisation was
+          // settled above (signature, freshness, replay ring, `obs` binding).
+          //
+          // Same shared-key refusal as MANAGE, and for a sharper reason. Every published
+          // image trusts the same deployment key, and applyPrefs() seeds an unset
+          // controller pref WITH it -- so on an unadopted node a deployment-key signature
+          // satisfies the primary branch and via_deploy is never set. Without the second
+          // half of this test, anyone holding a released binary could transmit arbitrary
+          // frames from any unadopted node in the field, in that node's name.
+          if (via_deploy
+              || (_deploy_key_set
+                  && memcmp(_prefs->probe_controller_pubkey, _deploy_key, PUB_KEY_SIZE) == 0)) {
+            reject = PRJ_NEED_ADMIN;
+          } else if (!_prefs->probe_relay_tx) {
+            // Consent is per node and separate from probe_enable: probing is a bounded
+            // set of named operations, relaying is arbitrary bytes on this node's radio.
+            reject = PRJ_DISABLED;
+          } else {
+            const char* fr = NULL; size_t fr_len = 0;
+            if (!probeJsonGetString(js, jl, "tx", &fr, &fr_len) || fr_len == 0) {
+              reject = PRJ_BAD_CMD;
+            } else {
+              // Decode into a stack buffer bounded by the radio's own MTU: anything
+              // larger cannot go on air, so refusing early costs nothing and keeps a
+              // hostile length from reaching the parser.
+              uint8_t raw[MAX_TRANS_UNIT];
+              int raw_len = probeB64UrlDecode(fr, fr_len, raw, sizeof(raw));
+              if (raw_len <= 0) {
+                reject = PRJ_BAD_CMD;
+              } else if (!_relay_limiter.allow(nowSecs())) {
+                // Relay TX is airtime this node's operator did not individually approve,
+                // so it carries its own budget on top of the session limiter.
+                reject = PRJ_RATE;
+              } else {
+                mesh::Packet* pkt = _mesh->obtainNewPacket();
+                if (pkt == NULL) {
+                  reject = PRJ_QUEUE_FULL;
+                } else if (!_mesh->tryParsePacket(pkt, raw, raw_len)) {
+                  // Not a well-formed MeshCore frame. Refuse rather than key noise onto
+                  // a shared channel -- the radio is the one resource we cannot take back.
+                  _mesh->releasePacket(pkt);
+                  reject = PRJ_BAD_CMD;
+                } else {
+                  // Queued through the NORMAL send path, not startSendRaw: that is what
+                  // keeps CAD, the retransmit backoff and airtime accounting local to
+                  // this node. The controller supplies the bytes; the LoRa MAC stays here.
+                  _mesh->sendPacket(pkt, 0);
+                  _n_relay_tx++;
+                  ProbeSession ack;
+                  memset(&ack, 0, sizeof(ack));
+                  memcpy(ack.job_id, job, sizeof(job));
+                  ack.reply_slot = reply_slot;
+                  ack.from_mqtt  = true;
+                  ack.target     = _mesh->self_id;
+                  resultBegin();
+                  // `relay` is the proof the controller looks for; its ABSENCE tells a
+                  // newer controller this firmware did not understand the request. The
+                  // ack means "queued on air", never "the far node answered" -- the reply
+                  // reaches the controller through the observer uplink, not through us.
+                  resultAppend(",\"relay\":true,\"len\":%d", raw_len);
+                  _mesh->publishProbeResult(ack, PST_OK, PR_NONE, _result, _result_len);
+                  return true;
+                }
               }
             }
           }

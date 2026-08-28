@@ -88,6 +88,14 @@ static inline uint8_t probeRoutePathCount(uint8_t out_path_len) {
   #define PROBE_FLOOD_ASSUMED_HOPS 4
 #endif
 
+// Hourly ceiling on RELAY transmissions. Separate from the session budget because a
+// relay frame is not a session: nothing here waits for a reply, so nothing paces it
+// except this. Sized well below the session budget on purpose -- a controller that
+// needs more than this is doing something the node's operator should be asked about.
+#ifndef PROBE_RELAY_MAX_PER_HOUR
+  #define PROBE_RELAY_MAX_PER_HOUR 120
+#endif
+
 // Effective session budget: 0 in prefs means "use the built-in default".
 static inline uint16_t probeEffectiveMaxPerHour(uint16_t configured) {
   return configured ? configured : (uint16_t)PROBE_DEFAULT_MAX_PER_HOUR;

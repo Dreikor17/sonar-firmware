@@ -89,6 +89,16 @@ public:
   // breaker, then ~35 min cycles). Flip this only once the broker is confirmed
   // updated AND this node's pubkey is enrolled in its roster.
   uint8_t  probe_topic_v1 = 0;
+  // Relay transmit: may the controller have this node key a frame IT built onto the
+  // air, verbatim? HARD DEFAULT OFF, and deliberately separate from probe_enable.
+  //
+  // Enabling probing consents to a bounded set of named operations this firmware
+  // implements. Relay is categorically larger: arbitrary bytes, transmitted in this
+  // node's name, whose contents this node does not read and cannot evaluate. Folding
+  // it into probe_enable would silently widen what every already-deployed node had
+  // agreed to the moment it took this firmware. It stays its own switch so enabling
+  // it is always a separate, deliberate act by the node's own operator.
+  uint8_t  probe_relay_tx = 0;
 
   // NOTE: observer settings (MQTT/WiFi/timezone/SNMP/alert) are not in NodePrefs.
   // They live in MQTTPrefs, persisted separately to /mqtt_prefs, so this struct
@@ -207,6 +217,9 @@ private:
       // codebase is letters/underscore, which is why nothing had hit it before.
       // Do not "tidy" this back to match the CLI name.
       def("tree",   _parent->probe_topic_v1);
+      // Letters only, per the "tree" note above — a digit in a storage key makes the
+      // reader return TOK_ERROR and silently revert the value on every boot.
+      def("relaytx", _parent->probe_relay_tx);
     }
   public:
     ProbePrefs(NodePrefs* parent) : _parent(parent) { }

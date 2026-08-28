@@ -62,12 +62,26 @@ class MyMesh;
 // behind a sealed admin password; this is a named action from a list both ends carry, so
 // widening what a controller can do to this node takes a firmware change, not a payload.
 #define PROBE_OP_MANAGE     0x40
+// RELAY: transmit a frame the CONTROLLER built, verbatim, on this node's radio.
+//
+// The controller owns the mesh identity the frame is sealed to, so the reply comes back
+// addressed to IT, not to this node -- which is the whole point: any observer that hears
+// the reply uplinks ciphertext the controller can open, so a reply no longer has to find
+// its way back to the one node that asked.
+//
+// This node is a TRANSPORT here and reads none of it. That is a deliberately larger
+// authority than any other op -- arbitrary bytes on someone else's radio, in this node's
+// name -- so it carries the strictest gates: its own default-off pref, refusal of the
+// shared deployment key (see via_deploy in verifyCommand), and its own airtime budget.
+// The LoRa MAC stays local: the frame is queued through the normal send path so CAD,
+// backoff and airtime accounting all still apply.
+#define PROBE_OP_RELAY_TX   0x80
 // Every op this firmware understands. Anything outside it is REFUSED rather than ignored:
 // an unknown bit used to run an empty session and answer "ok", so a newer controller was
 // told its request succeeded by a node that had done nothing at all. Observed exactly that
 // while building the management op -- st=ok, route=none, no action. A controller cannot
 // distinguish that from real success, and for a firmware push it is the worst possible lie.
-#define PROBE_OPS_ALL (PROBE_OP_OWNER | PROBE_OP_VER_IDENT | PROBE_OP_STATUS                        | PROBE_OP_TELEMETRY | PROBE_OP_COMMAND                        | PROBE_OP_SET_CONTROLLER | PROBE_OP_MANAGE)
+#define PROBE_OPS_ALL (PROBE_OP_OWNER | PROBE_OP_VER_IDENT | PROBE_OP_STATUS                        | PROBE_OP_TELEMETRY | PROBE_OP_COMMAND                        | PROBE_OP_SET_CONTROLLER | PROBE_OP_MANAGE | PROBE_OP_RELAY_TX)
 #define PROBE_OPS_NEED_LOGIN (PROBE_OP_VER_IDENT | PROBE_OP_STATUS | PROBE_OP_TELEMETRY                               | PROBE_OP_COMMAND)
 
 #define PROBE_JOB_ID_LEN 16
@@ -304,10 +318,15 @@ private:
   // verify on the mesh loop task, independent of the session budget.
   RateLimiter    _verify_guard;
   RateLimiter    _packet_guard;
+  // Relay TX carries its own hourly budget on top of the session limiter: it is
+  // airtime this node's operator did not individually approve, and unlike a probe
+  // session there is no reply this node waits for to pace it.
+  RateLimiter    _relay_limiter;
   ProbeNonceRing _nonces;
 
   // Counters, surfaced through the CLI and the WebConfig stats endpoint.
   uint32_t _n_accepted, _n_rejected, _n_ok, _n_timeout, _n_flood, _n_denied, _n_send_failed;
+  uint32_t _n_relay_tx;            // frames keyed onto the air on the controller's behalf
   uint8_t  _last_reject;
 
   // Status line for the display.
