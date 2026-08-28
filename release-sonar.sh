@@ -43,11 +43,22 @@ set -euo pipefail
 # Must contain no DOT. ota_parseVersion() scans for the THIRD dot to split base from
 # build number, so a dotted tag in a build with no build number supplies that third dot
 # and the version parses as a truncated base with build 0. "sonar" cannot do that.
-export OTA_CHANNEL_TAG="sonar"
+# "sonar-dev" on this branch, "sonar" on main, so a build says which channel it came
+# from in `ver`, in its MQTT firmware_version and in its filename. Two populations that
+# cannot cross-update should not be told apart only by a URL nobody can see from the node.
+#
+# Still no DOT: ota_parseVersion() finds the build number by scanning for the THIRD dot,
+# and a dotted tag would supply that dot itself and parse the version as a truncated base
+# with build 0. A hyphen is safe.
+#
+# And it still CONTAINS "-sonar-", which is what the controller matches on to recognise a
+# probe-capable build -- "v1.17.1.7-observer-sonar-dev-<hash>" satisfies that substring, so
+# widening the tag does not quietly drop these nodes out of discovery.
+export OTA_CHANNEL_TAG="sonar-dev"
 # Carried in the ARTIFACT NAME too, so a .bin sitting in a downloads folder still says
 # what it is. Same no-dot rule as the version tag -- every filename parser downstream
 # (web flasher, release listing) splits on "-" and takes the trailing token as the hash.
-export FILENAME_CHANNEL_TAG="-sonar"
+export FILENAME_CHANNEL_TAG="-sonar-dev"
 
 # --- controller identity -----------------------------------------------------
 # The controller PUBLIC key, compiled in so a node flashed from our release already
