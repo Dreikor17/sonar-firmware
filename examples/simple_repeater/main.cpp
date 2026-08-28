@@ -116,6 +116,19 @@ void setup() {
 #ifdef DISPLAY_CLASS
   if (display_ready) {
     ui_task.begin(the_mesh.getNodePrefs(), FIRMWARE_BUILD_DATE, FIRMWARE_VERSION);
+#ifdef WITH_MQTT_BRIDGE
+    // Home-screen uplink indicator. A capture-less lambda so it converts to a plain
+    // function pointer and the UI keeps knowing nothing about MyMesh.
+    //
+    // Reads the slot flags from the UI task (Core 1) while the MQTT task (Core 0)
+    // writes them. Safe for this use: each is a single naturally-aligned bool, so a
+    // read cannot tear, and the worst case is a status line one refresh (1s) stale --
+    // which is well inside what an at-a-glance indicator is for. Nothing is decided
+    // from this value; it is only drawn.
+    ui_task.setMqttStatusFn([]() -> bool {
+      return the_mesh.isMqttUplinkConnected();
+    });
+#endif
   }
 #endif
 

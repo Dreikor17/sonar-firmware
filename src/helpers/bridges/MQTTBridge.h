@@ -563,6 +563,19 @@ private:
 public:
   MQTTBridge(NodePrefs *prefs, MQTTPrefs *obs, mesh::PacketManager *mgr, mesh::RTCClock *rtc, mesh::LocalIdentity *identity);
 
+  // Read-only uplink state, for a status display. Deliberately separate from the
+  // private isAnySlotConnected(): this one promises only a glanceable answer and is
+  // safe to call from another task. Each slot flag is a single naturally-aligned bool
+  // written by the MQTT task, so a read cannot tear; the worst case is an answer one
+  // refresh stale. Nothing may DECIDE on this -- use isAnySlotConnected() on the MQTT
+  // task for that.
+  bool hasConnectedSlot() const {
+    for (int i = 0; i < RUNTIME_MQTT_SLOTS; i++) {
+      if (_slots[i].enabled && _slots[i].connected) return true;
+    }
+    return false;
+  }
+
   void begin() override;
   void end() override;
   void loop() override;
