@@ -36,3 +36,8 @@ scripts/__pycache__/*
 # Echo Observer-Probe bench controller key (never commit)
 tools/probe_controller.key
 dist/
+
+# Build output. dist/ in particular holds multi-megabyte firmware images, and
+# without this a `git add -A` commits them -- which is exactly what happened
+# once while reorganising this history.
+*.pyc
