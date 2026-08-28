@@ -24,7 +24,7 @@ set -euo pipefail
 # check runs with the MQTT bridge still up on non-PSRAM boards). The host must therefore
 # serve /v/*.json over http:// as well as https:// -- a forced HTTPS redirect breaks
 # `ota check` while leaving `ota update` working, which is a confusing way to fail.
-: "${OTA_MANIFEST_BASE_URL:=https://rflab.io/v}"
+: "${OTA_MANIFEST_BASE_URL:=https://echo1.rflab.io/v}"   # dev channel — main uses rflab.io/v
 
 # Where the .bin itself is published. MUST be HTTPS with a publicly-trusted certificate:
 # the download is verified against the firmware's embedded Mozilla root bundle, so a
