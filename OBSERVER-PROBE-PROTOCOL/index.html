@@ -1,0 +1,1710 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Documentation for the open source MeshCore firmware">
+      
+      
+      
+        <link rel="canonical" href="https://meshcore-dev.github.io/meshcore/OBSERVER-PROBE-PROTOCOL/">
+      
+      
+        <link rel="prev" href="..">
+      
+      
+        <link rel="next" href="../cli_commands/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Echo Observer-Probe — wire contract - MeshCore Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../_stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#echo-observer-probe-wire-contract" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="MeshCore Docs" class="md-header__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            MeshCore Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Echo Observer-Probe — wire contract
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/meshcore-dev/meshcore/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    meshcore-dev/meshcore
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="MeshCore Docs" class="md-nav__button md-logo" aria-label="MeshCore Docs" data-md-component="logo">
+      
+  <img src="../_assets/meshcore.svg" alt="logo">
+
+    </a>
+    MeshCore Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/meshcore-dev/meshcore/" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    meshcore-dev/meshcore
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Introduction
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Echo Observer-Probe — wire contract
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Echo Observer-Probe — wire contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-what-the-feature-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. What the feature is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-mqtt-topics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. MQTT topics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. MQTT topics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#choosing-a-tree" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing a tree
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#subscription-scope" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subscription scope
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-token-format-standards-correct-eddsa-compact-token" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Token format — standards-correct EdDSA compact token
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3. Token format — standards-correct EdDSA compact token">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#this-is-deliberately-not-the-format-jwthelper-produces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        This is deliberately NOT the format JWTHelper produces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifying-a-result-echo-side" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verifying a result, Echo side
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-command-claims-echo-observer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Command claims (Echo → Observer)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. Command claims (Echo → Observer)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#obs-the-observer-binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        obs — the observer binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ops-bitmask" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ops bitmask
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cmd-the-remote-cli-command-with-ops-bit-0x10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cmd — the remote CLI command (with ops bit 0x10)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pw-the-sealed-admin-password-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        pw — the sealed admin password (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#admission-rules-all-must-pass-else-the-command-is-refused" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Admission rules (all must pass, else the command is refused)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-result-claims-observer-echo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Result claims (Observer → Echo)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Result claims (Observer → Echo)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#two-caveats-worth-carrying-into-echo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two caveats worth carrying into Echo
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-flood-safety" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Flood safety
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Settings
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-threading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Threading
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli_commands/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Commands
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../companion_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Companion Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../docs/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Local Documentation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../faq/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Frequently Asked Questions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../kiss_modem_protocol/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MeshCore KISS Modem Protocol
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../mbedtls-tls-footprint/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Shrinking the per-connection TLS footprint on non-PSRAM observers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../nrf52_power_management/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    nRF52 Power Management
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../number_allocations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Number Allocations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../packet_format/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Packet Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../payloads/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Payload Format
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../qr_codes/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    QR Codes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stats_binary_frames/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Stats Binary Frame Structures
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../terminal_chat_cli/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Terminal Chat CLI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-what-the-feature-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. What the feature is
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-mqtt-topics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. MQTT topics
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="2. MQTT topics">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#choosing-a-tree" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Choosing a tree
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#subscription-scope" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subscription scope
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-token-format-standards-correct-eddsa-compact-token" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Token format — standards-correct EdDSA compact token
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="3. Token format — standards-correct EdDSA compact token">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#this-is-deliberately-not-the-format-jwthelper-produces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        This is deliberately NOT the format JWTHelper produces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifying-a-result-echo-side" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Verifying a result, Echo side
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-command-claims-echo-observer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Command claims (Echo → Observer)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="4. Command claims (Echo → Observer)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#obs-the-observer-binding" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        obs — the observer binding
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ops-bitmask" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ops bitmask
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cmd-the-remote-cli-command-with-ops-bit-0x10" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cmd — the remote CLI command (with ops bit 0x10)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pw-the-sealed-admin-password-optional" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        pw — the sealed admin password (optional)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#admission-rules-all-must-pass-else-the-command-is-refused" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Admission rules (all must pass, else the command is refused)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-result-claims-observer-echo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Result claims (Observer → Echo)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="5. Result claims (Observer → Echo)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#two-caveats-worth-carrying-into-echo" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two caveats worth carrying into Echo
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-flood-safety" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Flood safety
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Settings
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-threading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. Threading
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/meshcore-dev/meshcore/edit/main/docs/OBSERVER-PROBE-PROTOCOL.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="echo-observer-probe-wire-contract">Echo Observer-Probe — wire contract</h1>
+<p>This is the <strong>authoritative</strong> description of what the firmware actually implements.
+Anyone writing the Echo side should implement against this document, not against
+an earlier design draft.</p>
+<p>Vocabulary: an Observer is one node role in a <strong>mesh of nodes</strong>; the roles are
+Repeater, Companion, Sensor, Observer.</p>
+<hr />
+<h2 id="1-what-the-feature-is">1. What the feature is</h2>
+<p>A repeater-observer keeps doing its normal job (repeating, adverts, MQTT uplink)
+and additionally accepts <strong>signed tasking commands over MQTT</strong> telling it to
+interrogate a nearby node that Echo's own radios cannot reach. It performs a
+guest login and the requested requests, then returns a <strong>signed result</strong>.</p>
+<p>The feature is <strong>off by default</strong>. With <code>probe_enable = 0</code> the node behaves
+exactly like a stock repeater-observer and transmits nothing extra.</p>
+<hr />
+<h2 id="2-mqtt-topics">2. MQTT topics</h2>
+<table>
+<thead>
+<tr>
+<th>Direction</th>
+<th>Topic</th>
+<th>QoS</th>
+<th>Retain</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Echo → Observer</td>
+<td><code>probe/v1/{PUBKEY}/cmd</code></td>
+<td>1</td>
+<td>false</td>
+</tr>
+<tr>
+<td>Observer → Echo</td>
+<td><code>probe/v1/{PUBKEY}/rsp</code></td>
+<td>1</td>
+<td><strong>false</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Legacy tree, still supported through the transition:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Direction</th>
+<th>Topic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Echo → Observer</td>
+<td><code>meshcore/{IATA}/{PUBKEY}/serial/commands</code></td>
+</tr>
+<tr>
+<td>Observer → Echo</td>
+<td><code>meshcore/{IATA}/{PUBKEY}/serial/responses</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Publish commands with <code>retain: false</code>.</strong> The Observer drops any command
+delivered with the MQTT retain flag set, which stops a retained command being
+re-executed every time the node reconnects.</p>
+<blockquote>
+<p>Note the MQTT subtlety, because it is easy to test wrongly: a live publish
+with <code>retain=true</code> is delivered to <strong>already-subscribed</strong> clients with the
+retain flag <strong>cleared</strong>, so it still executes. The flag is only set when the
+broker replays the message from its retained store on a <strong>fresh subscribe</strong>.
+That reconnect case is what the check defends, and it is the case to test —
+publish retained, restart the node, and confirm the command does not run a
+second time. Verified on hardware: exactly one execution.</p>
+</blockquote>
+<p><strong>The Observer connects with a clean session</strong>, so QoS 1 from Echo is safe. It
+never calls <code>setCleanSession</code>, and the client library defaults it to true, which
+means the broker keeps no persistent session and <strong>no queue of commands can build
+up while the node is offline and then burst on reconnect</strong> — a burst of queued
+commands would be a burst of RF probe transmissions. The trade is that a command
+published while the Observer is offline is simply <strong>dropped, not queued</strong>: Echo
+owns retry, and a retry must carry a fresh <code>n</code> and <code>iat</code> or it will be refused as
+a replay or as stale.</p>
+<p><code>{PUBKEY}</code> is the Observer's own 64-hex device public key, <strong>uppercase</strong>, exactly
+as it already appears in its <code>status</code> / <code>packets</code> topics. Case is load-bearing:
+MQTT topic matching is case-sensitive and the broker's parser accepts only
+uppercase hex, so a lowercase key is refused rather than silently delivered
+nowhere.</p>
+<p><strong>The probe tree has no IATA segment, deliberately.</strong> IATA is node-mutable — the
+broker counts changes as abuse — so keying a command mailbox on it would let a
+node relocate its own mailbox and make Echo's commands vanish with no error at
+either end. The pubkey is the only segment carrying authorization weight.</p>
+<p>One consequence for operators: <code>mqttBuildSerialTopic()</code> refuses to build when
+IATA is unset or <code>XXX</code>, so <code>set mqtt.iata XXX</code> used to take a node off the
+tasking channel. <strong>That no longer works.</strong> Use <code>probe off</code>, or leave <code>probe.v1</code>
+at 0.</p>
+<p>Built by <code>mqttBuildProbeTopic()</code> (and <code>mqttBuildSerialTopic()</code> for the legacy
+tree) in <code>src/helpers/MQTTTopicRouter.h</code>.</p>
+<h3 id="choosing-a-tree">Choosing a tree</h3>
+<p>The node subscribes to the legacy command topic <strong>always</strong> (when probing is on)
+and additionally to <code>probe/v1/…</code> when <code>probe.v1</code> is 1. It publishes results to
+<strong>one</strong> tree, chosen by that same flag.</p>
+<p><code>probe.v1</code> defaults to 0 so flashing can never change wire behaviour on its own:
+against a broker that does not yet know the probe tree, a denied subscribe is a
+force-close, which takes the node's normal packets/status uplink down with it
+(~24 min to trip the backoff breaker, then ~35 min cycles). Flip it only once the
+broker is updated <strong>and</strong> this node's pubkey is enrolled in its roster.</p>
+<p>The asymmetry is intentional — the node keeps <em>listening</em> on the legacy tree so a
+broker rollback still has a working path, but only <em>publishes</em> to one, because a
+denied publish also closes the connection.</p>
+<p><strong>A result is never retained.</strong> A retained result would be replayed to the next
+subscriber as though it were fresh.</p>
+<h3 id="subscription-scope">Subscription scope</h3>
+<p>The Observer subscribes to its command topic on <strong>exactly one operator-designated
+control slot</strong> (<code>probe.slot</code>), never on every connected broker.</p>
+<p>On the <code>probe/v1</code> tree the broker enforces the rest: a node may subscribe only to
+<code>probe/v1/{ITS OWN PUBKEY}/cmd</code> and publish only to its own <code>/rsp</code>, and both are
+additionally gated on an operator-managed <strong>roster</strong> of enrolled pubkeys. The
+tree sits outside <code>meshcore/</code>, which public subscribers read.</p>
+<p><strong>A denied subscribe is invisible to the node.</strong> Nothing in the firmware inspects
+the SUBACK return code, so an un-enrolled node looks healthy from its own side and
+looks like a lost command from Echo's. Enrol the pubkey in the broker roster
+<em>before</em> flashing, and verify from the broker, never from the node.</p>
+<hr />
+<h2 id="3-token-format-standards-correct-eddsa-compact-token">3. Token format — <strong>standards-correct EdDSA compact token</strong></h2>
+<p>Both directions use the same envelope:</p>
+<pre><code>base64url(header) &quot;.&quot; base64url(payload) &quot;.&quot; base64url(signature)
+</code></pre>
+<ul>
+<li><code>header</code> = <code>{"alg":"EdDSA","typ":"JWT"}</code></li>
+<li><code>signature</code> = raw 64-byte Ed25519 signature over the ASCII bytes of
+  <code>base64url(header) + "." + base64url(payload)</code></li>
+<li>base64url is <strong>unpadded</strong> (RFC 4648 §5). Padding (<code>=</code>) is rejected.</li>
+</ul>
+<blockquote>
+<h3 id="this-is-deliberately-not-the-format-jwthelper-produces">This is deliberately NOT the format <code>JWTHelper</code> produces</h3>
+<p><code>JWTHelper::createAuthToken</code> (used for <strong>broker authentication</strong>) hex-encodes
+the signature and advertises <code>alg: "Ed25519"</code>. No stock JWT library verifies
+that. It is untouched, and the probe channel uses the standard form above
+instead, so the Echo side can use an ordinary Ed25519/JWT verifier.</p>
+</blockquote>
+<p>Implemented by <code>probeB64UrlEncode</code> / <code>probeB64UrlDecode</code> / <code>probeTokenSplit</code> in
+<code>src/helpers/ProbeCodec.h</code>, and <code>probeSignToken()</code> in
+<code>examples/simple_repeater/MyMesh.cpp</code>.</p>
+<h3 id="verifying-a-result-echo-side">Verifying a result, Echo side</h3>
+<pre><code class="language-python">import base64, json
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+def b64u(s: str) -&gt; bytes:
+    return base64.urlsafe_b64decode(s + &quot;=&quot; * (-len(s) % 4))
+
+h, p, s = token.split(&quot;.&quot;)
+Ed25519PublicKey.from_public_bytes(observer_pubkey_bytes).verify(
+    b64u(s), (h + &quot;.&quot; + p).encode(&quot;ascii&quot;)
+)
+claims = json.loads(b64u(p))
+</code></pre>
+<hr />
+<h2 id="4-command-claims-echo-observer">4. Command claims (Echo → Observer)</h2>
+<pre><code class="language-jsonc">{
+  &quot;jid&quot;: &quot;job-1234&quot;,     // opaque job id, &lt;= 16 chars, echoed back
+  &quot;obs&quot;: &quot;&lt;64 hex&gt;&quot;,     // MANDATORY: the observer this command is FOR
+  &quot;tgt&quot;: &quot;&lt;64 hex&gt;&quot;,     // target node public key
+  &quot;ops&quot;: 6,              // bitmask, see below
+  &quot;n&quot;:   918273,         // nonce, must be unique
+  &quot;iat&quot;: 1735000000,     // issued-at, epoch seconds
+  &quot;exp&quot;: 1735000300      // expiry, epoch seconds (0 = no expiry)
+}
+</code></pre>
+<h3 id="obs-the-observer-binding"><code>obs</code> — the observer binding</h3>
+<p><strong>Mandatory.</strong> The Observer refuses any command whose <code>obs</code> is absent, malformed,
+or not its own device public key, with <code>reason: "bad_obs"</code>.</p>
+<p>The signature proves <em>what</em> was asked and <em>by whom</em>. It says nothing about <em>to
+whom</em>. Without this claim, anyone able to place bytes on a node's command topic —
+a compromised or malicious broker being the obvious case — could lift a
+still-fresh command addressed to node A, replay it at node B, and B would verify
+the controller signature happily and execute it.</p>
+<p>Checked <strong>before</strong> the nonce ring and the rate limiter, so a command that is not
+addressed to us cannot spend either.</p>
+<h3 id="ops-bitmask"><code>ops</code> bitmask</h3>
+<table>
+<thead>
+<tr>
+<th>Bit</th>
+<th>Value</th>
+<th>Operation</th>
+<th>Login required</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td><code>0x01</code></td>
+<td>anon owner request (<code>ANON_REQ_TYPE_OWNER</code>)</td>
+<td>no — always zero-hop</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>0x02</code></td>
+<td>ver-ident (<code>REQ_TYPE_GET_OWNER_INFO</code>, <code>0x07</code>)</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>0x04</code></td>
+<td>status (<code>REQ_TYPE_GET_STATUS</code>, <code>0x01</code>)</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>0x08</code></td>
+<td>telemetry (<code>REQ_TYPE_GET_TELEMETRY_DATA</code>, <code>0x03</code>)</td>
+<td>yes</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>0x10</code></td>
+<td>remote CLI command (<code>TXT_MSG</code> / <code>TXT_TYPE_CLI_DATA</code>)</td>
+<td>yes — <strong>admin</strong></td>
+</tr>
+</tbody>
+</table>
+<p>Bits may be combined. One guest login is performed for the whole session,
+then each requested request runs in order — <strong>one session costs one rate-limit
+token, not one per step.</strong></p>
+<h3 id="cmd-the-remote-cli-command-with-ops-bit-0x10"><code>cmd</code> — the remote CLI command (with <code>ops</code> bit <code>0x10</code>)</h3>
+<p>Runs a CLI command on the target and returns its reply in <code>cmd_reply</code>. This is
+what lets Echo retire the locally-attached companion radios: it is the same
+command surface a companion drives today.</p>
+<p><strong>It requires a sealed <code>pw</code>.</strong> The target gates remote CLI on <code>client-&gt;isAdmin()</code>
+and simply ignores a guest, so a command op without a password would sit there and
+time out with nothing to explain why — the Observer refuses it up front with
+<code>reason: "need_admin"</code> instead.</p>
+<p>The text must be <strong>printable ASCII, no <code>"</code> and no <code>\</code></strong>, at most 160 characters.
+The claim scanner does not unescape, so rather than half-handle escaping the
+firmware refuses anything that could have needed it (<code>reason: "bad_cmd"</code>). 160 is
+the target's own ceiling: it builds replies in a 166-byte buffer with the text at
+offset 5.</p>
+<p>The command runs <strong>last</strong> in a session, after any ver-ident/status/telemetry, so a
+combined session captures the node's state <em>before</em> the command changes it.</p>
+<p>A CLI reply comes back as <code>PAYLOAD_TYPE_TXT_MSG</code>, not a tagged <code>RESPONSE</code>, and
+carries no request tag — correlation rests on there being exactly one command in
+flight, which the single-session executor guarantees.</p>
+<p><strong>Verified against a live repeater:</strong> <code>get freq</code> returned <code>&gt; 910.5250244</code>.</p>
+<h3 id="pw-the-sealed-admin-password-optional"><code>pw</code> — the sealed admin password (optional)</h3>
+<p>Present it and the session logs in as <strong>admin</strong> instead of guest, which is what
+unlocks privileged operations and external-sensor telemetry. Omit it for a guest
+login.</p>
+<p><strong>It must never be a plain claim.</strong> The token is <em>signed</em>, not <em>encrypted</em>, so a
+password in clear would be readable by the broker operator and by every
+admin-role subscriber. It rides sealed to the Observer's own device key:</p>
+<pre><code>&quot;pw&quot;: hex( salt[16] || mac[2] || ciphertext[32] )      // exactly 100 hex chars
+
+S = X25519(controller_prv, observer_ed_pub)   // raw, unhashed (MeshCore's ECDH)
+K = SHA256(S || salt)                         // fresh per command
+ciphertext = AES-128-ECB(K[:16], plaintext), mac = HMAC-SHA256(K[:32], ct)[:2]
+
+plaintext, zero-padded to 32 bytes:
+  [0]      0x01      version
+  [1..4]   nonce     u32 LE  -- MUST equal the signed &quot;n&quot;
+  [5..8]   iat       u32 LE  -- MUST equal the signed &quot;iat&quot;
+  [9]      pw_len    1..15   (NodePrefs::password is char[16])
+  [10..]   password
+</code></pre>
+<p>The salt is folded into the <strong>key</strong>, not used as a nonce beside it. MeshCore's
+cipher is AES-128-ECB, so a fixed key would produce byte-identical ciphertext for
+a repeated password and leak equality across commands; a fresh <code>K</code> per command
+removes that.</p>
+<p>Binding <code>n</code> and <code>iat</code> <em>inside</em> the ciphertext is what stops a captured blob being
+pasted into a different command — and the outer Ed25519 signature means an
+attacker cannot re-sign a command to match one. A blob that fails to open is
+refused with <code>reason: "bad_pw"</code>.</p>
+<p>Echo needs no new crypto: <code>backend/app/meshcrypto.py</code> already implements
+<code>shared_secret()</code> and <code>encrypt_then_mac()</code> byte-compatibly. See
+<code>seal_password()</code> in <code>tools/echo_probe_sim.py</code> for a working reference.</p>
+<p><strong>Verified against a live repeater:</strong> the same probe returned <code>perms: 0</code> as a
+guest and <code>perms: 3</code> with a sealed password.</p>
+<h3 id="admission-rules-all-must-pass-else-the-command-is-refused">Admission rules (all must pass, else the command is refused)</h3>
+<ol>
+<li><code>probe_enable</code> is on.</li>
+<li><code>probe_controller_pubkey</code> is set — an all-zero key <strong>fails closed</strong>, refusing
+   everything.</li>
+<li>Signature verifies against that controller key.</li>
+<li><code>iat</code>/<code>exp</code> are within ±300 s of the Observer clock. <strong>Before the first NTP
+   sync the node refuses every command</strong> rather than guessing.</li>
+<li><code>n</code> has not been seen recently (8-entry nonce ring). <strong><code>iat</code> and <code>n</code> are
+   mandatory</strong> — a command that omits either is refused, so a missing claim can
+   never silently disable the freshness window or the replay ring.</li>
+<li>The session rate limit (<code>probe.max</code>, sessions/hour) allows it.</li>
+<li>A session slot is free (queue depth 4).</li>
+</ol>
+<p>Claims are parsed <strong>only after the signature verifies</strong>. The only operations
+performed on unauthenticated bytes are the token split and base64url decode.</p>
+<hr />
+<h2 id="5-result-claims-observer-echo">5. Result claims (Observer → Echo)</h2>
+<pre><code class="language-jsonc">{
+  &quot;jid&quot;:   &quot;job-1234&quot;,
+  &quot;tgt&quot;:   &quot;&lt;64 hex&gt;&quot;,
+  &quot;st&quot;:    &quot;ok&quot;,              // ok | timeout | send_failed | denied | unknown
+  &quot;route&quot;: &quot;zerohop&quot;,         // zerohop | direct | flood | none
+  &quot;iat&quot;:   1735000012,
+
+  // present according to which ops ran and succeeded
+  &quot;fw_level&quot;: 2,              // from the login reply
+  &quot;perms&quot;:    2,
+  &quot;fw&quot;:       &quot;v1.17.1&quot;,      // ver-ident
+  &quot;name&quot;:     &quot;Lake Edge&quot;,
+  &quot;owner&quot;:    &quot;...&quot;,
+  &quot;clock&quot;:      1735000000,   // anon owner request only
+  &quot;anon_name&quot;:  &quot;Lake Edge&quot;,  // anon owner request only (namespaced so a session
+  &quot;anon_owner&quot;: &quot;...&quot;,        //   that also runs ver-ident has no duplicate keys)
+  &quot;ver_ident_skipped&quot;: &quot;fw_level&lt;2&quot;,   // target too old for REQ 0x07
+  &quot;truncated&quot;: true,          // result did not fit; re-probe with fewer ops
+  &quot;stats&quot;: {                  // status
+    &quot;batt_mv&quot;: 4123, &quot;q&quot;: 0, &quot;noise&quot;: -97, &quot;rssi&quot;: -80,
+    &quot;rx&quot;: 123, &quot;tx&quot;: 45, &quot;air&quot;: 10, &quot;up&quot;: 99999,
+    &quot;sf&quot;: 1, &quot;sd&quot;: 2, &quot;rf&quot;: 3, &quot;rd&quot;: 4,
+    &quot;err&quot;: 0, &quot;snr&quot;: -20, &quot;ddup&quot;: 0, &quot;fdup&quot;: 0,
+    &quot;rxair&quot;: 5, &quot;rxerr&quot;: 0
+  },
+  &quot;admin&quot;:     true,          // login was ATTEMPTED as admin; `perms` is what was granted
+  &quot;cmd_reply&quot;: &quot;&gt; 910.52&quot;,    // remote CLI command output
+  &quot;lpp&quot;: &quot;0167011002...&quot;,             // telemetry, RAW Cayenne LPP as hex
+  &quot;lpp_guest_base_only&quot;: true
+}
+</code></pre>
+<p>A refusal is reported as its own token so Echo can distinguish <strong>denied</strong> from
+<strong>lost</strong>:</p>
+<pre><code class="language-jsonc">{ &quot;jid&quot;: &quot;job-1234&quot;, &quot;st&quot;: &quot;denied&quot;, &quot;reason&quot;: &quot;rate&quot;, &quot;iat&quot;: 1735000012 }
+</code></pre>
+<p><code>reason</code> is one of <code>disabled</code>, <code>replay</code>, <code>clock</code>, <code>rate</code>, <code>queue_full</code>,
+<code>bad_target</code>, <code>bad_pw</code> (a sealed password that would not open), <code>bad_cmd</code> (command
+text that is empty, too long, or would have needed JSON escaping), <code>need_admin</code>
+(a command op with no sealed password), or <code>no_route</code> (login-based ops refused because flooding is off and
+the target has no known route — see section 6).</p>
+<p><strong><code>disabled</code> is answered only after the signature verifies.</strong> The master switch is
+checked <em>after</em> verification, not before, so a node whose probing was turned off
+at runtime does not answer arbitrary junk with a signed <code>disabled</code> token — that
+would be a 1:1 amplification vector and an oracle for "this pubkey runs a
+probe-capable Observer". The legitimate controller still gets the refusal, with
+its <code>jid</code> echoed so it can be correlated. (With probing off at <em>boot</em> the node
+never subscribes at all, so the question only arises after <code>set probe off</code> at
+runtime.) Verified on hardware: junk drew no reply, a valid command drew
+<code>denied</code>/<code>disabled</code> carrying its jid.</p>
+<p><strong>Unauthenticated failures are deliberately silent.</strong> <code>bad_token</code>, <code>bad_sig</code> and
+<code>no_controller</code> produce <strong>no reply at all</strong>: such a token carries no usable job id
+anyway (<code>jid</code> is only readable after verification), so answering would amplify an
+attacker one-for-one and put a signed message on a broker we may not control.
+Echo should treat a command that draws no response within its own timeout as
+either lost or rejected-as-unauthenticated.</p>
+<h3 id="two-caveats-worth-carrying-into-echo">Two caveats worth carrying into Echo</h3>
+<ul>
+<li><strong><code>lpp</code> is base telemetry only for a GUEST login.</strong> The target forces
+  <code>perm_mask = 0x00</code> for guests, so a guest probe never sees external sensors —
+  only channel-1 battery and MCU temperature. Send a sealed <code>pw</code> to log in as
+  admin and lift that. <code>lpp_guest_base_only</code> reports which applied, and it
+  describes the <strong>login</strong>, not the payload: a node with no external sensors
+  returns channel-1 data to an admin too, which is not the same as being
+  restricted.</li>
+<li><strong><code>stats</code> is a raw 56-byte struct</strong> read little-endian. <code>snr</code> is multiplied by
+  4 (divide to get dB).</li>
+</ul>
+<hr />
+<h2 id="6-flood-safety">6. Flood safety</h2>
+<p>The project rule is that this feature must never cause repeated flood traffic.</p>
+<ul>
+<li>Reaching a target with no learned path floods a <strong>login/request datagram</strong> —
+  it is <strong>never</strong> a <code>PAYLOAD_TYPE_ADVERT</code>. The Observer emits no flood adverts
+  because of this feature.</li>
+<li><strong>The veto covers the reply direction too, which is the non-obvious half.</strong> A
+  zero-hop request cannot propagate, but a target that has no return path to us
+  answers a login or <code>REQ</code> by <strong>flooding its response</strong> (<code>chooseReplyRoute</code> with
+  no supplied path and no stored <code>out_path</code> returns <code>REPLY_ROUTE_FLOOD</code>). Naively
+  probing zero-hop is therefore <em>louder</em> than flooding: a flooded request draws
+  one PATH return that teaches the route, after which the rest of the session is
+  direct.
+  So with <code>probe.flood</code> <strong>off</strong>, login-based ops (ver-ident / status / telemetry)
+  against a target with no known route are <strong>refused</strong> — the result comes back
+  <code>st: "denied"</code>, <code>reason: "no_route"</code>, and nothing is transmitted. Enable
+  <code>probe.flood</code> to run them.</li>
+</ul>
+<blockquote>
+<p><strong><code>no_route</code> is unconditional, not per-target — do not read it as reachability
+data.</strong> A session never inherits a route: <code>ProbeExecutor::startNext()</code> resets
+<code>_out_path_len</code> to unknown for every session, and the only writer is
+<code>handlePathReturn()</code>, which fires mid-session and only after a packet was
+flooded. So with <code>probe.flood</code> off, <em>every</em> login-based op against <em>every</em>
+target is refused. The refusal describes the node's configuration, not the
+target. Ranking Observers by it, or rotating to a "better" one, just collects
+the same instant refusal from each.</p>
+<p>The same fact costs something with flooding <strong>on</strong>: because the learned path
+dies with the session, every login-based session pays exactly <strong>one flood</strong> on
+its first login step — even re-probing the same target seconds later. Budget a
+scheduled sweep of N nodes at N floods, and prefer the <code>owner</code> op wherever it
+suffices, since it is exempt and always zero-hop.
+* <strong>A flooded login teaches the route, so only the FIRST step of a session can
+  flood.</strong> The target answers a flooded request with a PATH return; the executor
+  stores that path (including a zero-length one, which means the target is a
+  direct neighbour) and every later step of the session goes direct. Measured on
+  hardware against a direct neighbour: a 4-step <code>all</code> session costs <strong>1 flood +
+  3 zero-hop sends</strong>. Treating a zero-length return path as "no path" is what
+  makes it cost 4 floods instead -- that regressed once and is worth a test.
+* Anon owner requests are <strong>always</strong> allowed and always zero-hop: their body
+  carries <code>reply_path_len = 0</code>, so the target replies zero-hop as well. This is
+  the one operation that is quiet against a completely unknown node.
+* Every probe packet passes through exactly one function, <code>ProbeExecutor::transmit()</code>,
+  which holds the master switch, the runaway packet backstop, the packet-pool
+  preflight and the flood veto. There is no second path to the radio.
+* The session budget is charged <strong>once at admission</strong>, so a multi-step session can
+  never be denied half-way and strand a login on the target.</p>
+</blockquote>
+<p>Operators should also run <code>set flood.advert.interval 0</code> on probe-capable nodes.
+The compiled default only helps a fresh install: stored prefs are loaded over it.</p>
+<hr />
+<h2 id="7-settings">7. Settings</h2>
+<table>
+<thead>
+<tr>
+<th>CLI</th>
+<th>Web key</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>set probe on\|off</code></td>
+<td><code>probe</code></td>
+<td>master switch (restart to apply)</td>
+</tr>
+<tr>
+<td><code>set probe.controller &lt;64 hex&gt;\|none</code></td>
+<td><code>probe.controller</code></td>
+<td>the only key whose commands are accepted</td>
+</tr>
+<tr>
+<td><code>set probe.max &lt;n&gt;</code></td>
+<td><code>probe.max</code></td>
+<td>probe <strong>sessions</strong> per hour (0 = default 12)</td>
+</tr>
+<tr>
+<td><code>set probe.flood on\|off</code></td>
+<td><code>probe.flood</code></td>
+<td>allow flooding to no-route targets (default off)</td>
+</tr>
+<tr>
+<td><code>set probe.slot &lt;n&gt;\|off</code></td>
+<td><code>probe.slot</code></td>
+<td>the one MQTT slot allowed to task this node</td>
+</tr>
+</tbody>
+</table>
+<p><code>get probe</code>, <code>get probe.controller</code>, <code>get probe.max</code>, <code>get probe.flood</code>,
+<code>get probe.slot</code> read them back; <code>probe.status</code> reports live counters.</p>
+<p>Stored in <code>NodePrefs</code> (<code>/prefs.json</code>), which is key-addressed JSON and therefore
+append-safe — no version dance, and the WiFi credentials in <code>/mqtt_prefs</code> are
+untouched.</p>
+<p>Local testing without MQTT:</p>
+<pre><code>probe &lt;pubkey-hex&gt; [owner|ver|status|telemetry|all]
+probe.status
+</code></pre>
+<hr />
+<h2 id="8-threading">8. Threading</h2>
+<table>
+<thead>
+<tr>
+<th>Runs on</th>
+<th>What</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>esp-mqtt event task</td>
+<td><code>offerProbeCommand()</code> — copy into the mailbox and set a flag. Nothing else.</td>
+</tr>
+<tr>
+<td>Arduino loop task (Core 1)</td>
+<td>everything else: signature verify, session state machine, all radio operations</td>
+</tr>
+<tr>
+<td>MQTT bridge task (Core 0)</td>
+<td><code>publishProbeResult()</code></td>
+</tr>
+</tbody>
+</table>
+<p>The Core 0 → Core 1 mailbox is an acquire/release single-slot handoff mirroring
+<code>requestPublishNeighbors</code>. Signature verification runs on Core 1 because the
+software Ed25519 path needs ~3 KB of stack, which the esp-mqtt event task does
+not have. The command and claim buffers are class members, never stack locals,
+for the same reason.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["content.action.edit", "content.code.copy", "search.highlight", "search.suggest"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
