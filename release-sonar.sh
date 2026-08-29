@@ -95,15 +95,51 @@ if [ -z "$(printf '%s' "$SONAR_CONTROLLER_PUBKEY" | tr -d '0')" ]; then
   exit 1
 fi
 # --- shipped-ready defaults -------------------------------------------------
-# The upstream defaults are EU (869.618 / SF8) and leave probing off, so every node would
-# otherwise need re-regioning and three probe settings by hand before it could be adopted.
-# US/CAN radio, matching what the mesh actually runs.
-: "${SONAR_LORA_FREQ:=910.525}"
-: "${SONAR_LORA_BW:=62.5}"
-: "${SONAR_LORA_SF:=7}"
-: "${SONAR_LORA_CR:=5}"
+# Probe settings still ship on (SONAR_PROBE_DEFAULTS): upstream leaves probing off, so a
+# node would otherwise need three settings by hand before the controller could adopt it.
+#
+# THE RADIO IS DELIBERATELY NOT PRESET ANY MORE.
+#
+# This used to bake the mesh's own parameters -- 910.525 / 62.5 / SF7 / CR5 -- in as the
+# COMPILED-IN default, on the reasoning that a node should arrive ready to join. The cost
+# of that was not obvious until a node was wiped: `erase` formats the filesystem
+# (src/helpers/CommonCLI.cpp:932-935) and /prefs.json goes with it, which leaves the
+# compiled defaults in charge. The node then transmits a zero-hop advert 16 s after boot
+# (examples/simple_repeater/main.cpp:127-129 -- upstream behaviour, ENABLE_ADVERT_ON_BOOT)
+# carrying the compiled ADVERT_NAME. So a bench node being re-provisioned announced itself
+# to the REAL mesh as "MQTT Observer", and would keep flood-advertising that name
+# mesh-wide every 47 h (MyMesh.cpp:1131, which the SONAR block below does not zero).
+#
+# Preset radio parameters make the UNCONFIGURED state indistinguishable on air from a
+# configured one, and that is not a trade worth making for saving one setting during
+# provisioning. Left unset, an image inherits the board's own default from
+# platformio.ini:29-31 -- which is not this mesh -- so a wiped node cannot reach the mesh
+# no matter what it decides to transmit.
+#
+# ALREADY-DEPLOYED NODES ARE UNAFFECTED. /prefs.json stores freq/bw/sf/cr
+# (src/helpers/CommonCLI.h:112-115, written unconditionally), and begin() loads it
+# (MyMesh.cpp:1255) before the radio is ever programmed from prefs (MyMesh.cpp:1367).
+# Only a node with NO prefs file uses a compiled default. Verified against the shipped
+# images: the v1.17.1.8 release .bin contains the float 910.525 and not 869.618, while a
+# plain `pio run` build is the reverse -- so this flag really was the only thing deciding
+# it, and the #ifndef LORA_FREQ 915.0 in MyMesh.cpp:11-13 is dead code either way.
+#
+# The knob survives, opt-in: export any of SONAR_LORA_FREQ/BW/SF/CR to bake a radio into a
+# particular build. Setting them is choosing the trade-off above deliberately, and the
+# summary at the end of this script says which way the image went.
+#
+# NOTE on the inherited default: platformio.ini ships EU 869.618, which is outside the US
+# 902-928 ISM band. That is upstream's value and what every plain `pio run` image and CI
+# artifact already carries, but if these nodes are provisioned somewhere that matters,
+# park them instead by exporting SONAR_LORA_FREQ to a quiet in-band frequency the mesh
+# does not use -- rather than to the one it does.
+SONAR_LORA_FLAGS=""
+if [ -n "${SONAR_LORA_FREQ:-}" ]; then SONAR_LORA_FLAGS="$SONAR_LORA_FLAGS -DLORA_FREQ=${SONAR_LORA_FREQ}"; fi
+if [ -n "${SONAR_LORA_BW:-}" ];   then SONAR_LORA_FLAGS="$SONAR_LORA_FLAGS -DLORA_BW=${SONAR_LORA_BW}"; fi
+if [ -n "${SONAR_LORA_SF:-}" ];   then SONAR_LORA_FLAGS="$SONAR_LORA_FLAGS -DLORA_SF=${SONAR_LORA_SF}"; fi
+if [ -n "${SONAR_LORA_CR:-}" ];   then SONAR_LORA_FLAGS="$SONAR_LORA_FLAGS -DLORA_CR=${SONAR_LORA_CR}"; fi
 
-export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS:-} -DPROBE_CONTROLLER_PUBKEY='\"${SONAR_CONTROLLER_PUBKEY}\"' -DSONAR_PROBE_DEFAULTS=1 -DLORA_FREQ=${SONAR_LORA_FREQ} -DLORA_BW=${SONAR_LORA_BW} -DLORA_SF=${SONAR_LORA_SF} -DLORA_CR=${SONAR_LORA_CR}"
+export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS:-} -DPROBE_CONTROLLER_PUBKEY='\"${SONAR_CONTROLLER_PUBKEY}\"' -DSONAR_PROBE_DEFAULTS=1${SONAR_LORA_FLAGS}"
 
 # Verify the baked key against the Echo that will actually task these nodes. Building an
 # image against the wrong controller is not recoverable over the air: the node accepts
@@ -239,7 +275,16 @@ echo "channel : $OTA_MANIFEST_BASE_URL   (tag: $OTA_CHANNEL_TAG)"
 echo "version : ${FIRMWARE_VERSION}.${FIRMWARE_BUILD_NUMBER}"
 echo "binaries: $SONAR_RELEASE_BASE"
 echo "ctrl key: ${SONAR_CONTROLLER_PUBKEY:0:16}… (public; compiled in)"
-echo "radio   : ${SONAR_LORA_FREQ} / ${SONAR_LORA_BW} / SF${SONAR_LORA_SF} / CR${SONAR_LORA_CR}"
+# Say which way this image went, because the difference is invisible once it is flashed:
+# an image with a compiled-in radio joins the mesh the moment it is powered on, wiped or
+# not, and an image without one is inert until somebody sets it.
+if [ -n "$SONAR_LORA_FLAGS" ]; then
+  echo "radio   : COMPILED IN ->${SONAR_LORA_FLAGS}"
+  echo "          a WIPED node comes up on this and will advertise there"
+else
+  echo "radio   : not preset — inherits the board default (platformio.ini)"
+  echo "          a wiped node cannot reach the mesh until its radio is set"
+fi
 echo "defaults: probe on (slot 1), repeat off, 3-byte hash  --  'set probe.v1 on' still needed per node"
 echo "tag     : $RELEASE_TAG"
 echo
