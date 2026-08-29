@@ -320,6 +320,52 @@ for env in "${ENVS[@]}"; do
     --build "$FIRMWARE_BUILD_NUMBER" \
     --file-base "$SONAR_RELEASE_BASE"     --signing-key "$SIGN_KEY_FILE"
 
+  # VERIFY THE MANIFEST AGAINST THE KEY THE IMAGE WILL ACTUALLY CHECK IT WITH.
+  #
+  # Signing and verifying are done by different halves of this system, and they drifted:
+  # manifests are signed with the Echo instance's controller private key, while the node
+  # used to verify with _prefs.probe_controller_pubkey -- which Echo ROTATES to a per-node
+  # key the moment it adopts a node. Every adopted node therefore rejected every manifest
+  # with "manifest signature does not match this node's controller", while an un-adopted
+  # one accepted it, so the failure looked like a node problem rather than a signing one.
+  #
+  # The firmware now verifies with the COMPILED-IN key, so that is what this checks. A
+  # mismatch fails the build here, where the fix is one variable, instead of after a cable
+  # flash of every node in the field.
+  SONAR_CONTROLLER_PUBKEY="$SONAR_CONTROLLER_PUBKEY"   MANIFEST="out/manifests/${env}.json" "$PY" - <<'PYVERIFY' || exit 1
+import json, os, sys
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+except ImportError:
+    print("WARN: python 'cryptography' not available; manifest signature NOT verified",
+          file=sys.stderr)
+    raise SystemExit(0)
+m = json.load(open(os.environ["MANIFEST"], encoding="utf-8"))
+# Byte-for-byte what ESP32Board::otaFromManifestImpl builds before verifying.
+signing_input = "sonar-manifest-v1
+%s
+%s
+%s
+%d
+%s
+%s" % (
+    m["version"], m["file"], m["baseVersion"], m["build"], m["partSig"], m["sha256"])
+try:
+    Ed25519PublicKey.from_public_bytes(
+        bytes.fromhex(os.environ["SONAR_CONTROLLER_PUBKEY"])
+    ).verify(bytes.fromhex(m["sig"]), signing_input.encode())
+except InvalidSignature:
+    print("ERROR: the manifest signature does not verify against SONAR_CONTROLLER_PUBKEY,",
+          file=sys.stderr)
+    print("       which is the key compiled into this image. Every node built from it would",
+          file=sys.stderr)
+    print("       refuse the update. The signing Echo instance and the baked key disagree.",
+          file=sys.stderr)
+    raise SystemExit(1)
+print("manifest signature verifies against the compiled-in controller key")
+PYVERIFY
+
   # Move this board's results out of build.sh's reach before the next env wipes out/.
   cp "out/${STEM}.bin" "out/${STEM}-merged.bin" "$DIST/"
   cp "out/manifests/${env}.json" "$DIST/manifests/"

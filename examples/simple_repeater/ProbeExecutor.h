@@ -159,6 +159,15 @@ public:
 
   void begin(MyMesh* mesh, NodePrefs* prefs);
 
+  // The controller key COMPILED INTO this image, or nullptr if none was baked in.
+  //
+  // Distinct from _prefs->probe_controller_pubkey on purpose. That one is the COMMAND
+  // authority and Echo rotates each node onto a key issued just for it, which is exactly
+  // what you want for "who may task this node". It is the wrong authority for "who may say
+  // what firmware this node runs": the image predates the per-node key, and one manifest
+  // serves every node, so it can only ever be signed with a key they all share.
+  const uint8_t* deployKey() const { return _deploy_key_set ? _deploy_key : nullptr; }
+
   // Re-arm both limiters from prefs. Must be called after loadPrefs(), because
   // the constructor runs before the stored prefs exist.
   void applyPrefs();

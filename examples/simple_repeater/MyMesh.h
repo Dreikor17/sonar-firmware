@@ -485,8 +485,26 @@ public:
   bool otaManage(bool do_update, char* reply, size_t reply_len) {
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
     char buf[192] = {0};
+    // VERIFY AGAINST THE COMPILED-IN KEY, not the per-node one.
+    //
+    // Manifests are signed once, with the controller key of the Echo that built the
+    // release, because one manifest serves every node. But Echo moves each adopted node
+    // onto a controller key issued just for IT -- so the moment a node is adopted,
+    // _prefs.probe_controller_pubkey stops being the key that signed the manifest and every
+    // check fails with "manifest signature does not match this node's controller". OTA was
+    // therefore broken for precisely the nodes Echo manages, and appeared to work only on
+    // ones nobody had adopted yet.
+    //
+    // These are two different authorities, and conflating them is what broke it: the
+    // per-node key answers "who may task this node", the compiled-in key answers "who may
+    // say what firmware it runs". The second must not rotate, and does not.
+    //
+    // Falls back to the pref when nothing was baked in (a build with no
+    // PROBE_CONTROLLER_PUBKEY), which is the stock case where the manifests are not ours.
+    const uint8_t* ota_key = probe.deployKey();
+    if (ota_key == nullptr) ota_key = _prefs.probe_controller_pubkey;
     const bool applies = _cli.getBoard()->otaFromManifest(
-        getFirmwareVer(), true, buf, _prefs.probe_controller_pubkey);
+        getFirmwareVer(), true, buf, ota_key);
     if (!do_update || !applies) {
       // Nothing to install, or a check was all that was asked. buf holds the reason --
       // up to date, needs a cable, or why the manifest was refused.
