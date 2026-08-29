@@ -382,9 +382,22 @@ void WebConfigServer::tick(uint32_t now) {
     _stats_built_at = now;
   }
 
-  // Idle timeout: only the setup AP auto-stops (a deployed node must not be
-  // left broadcasting an open AP). LAN mode runs until `stop webconfig`.
-  if (_mode == MODE_SETUP && WiFi.softAPgetStationNum() == 0 &&
+  // Idle timeout: a manually raised setup AP auto-stops, because a DEPLOYED node must not
+  // be left broadcasting an open one. LAN mode runs until `stop webconfig`.
+  //
+  // NOT ON A FIRST BOOT. On a node that has never been configured the AP is the only way
+  // in, and stopping it strands the node: the operator gets one ten-minute window per
+  // power cycle, and missing it looks exactly like an AP that never started. Reported as
+  // "it is saying there is a hotspot to connect to, it doesn't seem to be broadcasting it
+  // -- I restarted it and I still don't see it", which is this timer, not a radio fault.
+  //
+  // The rule the timeout exists for still holds, because it is about a node with something
+  // to protect: WiFi credentials and an admin password. A first-boot node has neither, and
+  // the portal cannot disclose the one secret it does hold -- /api/config masks secret keys
+  // and the HTTP path refuses `get prv.key` / `get wifi.pwd` outright. _initial_setup is
+  // recomputed from wifi_ssid every time the AP is raised (startSetupMode), so the moment
+  // WiFi is configured a later AP is eligible to time out again.
+  if (_mode == MODE_SETUP && !_initial_setup && WiFi.softAPgetStationNum() == 0 &&
       (now - _last_activity) > WEBCONFIG_AP_IDLE_TIMEOUT_MS) {
     requestStop();
   }
