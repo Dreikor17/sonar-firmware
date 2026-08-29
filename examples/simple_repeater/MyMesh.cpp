@@ -1152,11 +1152,25 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   // from every direction -- there is no error at either end, because nothing was ever
   // subscribed to fail. Slot 1 is the one a single-broker node has.
   //
-  // NOT set here: probe_topic_v1. Offering probe/v1 to a broker that does not know it
-  // is answered with a force-close, which takes this node's ordinary packet and status
-  // uplink down with the tasking channel -- so a default of "on" would break plain
-  // observer duty against any stock broker. It stays an explicit per-node decision.
   _prefs.probe_control_slot = 0;   // 0 == "probe.slot 1" at the CLI
+  // The v1 tasking tree, ON. This used to be left off with a note that offering probe/v1
+  // to a broker which does not know it draws a force-close taking the whole uplink down.
+  // That is true of a STOCK broker and irrelevant here: this block only exists in a Sonar
+  // release image, which by construction is built for a controller whose broker serves
+  // probe/v1 -- and the alternative was a node that enables probing, subscribes to
+  // nothing an operator forgot to switch on, and reads as a broker or RF fault from every
+  // direction. Shipping a probe that cannot be tasked is the more likely failure.
+  _prefs.probe_topic_v1 = 1;
+  // Relay, ON. Same argument, one step further: a Sonar node exists to act for this
+  // controller, and deploying one that must be visited again to grant the thing it was
+  // deployed for is a step that gets forgotten.
+  //
+  // THE BROKER MUST KNOW relay/v1 BEFORE AN IMAGE WITH THIS DEFAULT IS FLASHED. A broker
+  // predating the relay control plane treats relay/v1 as an unknown topic and force-closes
+  // the connection -- not a soft subscribe denial, the whole socket -- which takes the node
+  // off MQTT entirely. Measured exactly that on Sonar #001. relay_enabled being false is
+  // survivable (a clean denial); a broker with no relay layer at all is not.
+  _prefs.probe_relay_tx = 1;
   // Allowed to flood. The stock default is off, which is right for a node someone else
   // owns and wrong for one deployed as a probe -- because with it off a probe cannot poll
   // at all once its route cache empties, and that is not obvious from anywhere.
