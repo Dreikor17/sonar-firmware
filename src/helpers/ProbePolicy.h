@@ -81,9 +81,17 @@ static inline uint8_t probeRoutePathCount(uint8_t out_path_len) {
 // -- and because the route is only ever learned from an in-window reply, a window
 // too short to hear the first answer makes the target permanently unreachable.
 //
-// Coupled to Echo's probe_timeout_seconds (default 30, backend/app/config.py:103):
-// the on-node window must fit inside it. At 4 hops and typical airtime the window
-// is ~15-20s; raise probe_timeout_seconds before raising this on a high-SF mesh.
+// Coupled to Echo's probe_timeout_seconds: the on-node window must fit inside it.
+//
+// The "~15-20s at 4 hops" this used to claim was LOW, and the margin it implied did not
+// exist. getProbeQueryTimeoutMs is base + hops*airtime*7 where base already carries a 4s
+// getCADFailMaxDuration; on a 910.525/62.5kHz/SF7 mesh airtime is 643 ms for a 186-byte
+// frame (32-symbol preamble below SF9, RadioLibWrappers.h:63), giving
+//   W(h) = 5946 + 4501*h ms  ->  4 hops = 23.95s, not 15-20s.
+// And a POLL is three sequential steps, each drawing its own W(h): 47s at two hops, 61s at
+// three. Echo's default was raised from 30 to 90 to match (backend/app/config.py). Recheck
+// BOTH numbers before raising this on a slower mesh -- at SF10/125kHz the airtime term
+// roughly triples and a single flooded step alone passes a minute.
 #ifndef PROBE_FLOOD_ASSUMED_HOPS
   #define PROBE_FLOOD_ASSUMED_HOPS 4
 #endif
