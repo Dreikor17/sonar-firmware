@@ -328,6 +328,23 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     } else {
       strcpy(reply, "OK - flood off (no-route targets are probed zero-hop only)");
     }
+  } else if (memcmp(config, "probe.relaytx ", 14) == 0) {
+    // The relay consent switch. It was declared, persisted and enforced in two places
+    // (MQTTBridge subscribe gate, ProbeExecutor op gate) with NO WAY TO SET IT -- so the
+    // one thing it exists to let an operator decide could not be decided.
+    //
+    // Deliberately its own command rather than a flag on probe.enable: enabling probing
+    // consents to a bounded set of named operations this firmware implements, while relay
+    // means transmitting bytes this node does not read and cannot evaluate, in its own
+    // name. The reply says so, because an operator turning this on should know which of
+    // the two they just granted.
+    _prefs->probe_relay_tx = memcmp(&config[14], "on", 2) == 0;
+    savePrefs();
+    if (_prefs->probe_relay_tx) {
+      strcpy(reply, "OK - relay ENABLED: the controller may have this node transmit frames it builds");
+    } else {
+      strcpy(reply, "OK - relay off (probe sessions still work; relayed frames are refused)");
+    }
   } else if (memcmp(config, "probe.gap ", 10) == 0) {
     int v = atoi(&config[10]);
     if (v < 0 || v > 255) {
@@ -934,6 +951,8 @@ bool CommonCLI::handleObserverGetCmd(uint32_t sender_timestamp, const char* conf
             _prefs->probe_max_per_hour ? "" : " (default)");
   } else if (memcmp(config, "probe.flood", 11) == 0) {
     sprintf(reply, "> %s", _prefs->probe_allow_flood ? "on" : "off");
+  } else if (memcmp(config, "probe.relaytx", 13) == 0) {
+    sprintf(reply, "> %s", _prefs->probe_relay_tx ? "on" : "off");
   } else if (memcmp(config, "probe.gap", 9) == 0) {
     if (_prefs->probe_gap_secs == 0) strcpy(reply, "> 0 (no gap)");
     else sprintf(reply, "> %u s between sessions", (unsigned)_prefs->probe_gap_secs);
