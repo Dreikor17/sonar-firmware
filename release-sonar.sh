@@ -285,7 +285,8 @@ else
   echo "radio   : not preset — inherits the board default (platformio.ini)"
   echo "          a wiped node cannot reach the mesh until its radio is set"
 fi
-echo "defaults: probe on (slot 1), repeat off, 3-byte hash  --  'set probe.v1 on' still needed per node"
+echo "defaults: probe on (slot 1), probe/v1 on, relay-TX on, flood on, repeat off, 3-byte hash"
+echo "          relay-TX needs a broker that serves relay/v1 -- an older one force-closes the socket"
 echo "tag     : $RELEASE_TAG"
 echo
 
@@ -327,5 +328,22 @@ done
 echo
 echo "Artifacts in $DIST/, manifests in $DIST/manifests/."
 ls -1 "$DIST"/*.bin "$DIST"/manifests/*.json
-echo "Publish: upload $DIST/*.bin to the release at $SONAR_RELEASE_BASE,"
-echo "         and copy $DIST/manifests/*.json to the host serving $OTA_MANIFEST_BASE_URL."
+# THE MANIFESTS ARE RELEASE ASSETS, not a separate web upload.
+#
+# This used to say "copy the manifests to the host serving $OTA_MANIFEST_BASE_URL", which
+# describes a second copy nobody keeps. Echo's mirror (backend/app/routers/sonar_manifest.py)
+# fetches releases/latest/download/<variant>.json and serves THAT over plain http, so the
+# release is the only place they belong. Uploading the .bin files alone -- which the old
+# wording invited -- leaves every node's `ota check` reporting "ERR: manifest HTTP 502",
+# because the mirror's upstream 404s and it correctly refuses to invent an answer.
+echo "Publish: upload the images AND the manifests as assets on ONE release."
+echo "         Echo's /v mirror reads releases/latest/download/<variant>.json, so a"
+echo "         manifest left out of the release makes every node report"
+echo "         'ERR: manifest HTTP 502' on its next check."
+echo
+echo "  gh release create $RELEASE_TAG \\"
+echo "    $DIST/*.bin $DIST/manifests/*.json \\"
+echo "    --repo <owner>/<repo> --target \$(git rev-parse HEAD) \\"
+echo "    --title \"Sonar $RELEASE_TAG (dev)\""
+echo
+echo "         Nothing needs copying to $OTA_MANIFEST_BASE_URL -- that host mirrors the release."
