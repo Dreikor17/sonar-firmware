@@ -343,14 +343,10 @@ except ImportError:
     raise SystemExit(0)
 m = json.load(open(os.environ["MANIFEST"], encoding="utf-8"))
 # Byte-for-byte what ESP32Board::otaFromManifestImpl builds before verifying.
-signing_input = "sonar-manifest-v1
-%s
-%s
-%s
-%d
-%s
-%s" % (
-    m["version"], m["file"], m["baseVersion"], m["build"], m["partSig"], m["sha256"])
+signing_input = chr(10).join([
+    "sonar-manifest-v1", m["version"], m["file"], m["baseVersion"],
+    str(m["build"]), m["partSig"], m["sha256"],
+])
 try:
     Ed25519PublicKey.from_public_bytes(
         bytes.fromhex(os.environ["SONAR_CONTROLLER_PUBKEY"])

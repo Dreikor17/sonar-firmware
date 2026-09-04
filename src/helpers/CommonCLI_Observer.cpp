@@ -18,6 +18,40 @@
 #include "ProbePolicy.h"  // Echo Observer-Probe policy predicates (host-testable)
 #include "ProbeCodec.h"   // probeHexToBytes (validates before writing)
 #include <Utils.h>
+
+// Which key may say WHAT FIRMWARE THIS NODE RUNS -- the CLI-side twin of
+// MyMesh::otaVerifyKey(), which carries the full rationale.
+//
+// Short version: manifests are signed with the compiled-in deployment key, which never
+// rotates. _prefs->probe_controller_pubkey rotates the moment Echo adopts the node and
+// answers a different question ("who may task this node"), so verifying a manifest with
+// it fails on exactly the nodes Echo manages. `ota check` and `ota update` over serial or
+// the LoRa admin CLI both had that bug, independently of the remote MANAGE path.
+//
+// Resolved here rather than plumbed through CommonCLICallbacks: this file has no probe
+// handle, and widening that interface would touch every example that implements it. The
+// canonical parse lives in ProbeExecutor's constructor; this mirrors it, using the same
+// validating hex decoder, and caches the result because the key cannot change at runtime.
+//
+// Returns `stored_pref` when nothing was baked in (a build with no PROBE_CONTROLLER_PUBKEY)
+// -- the stock case, where the manifests are not ours and the pref is the only key there is.
+static const uint8_t* observerOtaVerifyKey(const uint8_t* stored_pref) {
+#ifdef PROBE_CONTROLLER_PUBKEY
+  static uint8_t key[PUB_KEY_SIZE];
+  static bool parsed = false;
+  static bool usable = false;
+  if (!parsed) {
+    parsed = true;
+    const char* hex = PROBE_CONTROLLER_PUBKEY;
+    usable = hex != NULL
+             && strlen(hex) == PUB_KEY_SIZE * 2
+             && probeHexToBytes(hex, PUB_KEY_SIZE * 2, key, sizeof(key))
+             && probeControllerKeySet(key, sizeof(key));
+  }
+  if (usable) return key;
+#endif
+  return stored_pref;
+}
 #ifdef ESP_PLATFORM
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -1213,7 +1247,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // costs a single TLS handshake (no large JSON doc) — which fits alongside
       // the live MQTT sessions even on no-PSRAM boards. No bridge bounce needed.
       _board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply,
-                                    _prefs->probe_controller_pubkey);
+                                    observerOtaVerifyKey(_prefs->probe_controller_pubkey));
     } else {
       // `ota update`: cheap pre-check first (plain HTTP, bridge stays up). Only
       // schedule the real update — which tears the bridge down, flashes, and
@@ -1222,7 +1256,7 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
       // cable flash / error) in reply, which we send without disturbing the
       // bridge or misleading the user with a "Beginning update..." that no-ops.
       if (_board->otaFromManifest(_callbacks->getFirmwareVer(), true, reply,
-                                    _prefs->probe_controller_pubkey)) {
+                                    observerOtaVerifyKey(_prefs->probe_controller_pubkey))) {
         // reply now holds "update available: <cur> -> <target> (N behind|new base)",
         // where <target> is "vX.Y.Z.B (hash)". Pull <target> out for a friendlier
         // start message. The "-> " ... trailing " (" framing is produced by

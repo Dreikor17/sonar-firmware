@@ -470,6 +470,27 @@ public:
     }
   }
 #endif
+  // Which key may say WHAT FIRMWARE THIS NODE RUNS.
+  //
+  // Deliberately NOT _prefs.probe_controller_pubkey. That one rotates the moment Echo
+  // adopts the node, and answers a different question -- "who may task this node".
+  // Manifests are signed with the compiled-in deployment key, which never rotates.
+  //
+  // Conflating the two is the bug 4711a483 set out to fix, and it fixed only half: the
+  // dry run moved to the deployment key while the real flash in MyMesh.cpp stayed on
+  // the rotated pref. Since a remote ota.update is REFUSED unless the node has been
+  // adopted, and adoption is exactly what rotates that pref, every node allowed to
+  // receive the command was guaranteed to fail the signature check -- after the dry run
+  // had already reported success. Both call sites now share this one definition, so
+  // they cannot drift apart again.
+  //
+  // Falls back to the stored pref when nothing was baked in (a build with no
+  // PROBE_CONTROLLER_PUBKEY), the stock case where the manifests are not ours.
+  const uint8_t* otaVerifyKey() {
+    const uint8_t* k = probe.deployKey();
+    return k != nullptr ? k : _prefs.probe_controller_pubkey;
+  }
+
 
   // One controller-issued management action, for PROBE_OP_MANAGE. Kept here rather than in
   // ProbeExecutor because everything an OTA touches -- the deferred timer, the bridge
@@ -482,29 +503,15 @@ public:
   //
   // Returns true when the action succeeded (or, for an update, was scheduled). `reply`
   // always carries the explanation either way.
+
+
   bool otaManage(bool do_update, char* reply, size_t reply_len) {
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
     char buf[192] = {0};
-    // VERIFY AGAINST THE COMPILED-IN KEY, not the per-node one.
-    //
-    // Manifests are signed once, with the controller key of the Echo that built the
-    // release, because one manifest serves every node. But Echo moves each adopted node
-    // onto a controller key issued just for IT -- so the moment a node is adopted,
-    // _prefs.probe_controller_pubkey stops being the key that signed the manifest and every
-    // check fails with "manifest signature does not match this node's controller". OTA was
-    // therefore broken for precisely the nodes Echo manages, and appeared to work only on
-    // ones nobody had adopted yet.
-    //
-    // These are two different authorities, and conflating them is what broke it: the
-    // per-node key answers "who may task this node", the compiled-in key answers "who may
-    // say what firmware it runs". The second must not rotate, and does not.
-    //
-    // Falls back to the pref when nothing was baked in (a build with no
-    // PROBE_CONTROLLER_PUBKEY), which is the stock case where the manifests are not ours.
-    const uint8_t* ota_key = probe.deployKey();
-    if (ota_key == nullptr) ota_key = _prefs.probe_controller_pubkey;
+    // Verified against the compiled-in deployment key, not the per-node one -- see
+    // otaVerifyKey() above for why, and for what happens when they are confused.
     const bool applies = _cli.getBoard()->otaFromManifest(
-        getFirmwareVer(), true, buf, ota_key);
+        getFirmwareVer(), true, buf, otaVerifyKey());
     if (!do_update || !applies) {
       // Nothing to install, or a check was all that was asked. buf holds the reason --
       // up to date, needs a cable, or why the manifest was refused.
