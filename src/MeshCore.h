@@ -67,6 +67,10 @@ public:
   // Pull-based OTA: fetch the firmware build for this variant from a baked-in manifest and flash it.
   // current_ver is the running firmware version string (used to skip if already up to date); when
   // dry_run is true the build is only reported, not flashed. Observer (ESP32+WiFi) builds only.
+  // Reply otaFromManifest() gives when it could not even start -- the worker task's stack
+  // did not fit in internal heap. Shared so callers can tell "no update / bad manifest"
+  // (final) from "could not look" (retry after freeing the bridge's heap).
+  #define OTA_SPAWN_FAILED_MSG "ERR: OTA task spawn failed"
   virtual bool otaFromManifest(const char* current_ver, bool dry_run, char reply[], const uint8_t* controller_pubkey) { return false; }
 
   // LoRa front-end-module LNA (RX gain) control. Only FEM-equipped boards override

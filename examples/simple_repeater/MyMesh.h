@@ -512,7 +512,18 @@ public:
     // otaVerifyKey() above for why, and for what happens when they are confused.
     const bool applies = _cli.getBoard()->otaFromManifest(
         getFirmwareVer(), true, buf, otaVerifyKey());
-    if (!do_update || !applies) {
+    // "COULD NOT LOOK" IS NOT "NOTHING TO INSTALL".
+    //
+    // The dry run needs a 24 KB task stack from internal heap while the TLS bridge is
+    // still up, and on a no-PSRAM board that spawn can fail on one attempt and succeed on
+    // the next (seen live: check ok, update refused 30 s later, check ok again). Treating
+    // that as a final answer sent the operator "ERR: OTA task spawn failed" for an update
+    // that was perfectly installable. The deferred flash runs AFTER setBridgeState(false)
+    // frees that heap and performs the whole comparison and signature check itself,
+    // aborting cleanly and resuming the bridge if there is nothing to do -- so when the
+    // dry run could not run, the right move for an UPDATE is to go there anyway.
+    const bool could_not_look = !applies && strcmp(buf, OTA_SPAWN_FAILED_MSG) == 0;
+    if (!do_update || (!applies && !could_not_look)) {
       // Nothing to install, or a check was all that was asked. buf holds the reason --
       // up to date, needs a cable, or why the manifest was refused.
       strncpy(reply, buf, reply_len - 1);
@@ -520,6 +531,12 @@ public:
       return applies;
     }
     beginDeferredOtaUpdate();
+    if (could_not_look) {
+      strncpy(reply, "pre-check could not run (low heap); updating after bridge teardown",
+              reply_len - 1);
+      reply[reply_len - 1] = 0;
+      return true;
+    }
     strncpy(reply, buf, reply_len - 1);
     reply[reply_len - 1] = 0;
     return true;

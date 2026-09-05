@@ -158,6 +158,15 @@ static void ota_partitionSignature(char* out, size_t out_sz) {
   }
 }
 
+// Spawn policy for the OTA worker. The message is a shared constant because the
+// callers that can still recover from it (otaManage, the CLI "ota update") recognise
+// it by string to fall through to the deferred, bridge-down attempt.
+#ifndef OTA_SPAWN_ATTEMPTS
+  #define OTA_SPAWN_ATTEMPTS 4
+#endif
+#ifndef OTA_SPAWN_RETRY_MS
+  #define OTA_SPAWN_RETRY_MS 250
+#endif
 // Parameters handed to the worker task; lives on otaFromManifest()'s stack,
 // which stays valid because that function blocks until the worker signals done.
 struct OtaTaskArgs {
@@ -186,9 +195,18 @@ bool ESP32Board::otaFromManifest(const char* current_ver, bool dry_run, char rep
   // freed when the task exits; on a successful update the chip reboots inside it.
   OtaTaskArgs args = { this, current_ver, dry_run, reply, controller_pubkey, false, false };
   TaskHandle_t handle = nullptr;
-  BaseType_t ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", 24576, &args, 5, &handle, 1);
+  // The 24 KB stack has to come out of internal heap in one piece, and with the MQTT
+  // bridge's TLS session up on a no-PSRAM board that is not always there at the instant
+  // asked. Seen on a bench Heltec V3: `ota check` got the task, `ota update` thirty
+  // seconds later did not, `ota check` three minutes after that did again. Starvation
+  // that transient deserves a few tries, not an operator-visible refusal on the first.
+  BaseType_t ok = pdFAIL;
+  for (int attempt = 0; attempt < OTA_SPAWN_ATTEMPTS && ok != pdPASS; attempt++) {
+    if (attempt) delay(OTA_SPAWN_RETRY_MS);   // yields; lets a freed TLS buffer coalesce
+    ok = xTaskCreatePinnedToCore(ota_task_entry, "ota", 24576, &args, 5, &handle, 1);
+  }
   if (ok != pdPASS) {
-    strcpy(reply, "ERR: OTA task spawn failed");
+    strcpy(reply, OTA_SPAWN_FAILED_MSG);
     return false;
   }
   while (!args.done) {

@@ -1285,6 +1285,14 @@ bool CommonCLI::handleObserverCommand(uint32_t sender_timestamp, char* command, 
         } else {
           strcpy(reply, "ERR: online OTA not available");
         }
+      } else if (strcmp(reply, OTA_SPAWN_FAILED_MSG) == 0) {
+        // The pre-check could not get its task stack with the bridge up. Same reasoning
+        // as MyMesh::otaManage(): the deferred flash re-checks everything after the
+        // bridge is down and its heap freed, so for an UPDATE that is where to go, not
+        // a refusal. (An `ota check` keeps the error: it has nothing to fall through to.)
+        if (_callbacks->beginDeferredOtaUpdate()) {
+          strcpy(reply, "pre-check could not run (low heap); updating after bridge teardown");
+        }
       }
     }
 #else
