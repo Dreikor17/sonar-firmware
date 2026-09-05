@@ -321,6 +321,14 @@ bool ESP32Board::otaFromManifestImpl(const char* current_ver, bool dry_run, char
   // Copy fields out before the document is reused/cleared.
   char file_url[200] = {0}, avail_version[40] = {0}, avail_base[40] = {0}, avail_hash[24] = {0};
   strncpy(file_url, doc["file"] | "", sizeof(file_url) - 1);
+  // The merged image is bootloader + partition table + app for a cable flash at 0x0.
+  // Written into the OTA app slot it is a brick with no rollback to come back from. The
+  // release tooling can no longer name it, but this node verifies what it is told, not
+  // who told it -- a hand-edited or hostile manifest gets the same refusal.
+  if (strstr(file_url, "-merged") != nullptr) {
+    strcpy(reply, "ERR: manifest names a merged (cable-flash) image; refusing");
+    return false;
+  }
   strncpy(avail_version, doc["version"] | "", sizeof(avail_version) - 1);
   strncpy(avail_base, doc["baseVersion"] | "", sizeof(avail_base) - 1);
   strncpy(avail_hash, doc["hash"] | "", sizeof(avail_hash) - 1);

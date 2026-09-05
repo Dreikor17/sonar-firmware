@@ -118,6 +118,16 @@ def main() -> int:
     stem = f"{args.env}-{args.version}.{args.build}{args.filename_tag}-{commit}"
     binname = f"{stem}.bin"
     binpath = os.path.join(args.bin_dir, binname)
+    # NEVER the merged image. A manifest names what every node in the field will write into
+    # its OTA app slot. The "-merged" artifact is bootloader + partition table + app laid out
+    # for a cable flash at 0x0; written as an app it puts bootloader bytes where the app
+    # goes, and there is no rollback partition to come back from. The naming above cannot
+    # produce it, but a future edit could, and this is the cheapest place to make that
+    # impossible rather than merely unlikely.
+    if "-merged" in binname.lower():
+        print(f"ERROR: refusing to publish a manifest for {binname}: that is the cable-flash "
+              "image, not an OTA app image", file=sys.stderr)
+        raise SystemExit(2)
     if not os.path.exists(binpath):
         print(f"ERROR: {binpath} not found -- run build.sh for {args.env} first",
               file=sys.stderr)
