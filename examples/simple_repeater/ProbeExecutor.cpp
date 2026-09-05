@@ -328,11 +328,12 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot,
           // broker checked. A command that disagrees with itself is refused, not
           // reconciled.
           reject = PRJ_BAD_CMD;
-        } else if (via_deploy && ops != PROBE_OP_SET_CONTROLLER) {
-          // The deployment key is accepted ONLY to re-issue a controller key. It must not
-          // be able to poll, log in, or run a CLI command on anything -- otherwise the
-          // shared key every node ships with would remain a master key for the whole
-          // field, which is the thing per-node keys exist to end.
+        } else if (via_deploy && ops != PROBE_OP_SET_CONTROLLER && ops != PROBE_OP_MANAGE) {
+          // The deployment key is accepted to re-issue a controller key, and (decided
+          // per-action below) to manage this node's own firmware. It must not be able to
+          // poll, log in, or run a CLI command on anything -- otherwise the shared key every
+          // node ships with would remain a master key for the whole field, which is the
+          // thing per-node keys exist to end.
           reject = PRJ_NEED_ADMIN;
         } else if (ops == PROBE_OP_SET_CONTROLLER) {
           // Self-directed: adopt a new controller key. Never goes out over LoRa, so it
@@ -380,27 +381,38 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot,
           // above -- signature, freshness, replay ring, and the mandatory `obs` claim
           // binding this token to THIS node.
           //
-          // THE SHARED KEY MUST NOT AUTHORISE THIS. Every published image ships trusting
-          // the same deployment key, and applyPrefs() seeds an unset controller pref WITH
-          // that key -- so on a node nobody has adopted, a deployment-key signature
-          // satisfies the primary branch and via_deploy is never set. The restriction
-          // higher up is therefore dead code exactly where it matters most. Refusing when
-          // the key we trust IS the deployment key is what stops anyone holding it -- every
-          // operator running the published controller -- from replacing our firmware.
-          if (via_deploy
+          // WHICH KEY MAY MANAGE THIS NODE'S FIRMWARE.
+          //
+          // The deployment key already signs every OTA manifest, so it already decides WHAT
+          // firmware this node will install (see MyMesh::otaVerifyKey). Until 2026-09-05 it
+          // was nonetheless refused here as a TRIGGER: only a per-node key could start an
+          // update. That did not protect the firmware -- whoever holds the deployment key
+          // can publish a manifest we accept -- but it did strand every node that was never
+          // adopted, or whose adoption was lost, behind a serial cable. The operator's rule
+          // is that remote OTA must never depend on anything that can break, so the two OTA
+          // actions now accept deployment-key authority: a token signed with it (via_deploy),
+          // or verified against a pref that still IS it (applyPrefs() seeds an unset pref
+          // with the deployment key, so on an un-adopted node the primary branch matches and
+          // via_deploy is never set).
+          //
+          // Everything ELSE under this op still needs a per-node key. There is nothing else
+          // today; the gate stays so the next action added here is refused by default.
+          const bool deploy_authority =
+              via_deploy
               || (_deploy_key_set
-                  && memcmp(_prefs->probe_controller_pubkey, _deploy_key, PUB_KEY_SIZE) == 0)) {
-            reject = PRJ_NEED_ADMIN;
+                  && memcmp(_prefs->probe_controller_pubkey, _deploy_key, PUB_KEY_SIZE) == 0);
+          const char* act = NULL; size_t act_len = 0;
+          if (!probeJsonGetString(js, jl, "act", &act, &act_len)
+              || act_len == 0 || act_len > 24) {
+            reject = PRJ_BAD_CMD;
           } else {
-            const char* act = NULL; size_t act_len = 0;
-            if (!probeJsonGetString(js, jl, "act", &act, &act_len)
-                || act_len == 0 || act_len > 24) {
-              reject = PRJ_BAD_CMD;
+            char act_s[25];
+            memcpy(act_s, act, act_len);
+            act_s[act_len] = 0;
+            const bool is_ota = strcmp(act_s, "ota.check") == 0 || strcmp(act_s, "ota.update") == 0;
+            if (deploy_authority && !is_ota) {
+              reject = PRJ_NEED_ADMIN;
             } else {
-              char act_s[25];
-              memcpy(act_s, act, act_len);
-              act_s[act_len] = 0;
-
               char detail[160] = {0};
               bool handled = false, ok = false;
               if (strcmp(act_s, "ota.check") == 0) {
