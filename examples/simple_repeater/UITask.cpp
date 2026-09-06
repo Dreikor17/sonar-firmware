@@ -1,5 +1,6 @@
 #include "UITask.h"
 #include "target.h"
+#include "RFLabBrand.h"
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
 
@@ -9,6 +10,8 @@
 
 #ifdef WITH_MQTT_BRIDGE
 #include <WiFi.h>
+#include <helpers/bridges/MQTTBridge.h>   // MQTT slot status for the status lines
+#include <string.h>
 #include <helpers/esp32/WebConfigServer.h>   // defines WITH_WEBCONFIG on ESP32
 #endif
 
@@ -56,6 +59,31 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
   // v1.2.3 (1 Jan 2025)
   snprintf(_version_info, sizeof(_version_info), "%s (%s)", version, build_date);
   free(version);
+}
+
+// Take one sample of the radio's cumulative transmit counter, at most one per window.
+// Called from loop(), not from the render, so the rate does not depend on the screen
+// being awake -- the display sleeps and the counter must keep its history regardless.
+void UITask::sampleTxCounter() {
+  const unsigned long now = millis();
+  if (_tx_next_sample != 0 && now < _tx_next_sample) return;
+  _tx_next_sample = now + TX_SAMPLE_MS;
+  _tx_head = (_tx_head + 1) % TX_SAMPLES;
+  _tx_ring[_tx_head] = (uint32_t)radio_driver.getPacketsSent();
+  _tx_ring_at[_tx_head] = now;
+  if (_tx_filled < TX_SAMPLES) _tx_filled++;
+}
+
+// Transmits in the last hour, or as much of one as we have. False until there is a span
+// worth dividing by: a rate extrapolated from a few seconds is noise dressed as data.
+bool UITask::txPerHour(uint32_t* out) const {
+  if (_tx_filled < 2) return false;
+  const int oldest = (_tx_head + TX_SAMPLES - (_tx_filled - 1)) % TX_SAMPLES;
+  const unsigned long span = _tx_ring_at[_tx_head] - _tx_ring_at[oldest];
+  if (span < 60UL * 1000UL) return false;
+  const uint32_t sent = _tx_ring[_tx_head] - _tx_ring[oldest];   // wraps correctly
+  *out = (uint32_t)(((uint64_t)sent * 3600000ULL) / span);
+  return true;
 }
 
 void UITask::renderCurrScreen() {
@@ -134,33 +162,74 @@ void UITask::renderCurrScreen() {
       return;
     }
 #endif
-    // node name
-    _display->setCursor(0, 0);
+#ifdef WITH_MQTT_BRIDGE
+    // ---- Sonar node screen (128x64) -------------------------------------------------
+    // Geometry is fixed by the design handoff: a 38px brand block on the left, a 90px
+    // text column on the right, five lines at a 10px pitch. 90px is 15 characters at the
+    // stock font's 6px advance, which is exactly what the longest IPv4 (255.255.255.255)
+    // needs -- the column was widened from the mock's 75px for that one reason, and the
+    // brand block absorbed the difference by dropping the padding around the logo.
+    const int BLOCK_W = 38, TEXT_X = BLOCK_W, TEXT_MAX = (128 - BLOCK_W) / 6;
+    char line[24];
+
+    // Header: node name, centred, hard-truncated. Names run past 128px easily
+    // ("RFLab.io Royal Oaks SNR" is 138px); an ellipsis would cost 3 of 21 characters, so
+    // the cut is silent and the operator reads the rest on the Probes page.
+    snprintf(line, sizeof(line), "%.21s", _node_prefs->node_name);
     _display->setTextSize(1);
     _display->setColor(UIColor::primary_txt);
-    _display->print(_node_prefs->node_name);
+    _display->drawTextCentered(64, 2, line);
 
-    // freq / sf
-    _display->setCursor(0, 20);
-    sprintf(tmp, "FREQ: %06.3f SF%d", _node_prefs->freq, _node_prefs->sf);
-    _display->print(tmp);
+    // Brand block. The logo is the approved art cropped to its ink, so it is drawn at the
+    // position the full 42x42 would have put the ink: x = 4 centres 30px in 38px, and
+    // y = 12 + 11 keeps it exactly where the mock has it.
+    _display->drawXbm(4, 23, RFLAB_LOGO_BITS, RFLAB_LOGO_W, RFLAB_LOGO_H);
+    _display->drawXbm((BLOCK_W - RFLAB_WORDMARK_W) / 2, 54,
+                      RFLAB_WORDMARK_BITS, RFLAB_WORDMARK_W, RFLAB_WORDMARK_H);
 
-    // bw / cr
-    _display->setCursor(0, 30);
-    sprintf(tmp, "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
-    _display->print(tmp);
+    // ---- text column ---------------------------------------------------------------
+    int ty = 13;
+    _display->setColor(UIColor::primary_txt);
 
-#ifdef WITH_MQTT_BRIDGE
-    // Display IP address for MQTT bridge devices
+    // 1. IP address. Bare, no "IP:" prefix -- the column is sized for the address itself.
     if (WiFi.status() == WL_CONNECTED) {
       IPAddress ip = WiFi.localIP();
-      _display->setCursor(0, 40);
+      snprintf(line, sizeof(line), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
+    } else {
+      snprintf(line, sizeof(line), "no wifi");
+    }
+    _display->setCursor(TEXT_X, ty); _display->print(line); ty += 10;
+
+    // 2-3. The first two CONFIGURED MQTT slots, by index order. getSlotStatusSnapshot()
+    // returns false for a slot that was never set up, so this skips the gaps rather than
+    // showing empty rows for them. A node with one slot shows one line and leaves the
+    // second blank; the alternative -- an "MQTT2: --" that never changes -- is noise.
+    {
+      int shown = 0;
+      for (int i = 0; i < MQTTBridge::getRuntimeSlotCount() && shown < 2; i++) {
+        MQTTBridge::SlotStatusSnapshot snap;
+        if (!MQTTBridge::getSlotStatusSnapshot(i, &snap)) continue;   // unconfigured
+        const char* st = snap.state ? snap.state : "?";
+        // The node's own vocabulary, shortened to fit and upper-cased to read as status.
+        // "fail" is the circuit breaker having given up, which is the one an operator
+        // must act on, so it gets the loudest word.
+        const char* txt = !strcmp(st, "ok")       ? "OK"
+                        : !strcmp(st, "wait")     ? "WAIT"
+                        : !strcmp(st, "disc")     ? "DISC"
+                        : !strcmp(st, "fail")     ? "ERROR"
+                        : !strcmp(st, "inactive") ? "OFF"
+                        : st;
+        shown++;
+        snprintf(line, sizeof(line), "MQTT%d: %s", shown, txt);
+        _display->setColor(!strcmp(st, "ok") ? UIColor::primary_txt : UIColor::warning_txt);
+        _display->setCursor(TEXT_X, ty); _display->print(line);
+        ty += 10;
+      }
+      while (shown < 2) { shown++; ty += 10; }   // keep the lines below on their rows
       _display->setColor(UIColor::primary_txt);
-      snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-      _display->print(tmp);
     }
 
-    // Has the controller adopted this node yet? A node cannot put itself into the "issued"
+    // 4. Has a controller adopted this node? A node cannot put itself into the "issued"
     // state -- only a controller holding the shipped key can hand it one of its own -- so
     // this is a truthful answer on the device itself, with nothing to cross-check on a
     // screen somewhere else. It says whether the node is CLAIMED, not whether it is up.
@@ -168,15 +237,44 @@ void UITask::renderCurrScreen() {
       const uint8_t st = probeControllerKeyState(_node_prefs->probe_controller_pubkey,
                                                  sizeof(_node_prefs->probe_controller_pubkey));
       const bool authed = (st == PROBE_CTRL_ISSUED);
-      _display->setCursor(0, 50);
       _display->setColor(authed ? UIColor::corp_blue : UIColor::warning_txt);
+      _display->setCursor(TEXT_X, ty);
       _display->print(authed ? "Echo Auth: Yes" : "Echo Auth: No");
+      _display->setColor(UIColor::primary_txt);
+      ty += 10;
     }
+
+    // 5. LoRa transmits per hour -- the airtime proxy, not MQTT publishes. "--" until
+    // there is a wide enough sample window to divide by.
+    {
+      uint32_t rate;
+      if (txPerHour(&rate)) snprintf(line, sizeof(line), "TX/hr: %lu", (unsigned long)rate);
+      else                  snprintf(line, sizeof(line), "TX/hr: --");
+      _display->setCursor(TEXT_X, ty); _display->print(line);
+    }
+#else
+    // Stock (non-Sonar) build keeps the upstream screen: this fork's branding has no
+    // business on an image that is not ours.
+    _display->setCursor(0, 0);
+    _display->setTextSize(1);
+    _display->setColor(UIColor::primary_txt);
+    _display->print(_node_prefs->node_name);
+
+    _display->setCursor(0, 20);
+    sprintf(tmp, "FREQ: %06.3f SF%d", _node_prefs->freq, _node_prefs->sf);
+    _display->print(tmp);
+
+    _display->setCursor(0, 30);
+    sprintf(tmp, "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
+    _display->print(tmp);
 #endif
   }
 }
 
 void UITask::loop() {
+#if defined(WITH_MQTT_BRIDGE)
+  sampleTxCounter();   // independent of the screen being on
+#endif
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
   int ev = user_btn.check();
   if (ev == BUTTON_EVENT_CLICK) {
