@@ -1269,6 +1269,70 @@ void MyMesh::begin(FILESYSTEM *fs) {
   // load persisted prefs
   _cli.loadPrefs(_fs);
 
+#ifdef SONAR_LOCKED_SLOT1_PRESET
+  // ---- THE PRODUCTION ANCHOR ------------------------------------------------------------
+  //
+  // Slot 1 is pinned to one preset and cannot be changed by anybody: the CLI refuses every
+  // `set mqtt1.*` on every transport, and this re-asserts it on EVERY boot rather than only
+  // seeding a fresh node.
+  //
+  // Both halves are required and neither is sufficient. Refusing changes alone would strand
+  // every node that already has something else stored -- it could never be moved, because
+  // moving it is the thing being refused. Forcing at boot alone would let a change stand
+  // until the next restart, which is the worst of the two: a node that works now and is deaf
+  // after a power cut.
+  //
+  // Why lock it at all: what stranded a node on this bench was that the slot CARRYING the
+  // tasking channel could be edited, and `probe.slot` could be pointed at a slot that did
+  // not exist. Pin one slot and neither is reachable -- there is always exactly one place
+  // the tasking channel is guaranteed to work. The cost, accepted deliberately: if this
+  // preset's broker is unreachable the node cannot be repointed remotely, only tasked via a
+  // second slot the operator has configured. That trade is the whole point.
+  {
+    MQTTPrefs* obs = _cli.getObserverPrefs();
+    bool changed = false;
+    if (strcmp(obs->mqtt_slot_preset[0], SONAR_LOCKED_SLOT1_PRESET) != 0) {
+      Serial.printf("Slot 1 locked: '%s' -> '%s'\n",
+                    obs->mqtt_slot_preset[0], SONAR_LOCKED_SLOT1_PRESET);
+      StrHelper::strncpy(obs->mqtt_slot_preset[0], SONAR_LOCKED_SLOT1_PRESET,
+                         sizeof(obs->mqtt_slot_preset[0]));
+      changed = true;
+    }
+    // Slot 1 owns this preset exclusively. The CLI already refuses to assign one built-in
+    // preset to two slots, but that check cannot see a slot forced from underneath it: a node
+    // that had the locked preset on slot 2 would come up connected to the same broker twice,
+    // with the same device identity on both, which is a fight rather than redundancy.
+    for (int s = 1; s < MAX_MQTT_SLOTS; s++) {
+      if (strcmp(obs->mqtt_slot_preset[s], SONAR_LOCKED_SLOT1_PRESET) == 0) {
+        Serial.printf("Slot %d also held '%s' (slot 1 owns it) - cleared\n",
+                      s + 1, SONAR_LOCKED_SLOT1_PRESET);
+        StrHelper::strncpy(obs->mqtt_slot_preset[s], MQTT_PRESET_NONE,
+                           sizeof(obs->mqtt_slot_preset[s]));
+        changed = true;
+      }
+    }
+    if (changed) _cli.savePrefs(_fs);   // persist, so `get mqtt1.preset` reports the truth
+  }
+
+  // ---- A NODE ALWAYS HAS A COMMAND CHANNEL ---------------------------------------------
+  //
+  // The tasking subscription is registered only for the slot named by probe_control_slot
+  // (MQTTBridge ensureSlotClient), so a pref naming a slot with no preset means NO slot
+  // carries probe/v1 and the node is deaf with no remote route back. That is precisely how
+  // a node was lost here: `set probe.slot 2` was accepted while slot 2 was empty, and the
+  // damage landed on the next slot restart.
+  //
+  // Slot 1 is guaranteed present by the block above, so falling back to it is always valid.
+  // Deliberately at BOOT and persisted: an operator reading `get probe.slot` afterwards
+  // sees where tasking actually is, not where it was once asked to go.
+  if (!mqttSlotConfigured(_prefs.probe_control_slot)) {
+    Serial.printf("probe.slot %u has no preset - falling back to slot 1\n",
+                  (unsigned)(_prefs.probe_control_slot + 1));
+    _prefs.probe_control_slot = 0;
+    savePrefs();
+  }
+#endif
+
   // Echo Observer-Probe: bind after loadPrefs so both rate limiters are armed
   // from the stored probe.max value rather than the constructor default.
   probe.begin(this, &_prefs);

@@ -139,7 +139,22 @@ if [ -n "${SONAR_LORA_BW:-}" ];   then SONAR_LORA_FLAGS="$SONAR_LORA_FLAGS -DLOR
 if [ -n "${SONAR_LORA_SF:-}" ];   then SONAR_LORA_FLAGS="$SONAR_LORA_FLAGS -DLORA_SF=${SONAR_LORA_SF}"; fi
 if [ -n "${SONAR_LORA_CR:-}" ];   then SONAR_LORA_FLAGS="$SONAR_LORA_FLAGS -DLORA_CR=${SONAR_LORA_CR}"; fi
 
-export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS:-} -DPROBE_CONTROLLER_PUBKEY='\"${SONAR_CONTROLLER_PUBKEY}\"' -DSONAR_PROBE_DEFAULTS=1${SONAR_LORA_FLAGS}"
+# --- the production anchor ----------------------------------------------------
+# Slot 1 is PINNED to this preset: re-asserted on every boot and refused by the CLI on every
+# transport, serial included. It exists so a node always has exactly one MQTT slot that is
+# guaranteed present and connectable, which is what makes the tasking channel impossible to
+# strand -- see MyMesh::begin. Slot 2+ stay free for a dev/test broker.
+#
+# Changing this moves the whole network's anchor and can only be done by a release, which is
+# the intended cost: a node in a field enclosure must not be repointable by a single command.
+# Set to the empty string to build without the lock (upstream behaviour).
+: "${SONAR_LOCKED_SLOT1_PRESET:=rflab}"
+SONAR_LOCK_FLAGS=""
+if [ -n "$SONAR_LOCKED_SLOT1_PRESET" ]; then
+  SONAR_LOCK_FLAGS=" -DSONAR_LOCKED_SLOT1_PRESET='\"${SONAR_LOCKED_SLOT1_PRESET}\"'"
+fi
+
+export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS:-} -DPROBE_CONTROLLER_PUBKEY='\"${SONAR_CONTROLLER_PUBKEY}\"' -DSONAR_PROBE_DEFAULTS=1${SONAR_LORA_FLAGS}${SONAR_LOCK_FLAGS}"
 
 # Verify the baked key against the Echo that will actually task these nodes. Building an
 # image against the wrong controller is not recoverable over the air: the node accepts
@@ -284,6 +299,12 @@ if [ -n "$SONAR_LORA_FLAGS" ]; then
 else
   echo "radio   : not preset — inherits the board default (platformio.ini)"
   echo "          a wiped node cannot reach the mesh until its radio is set"
+fi
+if [ -n "$SONAR_LOCKED_SLOT1_PRESET" ]; then
+  echo "slot 1  : LOCKED to preset '$SONAR_LOCKED_SLOT1_PRESET' (re-asserted every boot,"
+  echo "          \`set mqtt1.*\` refused on every transport including serial)"
+else
+  echo "slot 1  : not locked"
 fi
 echo "defaults: probe on (slot 1), probe/v1 on, relay-TX on, flood on, repeat off, 3-byte hash"
 echo "          relay-TX needs a broker that serves relay/v1 -- an older one force-closes the socket"

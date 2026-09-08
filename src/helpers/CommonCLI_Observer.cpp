@@ -397,12 +397,39 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
       strcpy(reply, "OK - no inbound tasking channel");
     } else {
       int slot = atoi(v);
+      const uint8_t prev_slot = _prefs->probe_control_slot;
       if (slot < 1 || slot > MAX_MQTT_SLOTS) {
         sprintf(reply, "Err - slot must be 1-%d, or 'off'", (int)MAX_MQTT_SLOTS);
+      } else if (_mqtt_prefs.mqtt_slot_preset[slot - 1][0] == '\0' ||
+                 strcmp(_mqtt_prefs.mqtt_slot_preset[slot - 1], MQTT_PRESET_NONE) == 0) {
+        // A slot with no preset never connects, so nothing would carry probe/v1 and the node
+        // would be deaf on its command topic with no remote way to say otherwise. Refused
+        // here rather than only on the probe console, because the LoRa-admin and WebConfig
+        // paths reach this same setter and a field node has no cable behind it.
+        sprintf(reply, "Err - slot %d has no preset; set it and confirm it connects first", slot);
       } else {
         _prefs->probe_control_slot = (uint8_t)(slot - 1);
         savePrefs();
-        sprintf(reply, "OK - tasking channel on slot %d (restart to apply)", slot);
+        // Register the tasking channel on the DESTINATION now, rather than only at the next
+        // boot. ensureSlotClient subscribes probe/v1 for whichever slot matches
+        // probe_control_slot, and the pref has just changed -- so restarting the destination
+        // makes the move real immediately.
+        //
+        // The OLD slot is deliberately left alone. It keeps its subscription until it happens
+        // to restart, so both slots briefly accept commands: harmless, since a command names
+        // the slot its reply travels back on. Restarting it here would instead tear down the
+        // connection THIS reply has to leave by -- and the previous behaviour, "restart to
+        // apply", left a window where the old slot could restart for any reason and no slot
+        // carried tasking at all. That window is how a node was lost on this bench.
+        //
+        // Skipped when the destination is already carrying the channel: there is nothing to
+        // register, and restarting it would drop the reply for no reason.
+        if ((uint8_t)(slot - 1) != prev_slot) {
+          _callbacks->restartBridgeSlot(slot - 1);
+          sprintf(reply, "OK - tasking channel moved to slot %d", slot);
+        } else {
+          sprintf(reply, "OK - tasking channel already on slot %d", slot);
+        }
       }
     }
   } else if (memcmp(config, "probe.v1 ", 9) == 0) {
@@ -522,6 +549,20 @@ bool CommonCLI::handleObserverSetCmd(uint32_t sender_timestamp, const char* conf
     // Slot-based commands: set mqtt1.preset <name>, set mqtt1.server <host>, etc.
     int slot = config[4] - '1'; // 0-5
     const char* subcmd = &config[6];
+#ifdef SONAR_LOCKED_SLOT1_PRESET
+    // Slot 1 is the production anchor: pinned to one preset, on every transport, serial
+    // included. See the boot-time enforcement in MyMesh::begin for why both halves exist.
+    //
+    // EVERY sub-key is refused, not just `preset`. `server`/`port`/`audience` are inert on a
+    // built-in preset, but `filter` is not -- `set mqtt1.filter none` would silence the
+    // production uplink while leaving the preset name looking correct, which defeats the
+    // lock while appearing to respect it.
+    if (slot == 0) {
+      sprintf(reply, "Error: slot 1 is locked to preset '%s'. Use another slot",
+              SONAR_LOCKED_SLOT1_PRESET);
+      return true;      // handled: the reply above is the answer
+    }
+#endif
     if (memcmp(subcmd, "preset ", 7) == 0) {
       const char* preset_name = &subcmd[7];
       // Validate preset name
