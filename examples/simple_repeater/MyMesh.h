@@ -438,6 +438,24 @@ public:
 #endif
   }
 
+  // Does this MQTT slot have a preset at all? "none" means the slot exists in prefs but is
+  // disabled, so nothing connects on it and nothing can be delivered over it.
+  //
+  // Exists for the probe console, which must refuse to point the tasking channel at a slot
+  // that will never come up: the move only takes effect on the next boot, so the node would
+  // come back with no slot registering probe/v1 and no remote way to say otherwise.
+  bool mqttSlotConfigured(uint8_t slot) const {
+#ifdef WITH_MQTT_BRIDGE
+    auto* obs = _cli.getObserverPrefs();
+    if (!obs || slot >= MAX_MQTT_SLOTS) return false;
+    const char* p = obs->mqtt_slot_preset[slot];
+    return p[0] != 0 && strcmp(p, MQTT_PRESET_NONE) != 0;
+#else
+    (void)slot;
+    return false;
+#endif
+  }
+
 #if defined(WITH_MQTT_BRIDGE)
   // Broadcast a key OTA milestone (start/fail only) on the configured alert
   // channel, in addition to the Serial log — so an operator who triggered

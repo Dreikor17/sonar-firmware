@@ -225,19 +225,37 @@ static const char* probeConsoleNormalise(const char* cmd) {
 }
 
 // The reason this line is refused, or NULL to run it.
-static const char* probeConsoleRefusal(const char* line, uint8_t tasking_slot) {
+//
+// `reply_slot` is the slot this command ARRIVED on, which is the slot its answer will leave
+// by. That -- not `probe_control_slot` -- is the comparator, and getting it wrong once was
+// enough to prove why: `set probe.slot N` saves the new slot but applies it only on the next
+// boot, so between the two the pref names a slot that is not yet carrying anything. A guard
+// reading the pref therefore switched ITSELF off the moment an operator ran the very command
+// this refusal recommends, and the next `set mqtt1.*` tore down the live reply path.
+static const char* probeConsoleRefusal(const MyMesh* mesh, const char* line, uint8_t reply_slot) {
   for (size_t i = 0; i < sizeof(PROBE_CONSOLE_DENIED) / sizeof(PROBE_CONSOLE_DENIED[0]); i++) {
     if (probeConsolePrefix(line, PROBE_CONSOLE_DENIED[i].prefix)) {
       return PROBE_CONSOLE_DENIED[i].why;
     }
   }
-  // Editing the slot that currently CARRIES tasking tears down the connection this reply
-  // has to leave by: every mqtt<N>.* setter calls restartBridgeSlot(N). The command would
-  // apply and the answer would never arrive, which is indistinguishable from a node that
-  // died. Move the tasking channel to the other slot first, then edit this one.
+  // Editing the slot the answer must travel over: every mqtt<N>.* setter calls
+  // restartBridgeSlot(N), so the command applies and the reply is lost -- indistinguishable
+  // from a node that died, and it invites a retry that applies it again.
   if (strncmp(line, "set mqtt", 8) == 0 && line[8] >= '1' && line[8] <= '9' && line[9] == '.') {
-    if ((uint8_t)(line[8] - '1') == tasking_slot) {
-      return "refused: that slot carries the tasking channel; move `probe.slot` to the other slot first";
+    if ((uint8_t)(line[8] - '1') == reply_slot) {
+      return "refused: this reply travels over that slot. Configure the OTHER slot instead, "
+             "or edit this one over serial";
+    }
+  }
+  // Pointing the tasking channel at a slot that will never come up. It applies on the next
+  // boot, and after that boot NO slot registers probe/v1 -- the node is deaf on its command
+  // topic with no remote way to tell it otherwise. Set the destination slot's preset first.
+  if (probeConsolePrefix(line, "set probe.slot")) {
+    const char* v = line + 14;
+    while (*v == ' ') v++;
+    if (*v >= '1' && *v <= '9' && !mesh->mqttSlotConfigured((uint8_t)(*v - '1'))) {
+      return "refused: that slot has no preset, so after the reboot nothing would carry "
+             "tasking. Set its preset first, confirm it connects, then move the channel";
     }
   }
   return NULL;
@@ -496,22 +514,25 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot,
             const bool is_ota = strcmp(act_s, "ota.check") == 0 || strcmp(act_s, "ota.update") == 0;
             if (deploy_authority && !is_ota) {
               reject = PRJ_NEED_ADMIN;
-            // REPLAY AND RATE, which this branch used to skip entirely.
+            // REPLAY, which this branch used to skip entirely.
             //
-            // MANAGE returns before the chain below that peeks the nonce ring, charges the
-            // session limiter and commits the nonce -- so a captured management token was
-            // replayable for its whole 120 s life, bounded only by the verify guard. That
-            // was survivable while the two actions were OTA (idempotent: the second flash
-            // finds nothing to do); `cli` is the first MANAGE action where a replay does
-            // something, so the same peek -> charge -> commit order is applied here.
+            // MANAGE returns before the chain below that peeks and commits the nonce ring,
+            // so a captured management token was replayable for its whole 120 s life,
+            // bounded only by _verify_guard. Survivable while both actions were OTA
+            // (idempotent: the second flash finds nothing to do); `cli` is the first MANAGE
+            // action where a replay DOES something, so the ring is consulted here.
             //
-            // Order copied deliberately from the chain below, and for the reason its own
-            // comment gives: a commit placed before the rate check lets refusals evict ring
-            // slots, and a rate charge before the peek lets replays spend budget.
+            // Peek, then commit -- the split the chain below uses, for the reason its own
+            // comment gives: committing before a later refusal lets refusals evict ring slots.
+            //
+            // NOT charged to _session_limiter, deliberately. That limiter is the node's
+            // probe_max_per_hour SESSION budget, and its justification is LoRa airtime: a
+            // self-directed action opens no session and never keys the radio. Charging it
+            // meant reading a node's own settings starved the tasking the budget exists to
+            // pace -- and it does not bound an attacker either, since _verify_guard (30/min)
+            // already caps how often an unauthenticated message can cost us a verify.
             } else if (probeNonceSeen(&_nonces, nonce)) {
               reject = PRJ_REPLAY;                  // peek: ring untouched
-            } else if (!_session_limiter.allow(nowSecs())) {
-              reject = PRJ_RATE;
             } else if (!probeNonceAccept(&_nonces, nonce)) {
               reject = PRJ_REPLAY;                  // commit
             } else if (strcmp(act_s, "cli") == 0) {
@@ -546,7 +567,7 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot,
                 // strips leading spaces and an `xx|` prefix of its own, so matching the raw
                 // text let " poweroff" and "ab|reboot" walk straight past every guard here.
                 const char* line = probeConsoleNormalise(cmd);
-                const char* denied = probeConsoleRefusal(line, _prefs->probe_control_slot);
+                const char* denied = probeConsoleRefusal(_mesh, line, reply_slot);
                 if (denied != NULL) {
                   strncpy(_cli_reply, denied, sizeof(_cli_reply) - 1);
                 } else if (probeConsolePrefix(line, "reboot")) {

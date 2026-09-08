@@ -270,12 +270,20 @@ clear — so the transport that exists to guarantee reachability does not carry 
 | `start ota` | raises an AP that accepts **unsigned** firmware; signed pull-OTA is `ota update` |
 | `tempradio` | radio parameters can take the node off the mesh |
 | `password …`, `get password`, `get guest.password` | would put a credential in the reply, and so in the broker and the task log |
-| `set mqtt<N>.…` where N is the tasking slot | the setter restarts that slot, so the reply can never leave; move `probe.slot` first |
+| `set mqtt<N>.…` where N is the slot the command arrived on | the setter restarts that slot, so the reply can never leave — configure the OTHER slot instead |
+| `set probe.slot <N>` where slot N has no preset | applies on the next boot, after which nothing carries `probe/v1` and the node is deaf with no remote route back |
 
 Matching is a **bare prefix** against the line after leading spaces and an `xx|`
 prefix are stripped — the same normalisation and the same prefix semantics
 CommonCLI uses, because a boundary-checked guard would refuse `poweroff` and pass
 `poweroffnow` to the parser that acts on it.
+
+The slot guard compares against the slot the command **arrived on**, not
+`probe_control_slot`. Those differ: `set probe.slot` saves the new slot and applies
+it only on the next boot, so in between the pref names a slot that is not carrying
+anything. A guard reading the pref switched itself off the moment an operator moved
+the channel, and the next `set mqtt<old>.…` tore down the live reply path — the
+command applied, the answer was lost, and the retry applied it again.
 
 `reboot` is intercepted and deferred ~4 s so the reply is published first;
 `clkreboot` is refused with the two-step equivalent (`clock sync`, then `reboot`).
