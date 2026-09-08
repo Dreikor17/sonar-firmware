@@ -160,6 +160,89 @@ bool ProbeExecutor::startLocal(const mesh::Identity& target, uint8_t ops_mask,
 // Verify the Ed25519 controller signature over "header.payload". Runs on Core 1:
 // the software Ed25519 path needs roughly 3 KB of stack (src/Identity.cpp:25-28),
 // which is not available on the esp-mqtt event task.
+// ---------------------------------------------------------------------------------------
+// WHAT THE REMOTE CONSOLE MAY NOT DO.
+//
+// The console's whole justification is that remote reachability must never depend on a
+// cable. A command that ends this node's ability to be commanded therefore cannot be part
+// of it -- not because the caller lacks authority (they hold the per-node key and could
+// re-flash the node), but because there is no way back. Every entry below is a ONE-LINE,
+// NON-RECOVERABLE loss of the control channel, or a credential written into the clear.
+//
+// Serial keeps all of them. This is a restriction on ONE transport, not on the operator.
+//
+// Matching is a bare prefix test against the NORMALISED line (see probeConsoleNormalise and
+// probeConsolePrefix). Entries are written long enough to be specific: `set probe off` does
+// not catch `set probe on`, and `set probe.slot off` does not catch `set probe.slot 2` -- the
+// commands an operator actually needs for a re-point stay available.
+struct ProbeConsoleDenial { const char* prefix; const char* why; };
+
+static const ProbeConsoleDenial PROBE_CONSOLE_DENIED[] = {
+  // Deep sleep with no wake source. `poweroff`/`shutdown` are the only commands here that
+  // cannot even be undone by a power cycle at the far end -- somebody has to go and press it.
+  { "poweroff",  "refused: would power the node down with no way to wake it (serial only)" },
+  { "shutdown",  "refused: would power the node down with no way to wake it (serial only)" },
+  // Clearing the controller key makes verifyCommand refuse EVERY future command
+  // (PRJ_NO_CONTROLLER, checked before anything else), so the console cannot undo it.
+  // Rotating it belongs to PROBE_OP_SET_CONTROLLER, which is transactional about it.
+  { "set probe.controller", "refused: the controller key is changed with the adopt-key operation, not the console" },
+  // probe off / probe.v1 off / probe.slot off each unsubscribe the command topic on the
+  // next boot. Turning them ON, or moving the slot to a real slot number, is allowed --
+  // that is the re-point workflow.
+  { "set probe off",      "refused: would unsubscribe this node's command topic with no way back (serial only)" },
+  { "set probe.v1 off",   "refused: would leave the probe/v1 command topic with no way back (serial only)" },
+  { "set probe.slot off", "refused: would detach the tasking channel with no way back (serial only)" },
+  // Raises a SoftAP that accepts UNSIGNED firmware. Signed pull-OTA is `ota update`.
+  { "start ota",  "refused: unsigned-firmware AP; use the firmware update action instead" },
+  // Radio parameters put the node on a different channel from the mesh -- and tempradio
+  // additionally strcpy()s the rest of the line into a 132-byte buffer.
+  { "tempradio",  "refused: a radio-parameter change can take the node off the mesh (serial only)" },
+  // Writes the node's own admin password back in the reply, which this path then stores in
+  // Echo's task log and hands to the broker on the way.
+  { "password",             "refused: would echo the new password in the reply (serial only)" },
+  { "get guest.password",   "refused: would put a credential in the clear on the broker (serial only)" },
+  { "get password",         "refused: would put a credential in the clear on the broker (serial only)" },
+};
+
+// BARE prefix, deliberately -- the same test CommonCLI itself uses.
+//
+// A word-boundary version reads tidier and is wrong here: CommonCLI dispatches on
+// `memcmp(command, "poweroff", 8) == 0` with no boundary check, so `poweroffnow` powers the
+// node off. A guard that insisted on a boundary would refuse `poweroff` and pass
+// `poweroffnow` straight through to it. Match what the parser matches, and if that denies a
+// little more than intended, the cost is one command the operator runs over serial.
+static bool probeConsolePrefix(const char* line, const char* prefix) {
+  return strncmp(line, prefix, strlen(prefix)) == 0;
+}
+
+// Normalise exactly as MyMesh::handleCommand will, so a refusal cannot be stepped around by
+// the same rewriting the parser is about to do. It skips leading spaces and an `xx|` prefix;
+// matching the raw text instead let " reboot" and "ab|poweroff" through.
+static const char* probeConsoleNormalise(const char* cmd) {
+  while (*cmd == ' ') cmd++;
+  if (strlen(cmd) > 4 && cmd[2] == '|') cmd += 3;
+  return cmd;
+}
+
+// The reason this line is refused, or NULL to run it.
+static const char* probeConsoleRefusal(const char* line, uint8_t tasking_slot) {
+  for (size_t i = 0; i < sizeof(PROBE_CONSOLE_DENIED) / sizeof(PROBE_CONSOLE_DENIED[0]); i++) {
+    if (probeConsolePrefix(line, PROBE_CONSOLE_DENIED[i].prefix)) {
+      return PROBE_CONSOLE_DENIED[i].why;
+    }
+  }
+  // Editing the slot that currently CARRIES tasking tears down the connection this reply
+  // has to leave by: every mqtt<N>.* setter calls restartBridgeSlot(N). The command would
+  // apply and the answer would never arrive, which is indistinguishable from a node that
+  // died. Move the tasking channel to the other slot first, then edit this one.
+  if (strncmp(line, "set mqtt", 8) == 0 && line[8] >= '1' && line[8] <= '9' && line[9] == '.') {
+    if ((uint8_t)(line[8] - '1') == tasking_slot) {
+      return "refused: that slot carries the tasking channel; move `probe.slot` to the other slot first";
+    }
+  }
+  return NULL;
+}
+
 bool ProbeExecutor::verifyCommand(const char* token, size_t len, const char** payload,
                                   size_t* payload_len, uint8_t* reject, bool* via_deploy) {
   // Fail closed FIRST, and before anything expensive.
@@ -377,9 +460,10 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot,
           }
         } else if (ops == PROBE_OP_MANAGE) {
           // Self-directed: do one named thing to ourselves. Like SET_CONTROLLER this never
-          // goes on air, so it takes no session and no target. Authorisation was settled
-          // above -- signature, freshness, replay ring, and the mandatory `obs` claim
-          // binding this token to THIS node.
+          // goes on air, so it takes no session and no target. Signature, freshness and the
+          // mandatory `obs` claim binding this token to THIS node were settled above; the
+          // replay ring and the rate charge are taken INSIDE this branch, because the chain
+          // that normally does it sits below and MANAGE returns before reaching it.
           //
           // WHICH KEY MAY MANAGE THIS NODE'S FIRMWARE.
           //
@@ -412,6 +496,97 @@ bool ProbeExecutor::onCommand(const char* token, size_t len, uint8_t reply_slot,
             const bool is_ota = strcmp(act_s, "ota.check") == 0 || strcmp(act_s, "ota.update") == 0;
             if (deploy_authority && !is_ota) {
               reject = PRJ_NEED_ADMIN;
+            // REPLAY AND RATE, which this branch used to skip entirely.
+            //
+            // MANAGE returns before the chain below that peeks the nonce ring, charges the
+            // session limiter and commits the nonce -- so a captured management token was
+            // replayable for its whole 120 s life, bounded only by the verify guard. That
+            // was survivable while the two actions were OTA (idempotent: the second flash
+            // finds nothing to do); `cli` is the first MANAGE action where a replay does
+            // something, so the same peek -> charge -> commit order is applied here.
+            //
+            // Order copied deliberately from the chain below, and for the reason its own
+            // comment gives: a commit placed before the rate check lets refusals evict ring
+            // slots, and a rate charge before the peek lets replays spend budget.
+            } else if (probeNonceSeen(&_nonces, nonce)) {
+              reject = PRJ_REPLAY;                  // peek: ring untouched
+            } else if (!_session_limiter.allow(nowSecs())) {
+              reject = PRJ_RATE;
+            } else if (!probeNonceAccept(&_nonces, nonce)) {
+              reject = PRJ_REPLAY;                  // commit
+            } else if (strcmp(act_s, "cli") == 0) {
+              // NODE CONSOLE: run one CLI line on THIS node and return what it printed.
+              //
+              // The same parser the serial console and the LoRa admin path use, entered the
+              // way the LoRa path enters it -- with a non-zero sender timestamp -- so every
+              // command CommonCLI gates on `sender_timestamp == 0` (erase, set freq, the
+              // plaintext password reads) stays serial-only here too. Nothing is widened.
+              //
+              // Why this exists: PROBE_OP_COMMAND runs text on a DIFFERENT node over LoRa
+              // behind a sealed admin password, and MANAGE was two OTA verbs. Between them a
+              // controller could re-flash a node it could not reconfigure, so moving a
+              // deployed node to a new broker meant a cable -- up a tower.
+              //
+              // This IS a new grant, and calling it "only reach" would be a lie: the per-node
+              // key could interrogate others, install signed firmware, relay and rotate
+              // itself, but it had no node-local admin. It does now. What bounds it is that
+              // the key is per-node (the shared deployment key is refused above) and that
+              // PROBE_CONSOLE_DENIED keeps every irreversible command off this transport --
+              // the one property the feature exists to protect is that a node stays reachable.
+              const char* cli = NULL; size_t cli_len = 0;
+              if (!probeJsonGetString(js, jl, "cmd", &cli, &cli_len)
+                  || !probeCliTextValid(cli, cli_len)) {
+                reject = PRJ_BAD_CMD;
+              } else {
+                char cmd[PROBE_CLI_MAX_TEXT + 1];      // handleCommand edits in place
+                memcpy(cmd, cli, cli_len);
+                cmd[cli_len] = 0;
+                _cli_reply[0] = 0;
+                // Test the line the PARSER will see, not the bytes as sent: handleCommand
+                // strips leading spaces and an `xx|` prefix of its own, so matching the raw
+                // text let " poweroff" and "ab|reboot" walk straight past every guard here.
+                const char* line = probeConsoleNormalise(cmd);
+                const char* denied = probeConsoleRefusal(line, _prefs->probe_control_slot);
+                if (denied != NULL) {
+                  strncpy(_cli_reply, denied, sizeof(_cli_reply) - 1);
+                } else if (probeConsolePrefix(line, "reboot")) {
+                  // CommonCLI's `reboot` never returns, which on this path means the reply
+                  // never leaves. Defer it past the publish below so the controller hears
+                  // "yes" before the node goes away -- the one command you most need an
+                  // answer to is the one that would otherwise always time out.
+                  _mesh->scheduleReboot(PROBE_CLI_REBOOT_DELAY_MS);
+                  snprintf(_cli_reply, sizeof(_cli_reply),
+                           "OK - rebooting in %u ms, after this reply",
+                           (unsigned)PROBE_CLI_REBOOT_DELAY_MS);
+                } else if (probeConsolePrefix(line, "clkreboot")) {
+                  // Same problem, no deferred form. Refuse with the two-step equivalent
+                  // rather than reboot silently and be reported as a timeout.
+                  strncpy(_cli_reply, "refused: clkreboot cannot answer first - use `clock sync`, then `reboot`",
+                          sizeof(_cli_reply) - 1);
+                } else {
+                  _mesh->handleCommand(iat ? iat : 1, cmd, _cli_reply);
+                }
+                _cli_reply[sizeof(_cli_reply) - 1] = 0;
+                _n_accepted++;
+                ProbeSession ack;
+                memset(&ack, 0, sizeof(ack));
+                memcpy(ack.job_id, job, sizeof(job));
+                ack.reply_slot = reply_slot;
+                ack.from_mqtt  = true;
+                ack.target     = _mesh->self_id;
+                resultBegin();
+                // `mgmt` names the action so an older controller that does not know `cli`
+                // still sees a handled action, not silence; `reply` is the console text,
+                // which can be a full 160-character line and so takes the long append.
+                // `ok` here means THE LINE RAN, not that it succeeded -- CommonCLI has no
+                // success channel, it just writes text ("OK - ...", "Err - ...", ""). The
+                // controller reads `reply` to find out what happened; claiming otherwise in
+                // this field would invite it to trust a verdict nothing computed.
+                resultAppend(",\"mgmt\":\"cli\",\"ok\":true");
+                resultAppendEscapedLong("reply", _cli_reply, strlen(_cli_reply));
+                _mesh->publishProbeResult(ack, PST_OK, PR_NONE, _result, _result_len);
+                return true;
+              }
             } else {
               char detail[160] = {0};
               bool handled = false, ok = false;
@@ -1460,6 +1635,49 @@ void ProbeExecutor::resultAppend(const char* fmt, ...) {
 // Minimal JSON string escaping: quote, backslash and control characters. Node
 // names and owner strings are operator-supplied, so they cannot be trusted to be
 // JSON-safe.
+void ProbeExecutor::resultAppendEscapedLong(const char* key, const char* val, size_t val_len) {
+  if (!key) return;
+  const size_t lim  = sizeof(_result) - 18;   // the same reserve resultAppend keeps
+  const size_t klen = strlen(key);
+  // Measure before writing: the fragment goes in whole or not at all.
+  size_t esc = 0;
+  for (size_t i = 0; i < val_len; i++) {
+    unsigned char c = (unsigned char)val[i];
+    esc += (c == '"' || c == '\\') ? 2 : (c < 0x20 ? 6 : 1);
+  }
+  // SIX punctuation bytes, not five: , " key " : " esc ". Counting five admitted a
+  // fragment that ended one byte into the 18-byte reserve resultAppend keeps for the
+  // truncation marker and the closing brace.
+  const size_t frag = 6 + klen + esc;
+  if (_result_len >= lim || _result_len + frag >= lim) {
+    // Too long to land intact, so fall back to the short form, which truncates the VALUE on
+    // a character boundary and still closes the string -- a shortened reply beats a missing
+    // one. Emit the marker FIRST: resultAppendEscaped's own 128-byte scratch shortens
+    // silently, and a reply the controller cannot tell was cut is worse than a short one.
+    if (!_result_truncated && _result_len + 13 < sizeof(_result)) {
+      _result_truncated = true;
+      memcpy(_result + _result_len, ",\"trunc\":true", 13);
+      _result_len += 13;
+      _result[_result_len] = 0;
+    }
+    resultAppendEscaped(key, val, val_len);
+    return;
+  }
+  char* w = _result + _result_len;
+  *w++ = ','; *w++ = '"';
+  memcpy(w, key, klen); w += klen;
+  *w++ = '"'; *w++ = ':'; *w++ = '"';
+  for (size_t i = 0; i < val_len; i++) {
+    unsigned char c = (unsigned char)val[i];
+    if (c == '"' || c == '\\') { *w++ = '\\'; *w++ = (char)c; }
+    else if (c < 0x20)         { w += snprintf(w, 7, "\\u%04x", c); }
+    else                       { *w++ = (char)c; }
+  }
+  *w++ = '"';
+  *w = 0;
+  _result_len = (size_t)(w - _result);
+}
+
 void ProbeExecutor::resultAppendEscaped(const char* key, const char* val, size_t val_len) {
   if (!key) return;
   // Escape into scratch FIRST, then emit the key and value as ONE atomic append. Writing

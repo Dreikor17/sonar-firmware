@@ -86,6 +86,17 @@ class MyMesh;
 
 #define PROBE_JOB_ID_LEN 16
 
+// How long a `reboot` sent through the `cli` management action waits before firing, so the
+// acknowledgement above it can leave over the still-live bridge.
+//
+// 4 s, not 2. The MQTT bridge runs on its OWN FreeRTOS task on Core 0 (see MyMesh::loop) --
+// this does not depend on the mesh loop, but it does depend on that task getting the QoS-1
+// publish onto a TLS socket and, if the write stalls, on its retry. The OTA path faces the
+// same race and answers it with 2.5 s PLUS a drainOutbound() barrier; the console has no
+// barrier to lean on, so it buys margin with time instead. A reboot that answers late is a
+// small annoyance; one that never answers is indistinguishable from a node that died.
+#define PROBE_CLI_REBOOT_DELAY_MS 4000
+
 // Inbound tasking command ceiling. Held as a MEMBER, never a stack local: the
 // Arduino loop task has an 8 KB stack and the software Ed25519 verify path alone
 // needs roughly 3 KB of it (src/Identity.cpp:25-28).
@@ -308,6 +319,11 @@ private:
   char    _cmd_buf[PROBE_CMD_MAX_LEN];
   uint8_t _claims[PROBE_CLAIMS_MAX_LEN];
 
+  // Reply buffer for the `cli` management action. MyMesh::handleCommand writes at most
+  // the LoRa CLI reply size (160), but it is handed a buffer by the caller with no length,
+  // so this is sized with margin and lives here rather than on the loop task's stack.
+  char   _cli_reply[256];
+
   // Result accumulation for the active session (JSON claim fragment).
   char   _result[640];
   bool   _result_truncated;   // a fragment was dropped; the JSON stays valid
@@ -360,6 +376,12 @@ private:
   void resultBegin();
   void resultAppend(const char* fmt, ...);
   void resultAppendEscaped(const char* key, const char* val, size_t val_len);
+  // Same contract, no size ceiling below the result buffer itself. resultAppendEscaped
+  // escapes into a 128-byte scratch and then goes through resultAppend's 256-byte
+  // formatter, which is right for the short values it carries and silently truncates a
+  // full-length CLI reply. This one measures the escaped length first and writes the
+  // fragment directly, still all-or-nothing so the JSON stays valid.
+  void resultAppendEscapedLong(const char* key, const char* val, size_t val_len);
   void publishResult(const ProbeSession& s, uint8_t state);
   void reportReject(uint8_t reason, uint8_t reply_slot, const char* job_id);
 

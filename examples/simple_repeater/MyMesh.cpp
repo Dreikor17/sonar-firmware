@@ -1926,6 +1926,12 @@ void MyMesh::loop() {
   }
 #endif
 
+  if (_reboot_at && millisHasNowPassed(_reboot_at)) {   // deferred `reboot` (probe console)
+    _reboot_at = 0;
+    Serial.println("Probe console: rebooting");
+    _cli.getBoard()->reboot();   // does not return
+  }
+
 #ifdef WITH_WEBCONFIG
   if (_webconfig) {
     _webconfig->tick(millis());

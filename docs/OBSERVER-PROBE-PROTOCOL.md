@@ -221,6 +221,78 @@ flight, which the single-session executor guarantees.
 
 **Verified against a live repeater:** `get freq` returned `> 910.5250244`.
 
+### `act` — node management (with `ops` = `0x40`, alone)
+
+Self-directed: the observer does one named thing to **itself**. No target, no
+session, no radio, no airtime. `ops` must be exactly `0x40` — combined with any
+other bit it falls through to the radio-session path and is ignored.
+
+| `act` | Does | Authority |
+|---|---|---|
+| `ota.check` | dry-run the manifest, report `up to date` / `update available: …` | deployment key **or** per-node key |
+| `ota.update` | schedule the flash (ack goes out first, then the bridge is torn down) | deployment key **or** per-node key |
+| `cli` | run the CLI line in `cmd` on this node, return its output in `reply` | **per-node key only** |
+
+The result always carries `mgmt: "<act>"` — its absence means the firmware did
+not understand the action, which is how a newer controller tells "did nothing"
+from "did it".
+
+`ok` means different things per action, so read it carefully. For the OTA actions
+it is the action's verdict and `detail` explains it. **For `cli` it is always
+`true` and means only that the line ran** — CommonCLI has no success channel, it
+just writes text, so `Err - ...` and `OK - ...` both come back `ok: true` with the
+difference in `reply`. Nothing computes a verdict for a console line; do not
+invent one.
+
+Replay and rate are charged **inside** the MANAGE branch (peek the nonce ring,
+charge the session limiter, then commit), not by the chain that handles the
+radio ops — MANAGE returns before reaching it. Before firmware v1.17.1.17 that
+charge did not happen at all, which was survivable only because both actions were
+idempotent OTA verbs.
+
+**`cli`** (firmware v1.17.1.17+) enters the same parser as the serial console and
+the LoRa admin path, and enters it the way the LoRa path does — with a non-zero
+sender timestamp — so everything CommonCLI gates on `sender_timestamp == 0` stays
+serial-only: `erase`, `set freq`, `set prv.key`, the detailed diagnostic dumps.
+(Note `get guest.password` is **not** among them — it is refused by the console's
+own list below instead.) `cmd` obeys the same rules as the `0x10` command text:
+printable ASCII, no `"` or `\`, ≤ 160 characters.
+
+**Refused by the console, available over serial.** Each of these is a one-line,
+non-recoverable loss of the control channel, or a credential written into the
+clear — so the transport that exists to guarantee reachability does not carry them:
+
+| Refused | Why |
+|---|---|
+| `poweroff`, `shutdown` | deep sleep, no wake source — a person has to go and press it |
+| `set probe.controller …` | clearing or rotating the key the console itself authenticates with; use `0x20` |
+| `set probe off`, `set probe.v1 off`, `set probe.slot off` | unsubscribes the command topic on next boot |
+| `start ota` | raises an AP that accepts **unsigned** firmware; signed pull-OTA is `ota update` |
+| `tempradio` | radio parameters can take the node off the mesh |
+| `password …`, `get password`, `get guest.password` | would put a credential in the reply, and so in the broker and the task log |
+| `set mqtt<N>.…` where N is the tasking slot | the setter restarts that slot, so the reply can never leave; move `probe.slot` first |
+
+Matching is a **bare prefix** against the line after leading spaces and an `xx|`
+prefix are stripped — the same normalisation and the same prefix semantics
+CommonCLI uses, because a boundary-checked guard would refuse `poweroff` and pass
+`poweroffnow` to the parser that acts on it.
+
+`reboot` is intercepted and deferred ~4 s so the reply is published first;
+`clkreboot` is refused with the two-step equivalent (`clock sync`, then `reboot`).
+
+Why it exists: `0x10` runs text on a *different* node behind a sealed admin
+password, and MANAGE was two OTA verbs. Between them a controller could re-flash a
+node it could not reconfigure, so moving a deployed node to a new broker meant a
+cable — on hardware that is up a tower.
+
+**Be honest about the grant.** This is not merely more reach: the per-node key
+previously could interrogate other nodes, trigger installs of
+deployment-key-signed firmware, relay frames and rotate itself, but it had no
+node-local admin at all. It does now. The mitigation is not that the power is old
+— it is that the key is per-node, minted by one controller for one node, and that
+the list above keeps the irreversible commands off this transport. The shared
+deployment key is refused outright (`need_admin`), as for every non-OTA action.
+
 ### `pw` — the sealed admin password (optional)
 
 Present it and the session logs in as **admin** instead of guest, which is what

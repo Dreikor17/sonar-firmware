@@ -126,6 +126,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks
   CayenneLPP telemetry;
   unsigned long set_radio_at, revert_radio_at;
   unsigned long _ota_update_at = 0;  // deferred `ota update` fire time (0 = none scheduled)
+  unsigned long _reboot_at = 0;      // deferred `reboot` from the probe console (0 = none)
   float pending_freq;
   float pending_bw;
   uint8_t pending_sf;
@@ -504,6 +505,14 @@ public:
   // Returns true when the action succeeded (or, for an update, was scheduled). `reply`
   // always carries the explanation either way.
 
+
+  // Reboot from loop() after `delay_ms`, so whatever asked for it can be answered first.
+  // Used by the probe console's `reboot`: the CLI's own `reboot` never returns, which on a
+  // path that must publish a reply means the reply is lost every single time.
+  void scheduleReboot(unsigned long delay_ms) {
+    _reboot_at = millis() + delay_ms;
+    if (_reboot_at == 0) _reboot_at = 1;   // 0 means "none"
+  }
 
   bool otaManage(bool do_update, char* reply, size_t reply_len) {
 #if defined(WITH_MQTT_BRIDGE) && defined(OTA_MANIFEST_BASE)
