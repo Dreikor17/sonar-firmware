@@ -32,9 +32,19 @@ set -euo pipefail
 #   dev   echo1.rflab.io  -- the dev Echo. Only reachable while that container is running,
 #                            and a node whose channel host is down reports the read timeout
 #                            "ERR: manifest HTTP -11" rather than anything about the host.
-#   prod  echo.rflab.io   -- production Echo, always up. NOT rflab.io: that is the website
-#                            and it 404s /v. This comment used to say main uses rflab.io/v,
-#                            which was never true.
+#   prod  ota.rflab.io    -- a hostname that exists ONLY to serve /v over plain http, and
+#                            is deliberately http-only: echo.rflab.io forces SSL, and a
+#                            301 is fatal here because the manifest client does not follow
+#                            redirects. Everything outside /v/ on that host 502s against a
+#                            dead upstream, so the only thing reachable without TLS is the
+#                            signed manifest. NOT rflab.io (the website, 404s /v) and not
+#                            echo.rflab.io (301s on :80). An earlier comment here claimed
+#                            main uses rflab.io/v, which was never true.
+#
+# Serving the manifest without TLS costs nothing: every manifest is Ed25519-verified
+# against the controller key compiled into the node, BEFORE its version is even compared
+# (ESP32Board.cpp), and the image it names is fetched over TLS and checked against both a
+# sha256 and that same signature. The transport is not the trust boundary here.
 : "${SONAR_CHANNEL:=dev}"
 case "$SONAR_CHANNEL" in
   dev)
@@ -42,7 +52,7 @@ case "$SONAR_CHANNEL" in
     : "${SONAR_CHANNEL_TAG:=sonar-dev}"
     ;;
   prod)
-    : "${OTA_MANIFEST_BASE_URL:=https://echo.rflab.io/v}"
+    : "${OTA_MANIFEST_BASE_URL:=http://ota.rflab.io/v}"
     : "${SONAR_CHANNEL_TAG:=sonar}"
     ;;
   *)
