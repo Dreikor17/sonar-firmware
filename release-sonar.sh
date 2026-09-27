@@ -277,13 +277,31 @@ export FIRMWARE_BUILD_NUMBER="$BUILD_NUMBER"
 # tree carries upstream tags like `mbedtls-4k`, and the nearest one has nothing to do with
 # the MeshCore release we are based on. Taking it silently produced a real build named
 # `mbedtls-4k.6` whose version string the device cannot even parse.
-: "${FIRMWARE_VERSION:=$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)}"
+# git describe returns the newest reachable TAG, and release tags here are four-component
+# (v1.17.1.19) -- so taking it whole yields a BASE of v1.17.1.19 and a release of
+# v1.17.1.19.20. The base is the first three components; the fourth is the build number this
+# script is being given. Truncate rather than trust.
+_sonar_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
+: "${FIRMWARE_VERSION:=$(printf '%s
+' "$_sonar_tag" | awk -F. 'NF>=3 {printf "%s.%s.%s", $1, $2, $3}')}"
+: "${FIRMWARE_VERSION:=v0.0.0}"
 
 # So: validate rather than trust. ota_parseVersion() finds the build number by scanning
 # for the THIRD dot, which means the base must be exactly v<major>.<minor>.<patch> -- with
 # anything else the device compares whole strings, never matches, and offers the same
 # update on every check forever.
 case "$FIRMWARE_VERSION" in
+  # FOUR components first, because the three-component pattern below matches this too:
+  # a shell glob's * spans dots, so v[0-9]*.[0-9]*.[0-9]* happily accepts v1.17.1.11 and
+  # the guard this comment belongs to never fired. That is how a build came out named
+  # v1.17.1.11.20.
+  v[0-9]*.[0-9]*.[0-9]*.*)
+    echo "ERROR: FIRMWARE_VERSION is '$FIRMWARE_VERSION', which has four components." >&2
+    echo "       The BASE is v<major>.<minor>.<patch>; the build number is this script's" >&2
+    echo "       first argument. Pass it explicitly:" >&2
+    echo "         FIRMWARE_VERSION=v1.17.1 $0 $BUILD_NUMBER [env ...]" >&2
+    exit 1
+    ;;
   v[0-9]*.[0-9]*.[0-9]*) ;;
   *)
     echo "ERROR: FIRMWARE_VERSION is '$FIRMWARE_VERSION', which is not v<major>.<minor>.<patch>." >&2
