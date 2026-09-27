@@ -24,7 +24,32 @@ set -euo pipefail
 # check runs with the MQTT bridge still up on non-PSRAM boards). The host must therefore
 # serve /v/*.json over http:// as well as https:// -- a forced HTTPS redirect breaks
 # `ota check` while leaving `ota update` working, which is a confusing way to fail.
-: "${OTA_MANIFEST_BASE_URL:=https://echo1.rflab.io/v}"   # dev channel — main uses rflab.io/v
+# SONAR_CHANNEL picks the base URL and BOTH channel tags together, because the failure
+# mode of setting them separately is silent: a build carrying a production URL and a
+# "-sonar-dev" filename tag looks like a dev build in every listing and updates from
+# production. One switch, three values.
+#
+#   dev   echo1.rflab.io  -- the dev Echo. Only reachable while that container is running,
+#                            and a node whose channel host is down reports the read timeout
+#                            "ERR: manifest HTTP -11" rather than anything about the host.
+#   prod  echo.rflab.io   -- production Echo, always up. NOT rflab.io: that is the website
+#                            and it 404s /v. This comment used to say main uses rflab.io/v,
+#                            which was never true.
+: "${SONAR_CHANNEL:=dev}"
+case "$SONAR_CHANNEL" in
+  dev)
+    : "${OTA_MANIFEST_BASE_URL:=https://echo1.rflab.io/v}"
+    : "${SONAR_CHANNEL_TAG:=sonar-dev}"
+    ;;
+  prod)
+    : "${OTA_MANIFEST_BASE_URL:=https://echo.rflab.io/v}"
+    : "${SONAR_CHANNEL_TAG:=sonar}"
+    ;;
+  *)
+    echo "ERROR: SONAR_CHANNEL must be dev or prod (got '$SONAR_CHANNEL')" >&2
+    exit 1
+    ;;
+esac
 
 # Where the .bin itself is published. MUST be HTTPS with a publicly-trusted certificate:
 # the download is verified against the firmware's embedded Mozilla root bundle, so a
@@ -54,11 +79,11 @@ set -euo pipefail
 # And it still CONTAINS "-sonar-", which is what the controller matches on to recognise a
 # probe-capable build -- "v1.17.1.7-observer-sonar-dev-<hash>" satisfies that substring, so
 # widening the tag does not quietly drop these nodes out of discovery.
-export OTA_CHANNEL_TAG="sonar-dev"
+export OTA_CHANNEL_TAG="$SONAR_CHANNEL_TAG"
 # Carried in the ARTIFACT NAME too, so a .bin sitting in a downloads folder still says
 # what it is. Same no-dot rule as the version tag -- every filename parser downstream
 # (web flasher, release listing) splits on "-" and takes the trailing token as the hash.
-export FILENAME_CHANNEL_TAG="-sonar-dev"
+export FILENAME_CHANNEL_TAG="-$SONAR_CHANNEL_TAG"
 
 # --- controller identity -----------------------------------------------------
 # The controller PUBLIC key, compiled in so a node flashed from our release already
@@ -431,7 +456,7 @@ echo
 echo "  gh release create $RELEASE_TAG \\"
 echo "    $DIST/*.bin $DIST/manifests/*.json \\"
 echo "    --repo ${SONAR_RELEASE_REPO:-<owner>/<repo>} --target $BUILD_COMMIT \\"
-echo "    --title \"Sonar $RELEASE_TAG (dev)\""
+echo "    --title \"Sonar $RELEASE_TAG ($SONAR_CHANNEL)\""
 echo
 echo "         --target is REQUIRED. Without it gh tags the repository's default branch,"
 echo "         which is how v1.17.1.12-.19 all came to tag one stale commit on main while"
@@ -459,7 +484,7 @@ if [ "${SONAR_PUBLISH:-0}" = "1" ]; then
   gh release create "$RELEASE_TAG" \
     "$DIST"/*.bin "$DIST"/manifests/*.json \
     --repo "$SONAR_RELEASE_REPO" --target "$BUILD_COMMIT" \
-    --title "Sonar $RELEASE_TAG (dev)"
+    --title "Sonar $RELEASE_TAG ($SONAR_CHANNEL)"
 
   # VERIFY, because the whole failure this replaces was silent. gh accepts a --target it
   # then does not use if the tag already exists, so asking the API what the tag resolved to
