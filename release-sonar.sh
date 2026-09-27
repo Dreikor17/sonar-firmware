@@ -261,6 +261,27 @@ esac
 export FIRMWARE_VERSION
 
 RELEASE_TAG="${FIRMWARE_VERSION}.${FIRMWARE_BUILD_NUMBER}"
+
+# THE COMMIT THIS RELEASE IS BUILT FROM, resolved once, here, before anything is compiled.
+# It is what the tag must point at, and it is not the same thing as "the default branch".
+#
+# Releases v1.17.1.12 through .19 all tag 23bd6b92e -- the tip of `main`, untouched since
+# 2026-08-28 -- while their binaries were built from `dev`. `gh release create` targets the
+# repository's DEFAULT BRANCH when --target is omitted, so a release cut from dev silently
+# tagged main. The images were always correct (the built commit is in every asset filename
+# and in the manifest `hash`), but `git checkout v1.17.1.19` hands you month-old source, and
+# eight tags name one commit.
+BUILD_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+BUILD_COMMIT_SHORT="$(printf '%s' "$BUILD_COMMIT" | cut -c1-8)"
+# A dirty tree means the binaries contain changes no commit records, so the tag would point
+# at source that cannot reproduce them. Warn rather than refuse -- build.sh deliberately
+# leaves generated files unstaged, so "dirty" is normal here and only the operator knows
+# whether the difference matters.
+if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+  SONAR_TREE_DIRTY=1
+else
+  SONAR_TREE_DIRTY=0
+fi
 : "${SONAR_RELEASE_BASE:=https://github.com/${SONAR_RELEASE_REPO}/releases/download/${RELEASE_TAG}}"
 
 # build.sh invokes `python3`. On Windows/Git Bash the interpreter is usually just
@@ -404,9 +425,54 @@ echo "         Echo's /v mirror reads releases/latest/download/<variant>.json, s
 echo "         manifest left out of the release makes every node report"
 echo "         'ERR: manifest HTTP 502' on its next check."
 echo
+# --target is spelled out with the RESOLVED commit rather than $(git rev-parse HEAD) for
+# the reader to evaluate: the substitution runs whenever the line is finally pasted, which
+# may be in another checkout, after a branch switch, or days later. The literal cannot drift.
 echo "  gh release create $RELEASE_TAG \\"
 echo "    $DIST/*.bin $DIST/manifests/*.json \\"
-echo "    --repo <owner>/<repo> --target \$(git rev-parse HEAD) \\"
+echo "    --repo ${SONAR_RELEASE_REPO:-<owner>/<repo>} --target $BUILD_COMMIT \\"
 echo "    --title \"Sonar $RELEASE_TAG (dev)\""
 echo
+echo "         --target is REQUIRED. Without it gh tags the repository's default branch,"
+echo "         which is how v1.17.1.12-.19 all came to tag one stale commit on main while"
+echo "         their binaries were built from dev."
+echo
 echo "         Nothing needs copying to $OTA_MANIFEST_BASE_URL -- that host mirrors the release."
+echo
+echo "         Or let this script do it:  SONAR_PUBLISH=1 $0 $BUILD_NUMBER ..."
+
+if [ "${SONAR_PUBLISH:-0}" = "1" ]; then
+  if [ -z "${SONAR_RELEASE_REPO:-}" ]; then
+    echo "ERROR: SONAR_PUBLISH=1 needs SONAR_RELEASE_REPO=<owner>/<repo>" >&2
+    exit 1
+  fi
+  if [ "$BUILD_COMMIT" = "unknown" ]; then
+    echo "ERROR: cannot resolve HEAD, so the tag would have nothing honest to point at" >&2
+    exit 1
+  fi
+  if [ "$SONAR_TREE_DIRTY" = "1" ]; then
+    echo "WARNING: the tree was dirty at build time. $BUILD_COMMIT_SHORT does not fully" >&2
+    echo "         describe these binaries. Publishing anyway -- see SONAR_TREE_DIRTY." >&2
+  fi
+  echo
+  echo "publishing $RELEASE_TAG -> $BUILD_COMMIT_SHORT on $SONAR_RELEASE_REPO"
+  gh release create "$RELEASE_TAG" \
+    "$DIST"/*.bin "$DIST"/manifests/*.json \
+    --repo "$SONAR_RELEASE_REPO" --target "$BUILD_COMMIT" \
+    --title "Sonar $RELEASE_TAG (dev)"
+
+  # VERIFY, because the whole failure this replaces was silent. gh accepts a --target it
+  # then does not use if the tag already exists, so asking the API what the tag resolved to
+  # is the only thing that actually proves the release is reproducible from source.
+  landed="$(gh api "repos/$SONAR_RELEASE_REPO/git/refs/tags/$RELEASE_TAG" \
+              -q '.object.sha' 2>/dev/null || echo '')"
+  if [ "$landed" = "$BUILD_COMMIT" ]; then
+    echo "verified: $RELEASE_TAG -> $BUILD_COMMIT_SHORT (matches the build)"
+  else
+    echo "ERROR: $RELEASE_TAG points at ${landed:-<nothing>}, not the built commit" >&2
+    echo "       $BUILD_COMMIT. The binaries are fine -- the tag is not, and a checkout" >&2
+    echo "       of it will not reproduce them. Re-point it with:" >&2
+    echo "         git push <remote> $BUILD_COMMIT:refs/tags/$RELEASE_TAG --force" >&2
+    exit 1
+  fi
+fi
